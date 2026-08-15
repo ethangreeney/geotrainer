@@ -266,6 +266,30 @@ async function demoState() {
   return state
 }
 
+// Dedupe ledger for /round posts. A page reload (Chrome memory-saver, F5 on
+// the results screen) spawns a fresh userscript instance whose in-memory sent
+// set is empty, so it re-posts every round of the game it next intercepts —
+// which double-grades FSRS and duplicates dossiers. The server is the durable
+// layer: keys with a game token are dropped forever (tokens are single-use);
+// tokenless keys (older script versions) expire after 30 minutes so a genuine
+// later replay of the same location still grades.
+const SEEN_PATH = join(ROOT, 'seen.json')
+let seenPosts = null
+async function loadSeen() {
+  if (!seenPosts) {
+    try {
+      seenPosts = new Map(Object.entries(JSON.parse(await readFile(SEEN_PATH, 'utf8'))))
+    } catch {
+      seenPosts = new Map()
+    }
+  }
+  return seenPosts
+}
+function saveSeen() {
+  while (seenPosts.size > 1000) seenPosts.delete(seenPosts.keys().next().value)
+  writeFile(SEEN_PATH, JSON.stringify(Object.fromEntries(seenPosts))).catch(() => {})
+}
+
 const haversineKm = (a, b) => {
   const rad = (d) => (d * Math.PI) / 180
   const dLat = rad(b.lat - a.lat)
@@ -278,12 +302,23 @@ const haversineKm = (a, b) => {
 
 async function handleRound(payload) {
   const { location, mapId, roundNumber, score, source } = payload
+  const dupKey = payload.token
+    ? `t:${payload.token}:r${roundNumber ?? 0}`
+    : `p:${location?.panoId ?? `${location?.lat},${location?.lng}`}:r${roundNumber ?? 0}`
+  const seen = await loadSeen()
+  const prior = seen.get(dupKey)
+  if (prior && (payload.token || Date.now() - prior.ts < 30 * 60 * 1000)) {
+    console.log(`[coach] duplicate round dropped (already saved as ${prior.id})`)
+    return { ok: true, id: prior.id, duplicate: true, card: null }
+  }
   // A timed-out round records a (0,0) guess — that is "no guess", not the Atlantic.
   const guess =
     payload.guess && !(Math.abs(payload.guess.lat) < 0.001 && Math.abs(payload.guess.lng) < 0.001)
       ? payload.guess
       : null
   const id = `${Date.now()}_r${roundNumber ?? 0}`
+  seen.set(dupKey, { ts: Date.now(), id })
+  saveSeen()
   const dir = join(ROUNDS_DIR, id)
   await mkdir(dir, { recursive: true })
 

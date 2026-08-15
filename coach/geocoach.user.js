@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.4.0
+// @version      1.4.2
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -85,10 +85,11 @@
           `</div>`
         : '') +
       (url
-        ? `<div style="padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em">Open Plonkit guide ↗</div>`
+        ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none">Open Plonkit guide ↗</a>`
         : '')
-    el.addEventListener('click', () => {
-      if (url) window.open(url, '_blank')
+    el.addEventListener('click', (e) => {
+      // real <a> handles its own navigation; window.open covers body clicks
+      if (url && !e.target.closest('a')) window.open(url, '_blank')
       el.remove()
     })
     el.querySelector('.gc-close').addEventListener('click', (e) => {
@@ -103,11 +104,20 @@
     setTimeout(() => el.remove(), 45000)
   }
 
-  function post(key, payload) {
+  /** onAccepted fires only when the server actually recorded the round — a
+   * reloaded page re-posts everything it can see, and the server answers
+   * those with {duplicate:true}: no toast, no card, no downstream triggers. */
+  function post(key, payload, onAccepted) {
     if (sent.has(key)) return
     sent.add(key)
     const quiet = payload.source === 'duel' // ranked capture is silent
     const body = JSON.stringify(payload)
+    const accepted = (j) => {
+      if (j && j.duplicate) return
+      if (!quiet) toast('Round sent to coach', true)
+      if (j) showCard(j.card)
+      if (onAccepted) onAccepted()
+    }
     // GM_xmlhttpRequest when running under Tampermonkey; plain fetch otherwise
     // (Chrome allows https pages to reach localhost, and the server answers the
     // private-network preflight).
@@ -120,8 +130,9 @@
         timeout: 30000,
         onload: (res) => {
           if (res.status === 200) {
-            if (!quiet) toast('Round sent to coach', true)
-            try { showCard(JSON.parse(res.responseText).card) } catch {}
+            let j = null
+            try { j = JSON.parse(res.responseText) } catch {}
+            accepted(j)
           } else {
             sent.delete(key) // the next intercepted game-state response retries
             toast('Coach server error (' + res.status + ')', false)
@@ -143,9 +154,12 @@
         body,
       })
         .then((res) => {
-          if (!res.ok) sent.delete(key)
-          if (!res.ok || !quiet) toast(res.ok ? 'Round sent to coach' : 'Coach server error (' + res.status + ')', res.ok)
-          if (res.ok) res.json().then((j) => showCard(j.card)).catch(() => {})
+          if (!res.ok) {
+            sent.delete(key)
+            toast('Coach server error (' + res.status + ')', false)
+            return
+          }
+          res.json().then(accepted).catch(() => {})
         })
         .catch(() => {
           sent.delete(key)
@@ -167,11 +181,18 @@
       const loc = g.rounds && g.rounds[i]
       const guess = g.player.guesses[i]
       if (!loc || !guess) continue
-      if (i + 1 === 5 && !sent.has(g.token + ':rebuilt')) {
-        sent.add(g.token + ':rebuilt')
-        setTimeout(() => rebuildSilently('game finished'), 1500)
-      }
+      // The game-finished rebuild rides on the final round's ACCEPTED post, so
+      // a reload's re-posted game (all duplicates) can't rebuild a third time.
+      const finishTrigger =
+        i + 1 === 5
+          ? () => {
+              if (sent.has(g.token + ':rebuilt')) return
+              sent.add(g.token + ':rebuilt')
+              setTimeout(() => rebuildSilently('game finished'), 1500)
+            }
+          : null
       post(`${g.token}:${i + 1}`, {
+        token: g.token,
         mapId: g.map,
         mapName: g.mapName,
         roundNumber: i + 1,
@@ -183,7 +204,7 @@
           heading: loc.heading,
         },
         guess: { lat: guess.lat, lng: guess.lng },
-      })
+      }, finishTrigger)
     }
   }
 
@@ -215,6 +236,7 @@
           if (!round || !round.panorama) continue
           const pid = round.panorama.panoId
           post(`${d.gameId}:${guess.roundNumber}:duel`, {
+            token: `${d.gameId}:duel`,
             source: 'duel',
             mapId: null,
             mapName: 'Ranked duel',

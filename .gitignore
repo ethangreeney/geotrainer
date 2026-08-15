@@ -26,6 +26,7 @@ dist-ssr
 # GeoCoach personal data — never commit
 coach/config.json
 coach/state.json
+coach/seen.json
 coach/rounds/
 coach/catalog/
 coach/.last-coached
