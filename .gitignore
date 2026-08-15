@@ -31,6 +31,7 @@ coach/plonkit/*.md
 # GeoCoach personal data — never commit
 coach/config.json
 coach/state.json
+coach/state.backup-*.json
 coach/seen.json
 coach/rounds/
 coach/catalog/
