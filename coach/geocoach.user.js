@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.6.1
+// @version      1.6.2
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -455,9 +455,6 @@
       await gg(`${draftUrl}/publish`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       localStorage.setItem('gc-last-rebuild', String(Date.now()))
       toast(`Deck rebuilt (${reason}): ${deck.summary.due} due, ${deck.summary.introduced} new`, true)
-      const w = document.getElementById('geocoach-widget')
-      if (w) w.querySelector('.gc-status').textContent =
-        `Deck fresh: ${deck.summary.due} due, ${deck.summary.introduced} new, tier ${deck.summary.unlockedTiers}`
     } catch (err) {
       console.error('[geocoach] auto-rebuild failed', err)
     } finally {
@@ -465,50 +462,32 @@
     }
   }
 
-  function mountWidget() {
-    if (document.getElementById('geocoach-widget')) return
-    const w = document.createElement('div')
-    w.id = 'geocoach-widget'
-    w.style.cssText =
-      'position:fixed;bottom:16px;left:16px;z-index:999998;background:rgba(12,14,20,.94);' +
-      'color:#ece9e2;border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:12px 14px;' +
-      'font:500 12.5px/1.45 system-ui;max-width:250px;box-shadow:0 4px 18px rgba(0,0,0,.4)'
-    w.innerHTML =
-      '<div style="font-weight:700;margin-bottom:4px">GeoCoach</div>' +
-      '<div class="gc-status" style="color:#a8adb8;margin-bottom:8px">Checking…</div>' +
-      '<a class="gc-play" style="display:none;color:#7fd7a8;font-weight:700" href="#">Play trainer map</a>'
-    document.body.appendChild(w)
-    serverGet('/status')
-      .then((s) => {
-        w.querySelector('.gc-status').textContent =
-          `${s.due} due · ${s.unseen} unseen · tier ${s.unlockedTiers}`
-        const play = w.querySelector('.gc-play')
-        play.style.display = 'inline-block'
-        play.href = `https://www.geoguessr.com/maps/${s.trainerMapId}/play`
-        // One rebuild per sitting: reviews come due with elapsed time, so the
-        // deck is refreshed when you arrive after an hour-plus away. Between
-        // games the game-finished trigger is the only one that fires.
-        const last = Number(localStorage.getItem('gc-last-rebuild') || 0)
-        if (Date.now() - last > 60 * 60 * 1000) rebuildSilently('arrival')
-      })
-      .catch(() => (w.querySelector('.gc-status').textContent = 'Coach server offline'))
+  // One rebuild per sitting: reviews come due with elapsed time, so the deck
+  // is refreshed when you arrive after an hour-plus away. Between games the
+  // game-finished trigger is the only one that fires. Runs once per return to
+  // a non-game page, not on the 3s poll, so an offline server can't spam.
+  let arrivalChecked = false
+  function checkArrival() {
+    if (arrivalChecked) return
+    arrivalChecked = true
+    const last = Number(localStorage.getItem('gc-last-rebuild') || 0)
+    if (Date.now() - last > 60 * 60 * 1000) rebuildSilently('arrival')
   }
 
   function init() {
     resolveMyId()
     setInterval(pollDuel, 10000)
-    // The widget lives on non-game pages only — never over an active round.
-    const placeWidget = () => {
+    const watchPage = () => {
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
-      const existing = document.getElementById('geocoach-widget')
-      if (inGame && existing) existing.remove()
-      if (!inGame) {
+      if (inGame) {
+        arrivalChecked = false
+      } else {
         removeCard() // the last round's card follows you out of the game otherwise
-        mountWidget()
+        checkArrival()
       }
     }
-    placeWidget()
-    setInterval(placeWidget, 3000)
+    watchPage()
+    setInterval(watchPage, 3000)
   }
 
   if (document.readyState === 'loading') {
