@@ -220,7 +220,7 @@ describe('unlockedTiers', () => {
 })
 
 describe('buildDeck: empty state', () => {
-  it('introduces maxNew metas from tier one and nothing else', () => {
+  it('fills the deck with tier-one material when nothing is due', () => {
     const deck = buildDeck({}, CATALOG, {}, T0)
     expect(deck.metas).toEqual(T1.slice(0, 5).map((name) => ({ name, mapId: 'lm-tier1' })))
     expect(deck.introduced).toEqual(T1.slice(0, 5))
@@ -237,14 +237,14 @@ describe('buildDeck: empty state', () => {
     for (const meta of deck.metas) expect(names.has(meta.name)).toBe(true)
   })
 
-  it('honours a custom maxNew', () => {
-    const deck = buildDeck({}, CATALOG, { maxNew: 2 }, T0)
+  it('honours minNew as the floor when minSize gives no extra room', () => {
+    const deck = buildDeck({}, CATALOG, { minNew: 2, minSize: 0 }, T0)
     expect(deck.introduced).toEqual(T1.slice(0, 2))
     expect(deck.metas.length).toBe(2)
   })
 
-  it('introduces nothing when maxNew is zero', () => {
-    const deck = buildDeck({}, CATALOG, { maxNew: 0 }, T0)
+  it('introduces nothing when new material is switched off', () => {
+    const deck = buildDeck({}, CATALOG, { minNew: 0, minSize: 0 }, T0)
     expect(deck.metas).toEqual([])
     expect(deck.introduced).toEqual([])
   })
@@ -257,7 +257,7 @@ describe('buildDeck: composition', () => {
       [T1[1]]: card({ due: '2026-02-01T00:00:00Z', stability: 10, scheduledDays: 10 }),
       [T1[2]]: card({ due: '2026-02-28T00:00:00Z', stability: 3, scheduledDays: 3 }),
     }
-    const deck = buildDeck(cards, CATALOG, { maxNew: 0, minSize: 0 }, T0)
+    const deck = buildDeck(cards, CATALOG, { minNew: 0, minSize: 0 }, T0)
     const names = deck.metas.map((m) => m.name)
     const recall = (name) => fsrs().get_retrievability(cards[name], T0, false)
 
@@ -273,7 +273,7 @@ describe('buildDeck: composition', () => {
       [T1[0]]: card({ due: T0.toISOString(), stability: 10, scheduledDays: 10 }), // due this instant
       [T1[1]]: card({ due: plus(T0, -20).toISOString(), stability: 10, scheduledDays: 10 }),
     }
-    const deck = buildDeck(cards, CATALOG, { maxNew: 0, minSize: 0 }, T0)
+    const deck = buildDeck(cards, CATALOG, { minNew: 0, minSize: 0 }, T0)
     expect(deck.metas.map((m) => m.name)).toEqual([T1[1], T1[0]])
   })
 
@@ -283,10 +283,23 @@ describe('buildDeck: composition', () => {
       [T1[1]]: card({ due: plus(T0, 3).toISOString() }), // padding
       [T1[2]]: card({ due: plus(T0, 9).toISOString() }), // padding
     }
-    const deck = buildDeck(cards, CATALOG, { maxNew: 1, minSize: 4 }, T0)
-    expect(deck.metas.map((m) => m.name)).toEqual([T1[0], T1[3], T1[1], T1[2]])
-    expect(deck.introduced).toEqual([T1[3]])
-    expect(deck.stats).toMatchObject({ due: 1, introduced: 1, padding: 2, total: 4 })
+    // room for 3 beyond the due card, but tier 1 only has two unseen left —
+    // new material takes priority and padding covers just the shortfall
+    const deck = buildDeck(cards, CATALOG, { minNew: 1, minSize: 4 }, T0)
+    expect(deck.metas.map((m) => m.name)).toEqual([T1[0], T1[3], T1[4], T1[1]])
+    expect(deck.introduced).toEqual([T1[3], T1[4]])
+    expect(deck.stats).toMatchObject({ due: 1, introduced: 2, padding: 1, total: 4 })
+  })
+
+  it('fills spare capacity with new material, spilling into the next unlocked tier', () => {
+    const cards = {
+      ...mastered(T1, 4, { due: plus(T0, 30).toISOString() }), // 80% of tier 1 → tier 2 open
+      [T1[0]]: card({ due: plus(T0, -1).toISOString() }), // due
+    }
+    const deck = buildDeck(cards, CATALOG, { minNew: 1, minSize: 5 }, T0)
+    expect(deck.stats.unlockedTiers).toBe(2)
+    expect(deck.introduced).toEqual([T1[4], T2[0], T2[1], T2[2]])
+    expect(deck.stats).toMatchObject({ due: 1, introduced: 4, padding: 0, total: 5 })
   })
 
   it('gathers due cards from every unlocked tier', () => {
@@ -295,7 +308,7 @@ describe('buildDeck: composition', () => {
       [T2[0]]: card({ due: plus(T0, -2).toISOString(), stability: 8 }),
       [T1[0]]: card({ due: plus(T0, -1).toISOString(), stability: 30, scheduledDays: 30 }),
     }
-    const deck = buildDeck(cards, CATALOG, { maxNew: 0, minSize: 0 }, T0)
+    const deck = buildDeck(cards, CATALOG, { minNew: 0, minSize: 0 }, T0)
     expect(deck.stats.unlockedTiers).toBe(2)
     expect(deck.metas).toEqual([
       { name: T2[0], mapId: 'lm-tier2' },
@@ -303,16 +316,16 @@ describe('buildDeck: composition', () => {
     ])
   })
 
-  it('draws new metas only from the lowest tier that still has any', () => {
+  it('introduces from tier 2 once tier 1 is exhausted, never from a locked tier', () => {
     const cards = { ...mastered(T1, 5), ...mastered(T2, 3) }
-    const deck = buildDeck(cards, CATALOG, { maxNew: 5, minSize: 0 }, T0)
+    const deck = buildDeck(cards, CATALOG, { minNew: 5, minSize: 0 }, T0)
     expect(deck.introduced).toEqual([T2[3], T2[4]]) // tier 2 has only two left
     expect(deck.stats.unlockedTiers).toBe(2)
     for (const meta of deck.metas) expect(T3).not.toContain(meta.name)
   })
 
   it('never offers a meta from a locked tier', () => {
-    const deck = buildDeck({}, CATALOG, { maxNew: 99, minSize: 99 }, T0)
+    const deck = buildDeck({}, CATALOG, { minNew: 99, minSize: 99 }, T0)
     const names = deck.metas.map((m) => m.name)
     expect(names).toEqual(T1)
     for (const name of [...T2, ...T3]) expect(names).not.toContain(name)
@@ -325,7 +338,7 @@ describe('buildDeck: composition', () => {
       { ...CATALOG[1], metas: [shared, ...T2] }, // tier 2 repeats a tier 1 meta
     ]
     const cards = { ...mastered(T1, 5, { due: plus(T0, -3).toISOString() }) }
-    const deck = buildDeck(cards, catalog, { maxNew: 5, minSize: 20 }, T0)
+    const deck = buildDeck(cards, catalog, { minNew: 5, minSize: 20 }, T0)
     const names = deck.metas.map((m) => m.name)
     expect(names.filter((n) => n === shared)).toHaveLength(1)
     expect(new Set(names).size).toBe(names.length)
@@ -346,7 +359,7 @@ describe('buildDeck: padding', () => {
   }
 
   it('pads to minSize with the cards closest to falling due', () => {
-    const deck = buildDeck(everything(), CATALOG, { maxNew: 5, minSize: 6 }, T0)
+    const deck = buildDeck(everything(), CATALOG, { minNew: 5, minSize: 6 }, T0)
     expect(deck.introduced).toEqual([]) // nothing unseen left
     expect(deck.metas.length).toBe(6)
     expect(deck.stats).toMatchObject({ due: 2, padding: 4 })
@@ -355,7 +368,7 @@ describe('buildDeck: padding', () => {
   })
 
   it('does not pad a deck that already meets minSize', () => {
-    const deck = buildDeck(everything(), CATALOG, { maxNew: 5, minSize: 2 }, T0)
+    const deck = buildDeck(everything(), CATALOG, { minNew: 5, minSize: 2 }, T0)
     expect(deck.metas.length).toBe(2)
     expect(deck.stats.padding).toBe(0)
   })
@@ -367,7 +380,7 @@ describe('buildDeck: padding', () => {
       [T1[1]]: card({ due: plus(T0, 2).toISOString() }),
       [T1[2]]: card({ due: plus(T0, 4).toISOString() }),
     }
-    const deck = buildDeck(cards, small, { maxNew: 5, minSize: 18 }, T0)
+    const deck = buildDeck(cards, small, { minNew: 5, minSize: 18 }, T0)
     expect(deck.metas.length).toBe(5) // 1 due + 2 new + 2 padding, and that is all there is
     expect(deck.metas.length).toBeLessThan(18)
     expect(deck.stats).toMatchObject({ due: 1, introduced: 2, padding: 2 })
@@ -375,14 +388,14 @@ describe('buildDeck: padding', () => {
 
   it('counts new metas toward minSize before padding', () => {
     const cards = { [T1[0]]: card({ due: plus(T0, 5).toISOString() }) }
-    const deck = buildDeck(cards, CATALOG, { maxNew: 4, minSize: 4 }, T0)
+    const deck = buildDeck(cards, CATALOG, { minNew: 4, minSize: 4 }, T0)
     expect(deck.stats).toMatchObject({ due: 0, introduced: 4, padding: 0, total: 4 })
   })
 
   it('applies the documented defaults of 5 new and 18 minimum', () => {
     const cards = everything()
     const withDefaults = buildDeck(cards, CATALOG, {}, T0)
-    expect(withDefaults).toEqual(buildDeck(cards, CATALOG, { maxNew: 5, minSize: 18 }, T0))
+    expect(withDefaults).toEqual(buildDeck(cards, CATALOG, { minNew: 5, minSize: 18 }, T0))
     expect(withDefaults.metas.length).toBe(15) // every card there is, still under 18
   })
 })
@@ -431,7 +444,7 @@ describe('deckSummary', () => {
   it('tracks the same ladder the deck is built from', () => {
     const cards = { ...mastered(T1, 5, { due: plus(T0, -1).toISOString() }) }
     const summary = deckSummary(cards, CATALOG, T0)
-    const deck = buildDeck(cards, CATALOG, { maxNew: 0, minSize: 0 }, T0)
+    const deck = buildDeck(cards, CATALOG, { minNew: 0, minSize: 0 }, T0)
     expect(summary.due).toBe(deck.stats.due)
     expect(summary.unlockedTiers).toBe(deck.stats.unlockedTiers)
   })

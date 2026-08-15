@@ -594,7 +594,7 @@ const server = createServer(async (req, res) => {
     }
     const state = await loadState()
     const now = new Date()
-    const deck = buildDeck(state.deckCards, toLadder(catalogs), { maxNew: 5, minSize: 18 }, now)
+    const deck = buildDeck(state.deckCards, toLadder(catalogs), { minNew: 5, minSize: 18 }, now)
 
     // Up to 4 locations per chosen meta, so one or two games sweep the deck.
     const byMap = new Map(catalogs.map((c) => [c.mapId, c]))

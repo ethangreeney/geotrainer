@@ -31,7 +31,7 @@ export const PINPOINT_SCORE = 4500
 export const MASTERY_DAYS = 7
 export const TIER_MASTERY_RATIO = 0.8
 
-const DEFAULT_MAX_NEW = 5
+const DEFAULT_MIN_NEW = 5
 const DEFAULT_MIN_SIZE = 18
 
 function toStored(card) {
@@ -139,15 +139,19 @@ function unlockedMetas(catalog, tiers) {
 const dueAt = (card) => new Date(card.due).getTime()
 
 /**
- * Assembles the next session: everything owed, a trickle of new material, and
- * near-future work only as filler.
+ * Assembles the next session: everything owed, then as much new material as the
+ * deck has room for, with near-future review only as last-resort filler.
  *
  * Due cards lead in retrievability order so the weakest memory is answered while
- * attention is freshest. New metas come from a single tier — the lowest one with
- * anything left — because running ahead into a harder map is how a ladder stops
- * being a ladder. Padding is a comfort, not a quota: if the catalog can't fill
- * minSize the deck is simply short, since inventing a card would corrupt the
- * schedule to pad a number.
+ * attention is freshest. New metas fill the rest of the deck up to minSize —
+ * spare capacity goes to unseen material rather than re-serving cards the player
+ * already holds, so a light review day means more of the ladder, not Colombia on
+ * loop. minNew keeps new material flowing even when reviews alone fill the deck.
+ * New metas drain the lowest unlocked tier before spilling upward, and locked
+ * tiers stay locked. Padding — already-held cards, soonest-due first — appears
+ * only once the unseen supply runs dry, and if even that can't fill minSize the
+ * deck is simply short, since inventing a card would corrupt the schedule to
+ * pad a number.
  *
  * `metas` is ordered due → new → padding and `stats` gives the size of each
  * run, so a caller can tell them apart. That matters: padded metas are not owed
@@ -157,7 +161,7 @@ const dueAt = (card) => new Date(card.due).getTime()
  * padding as free practice.
  */
 export function buildDeck(cards, catalog, opts = {}, now) {
-  const maxNew = opts?.maxNew ?? DEFAULT_MAX_NEW
+  const minNew = opts?.minNew ?? DEFAULT_MIN_NEW
   const minSize = opts?.minSize ?? DEFAULT_MIN_SIZE
   const tiers = unlockedTiers(cards, catalog)
   const entries = unlockedMetas(catalog ?? [], tiers)
@@ -170,13 +174,11 @@ export function buildDeck(cards, catalog, opts = {}, now) {
     }))
     .sort((a, b) => a.retrievability - b.retrievability || dueAt(cards[a.name]) - dueAt(cards[b.name]))
 
-  // entries ascend by tier, so the first unseen meta names the lowest tier that
-  // still has anything to teach.
-  const freshTier = entries.find((e) => !cards[e.name])?.tier
-  const introduced =
-    freshTier === undefined
-      ? []
-      : entries.filter((e) => e.tier === freshTier && !cards[e.name]).slice(0, maxNew)
+  // entries ascend by tier, so a plain slice drains the lowest tier with
+  // anything left to teach before touching the next unlocked one.
+  const introduced = entries
+    .filter((e) => !cards[e.name])
+    .slice(0, Math.max(minNew, minSize - due.length))
 
   const chosen = new Set([...due, ...introduced].map((e) => e.name))
   const padding = entries
