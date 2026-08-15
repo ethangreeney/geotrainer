@@ -23,6 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 
+# Plonk It snapshot — third-party content, regenerate with coach/plonkit/scrape.mjs
+coach/plonkit/img/
+coach/plonkit/raw/
+coach/plonkit/*.md
+
 # GeoCoach personal data — never commit
 coach/config.json
 coach/state.json
