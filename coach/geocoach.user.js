@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.6.3
+// @version      1.6.4
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -488,6 +488,24 @@
   function init() {
     resolveMyId()
     setInterval(pollDuel, 10000)
+    // The last round's card outlives both removal triggers: "Show results"
+    // keeps the /game/<token> path and serves no new round, so the card sat
+    // on top of the final breakdown. Catch the advance click itself — the
+    // same button is "Next round" mid-game, where removing is also right.
+    document.addEventListener(
+      'click',
+      (e) => {
+        const btn = e.target instanceof Element && e.target.closest('button,a,[data-qa]')
+        if (!btn) return
+        if (btn.closest('#geocoach-card')) return
+        if (
+          (btn.getAttribute('data-qa') || '').includes('close-round-result') ||
+          /\b(show|view)\s+results\b/i.test(btn.textContent || '')
+        )
+          removeCard()
+      },
+      true
+    )
     const watchPage = () => {
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
       if (inGame) {
