@@ -12,6 +12,7 @@
  *
  * Run:  node coach/server.mjs     (listens on 127.0.0.1:5177)
  */
+import { execFile } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -86,7 +87,18 @@ async function metaFromCatalogs(panoId) {
   if (!panoId) return null
   for (const c of await loadCatalogs()) {
     const hit = c.locations.find((l) => l.panoId === panoId)
-    if (hit && hit.metaName) return { metaName: hit.metaName, country: hit.country, note: null }
+    if (hit && hit.metaName) {
+      // the catalog knows the meta name; LM's per-pano endpoint (queried with
+      // the SOURCE map id it recognises) adds the annotated lesson + images
+      const lm = await lmMeta(c.mapId, panoId)
+      return {
+        metaName: hit.metaName,
+        country: hit.country,
+        note: lm?.note ?? null,
+        images: lm?.images ?? [],
+        footer: lm?.footer ?? null,
+      }
+    }
   }
   return null
 }
@@ -118,11 +130,13 @@ async function countryOf(lat, lng) {
 async function saveTiles(panoId, dir) {
   const saved = []
   const jobs = []
-  for (let y = 0; y < 2; y++) {
-    for (let x = 0; x < 4; x++) {
+  // zoom 3 = 8x4 tiles (4096x2048): enough resolution to read mid-distance
+  // detail from a single tile, while pano.jpg gives the one-look overview
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 8; x++) {
       const url =
         `https://streetviewpixels-pa.googleapis.com/v1/tile?cb_client=maps_sv.tactile` +
-        `&panoid=${encodeURIComponent(panoId)}&x=${x}&y=${y}&zoom=2&nbt=1&fover=2`
+        `&panoid=${encodeURIComponent(panoId)}&x=${x}&y=${y}&zoom=3&nbt=1&fover=2`
       jobs.push(
         fetch(url, {
           signal: AbortSignal.timeout(10000),
@@ -141,6 +155,12 @@ async function saveTiles(panoId, dir) {
     }
   }
   await Promise.all(jobs)
+  if (saved.length) {
+    // one composite image per round so the coach reads a single file
+    await new Promise((resolve) => {
+      execFile('python3', [join(ROOT, 'stitch.py'), dir], () => resolve())
+    })
+  }
   return saved.sort()
 }
 
@@ -342,7 +362,20 @@ async function handleRound(payload) {
   console.log(
     `[coach] round ${id}: ${answer.name}${guessed ? ` (guessed ${guessed.name}${correctCountry ? ', correct' : ''})` : ''}, ${tiles.length} tiles${meta ? `, meta: ${round.metaName ?? 'yes'}` : ''}`,
   )
-  return { ok: true, id }
+  return {
+    ok: true,
+    id,
+    // the userscript renders this as the post-round lesson card
+    card: meta
+      ? {
+          metaName: round.metaName,
+          correct: correctCountry,
+          note: meta.note ?? null,
+          images: meta.images ?? [],
+          footer: meta.footer ?? null,
+        }
+      : null,
+  }
 }
 
 const server = createServer(async (req, res) => {

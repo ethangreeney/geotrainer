@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.1.0
+// @version      1.2.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -33,6 +33,35 @@
   // One send per (game, round), whichever path notices it first.
   const sent = new Set()
 
+  /** Post-round lesson card: the meta you were meant to spot, LM's own words. */
+  function showCard(card) {
+    if (!card || (!card.note && !card.metaName)) return
+    document.getElementById('geocoach-card')?.remove()
+    const el = document.createElement('div')
+    el.id = 'geocoach-card'
+    el.style.cssText =
+      'position:fixed;bottom:76px;right:18px;z-index:999998;max-width:360px;' +
+      'background:rgba(18,22,18,.96);color:#e9ede8;border:1px solid rgba(255,255,255,.14);' +
+      'border-radius:12px;padding:14px 16px;font:13px/1.5 system-ui;box-shadow:0 12px 40px rgba(0,0,0,.5)'
+    const badge = card.correct
+      ? '<span style="color:#7fd6a4;font-weight:700">✓ got it</span>'
+      : '<span style="color:#e8b04b;font-weight:700">✗ the clue you missed</span>'
+    el.innerHTML =
+      `<div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:6px">` +
+      `<b style="font-size:14px">${card.metaName ?? ''}</b>${badge}</div>` +
+      `<div>${card.note ?? ''}</div>` +
+      (card.images && card.images.length
+        ? `<div style="display:flex;gap:6px;margin-top:8px">` +
+          card.images.slice(0, 2).map((u) => `<img src="${u}" style="width:50%;border-radius:8px">`).join('') +
+          `</div>`
+        : '') +
+      (card.footer ? `<div style="margin-top:8px;font-size:11px;opacity:.65">${card.footer}</div>` : '') +
+      `<div style="margin-top:8px;font-size:11px;opacity:.5">click to dismiss</div>`
+    el.addEventListener('click', () => el.remove())
+    document.body.appendChild(el)
+    setTimeout(() => el.remove(), 45000)
+  }
+
   function post(key, payload) {
     if (sent.has(key)) return
     sent.add(key)
@@ -48,8 +77,10 @@
         data: body,
         timeout: 30000,
         onload: (res) => {
-          if (res.status === 200) toast('Round sent to coach', true)
-          else {
+          if (res.status === 200) {
+            toast('Round sent to coach', true)
+            try { showCard(JSON.parse(res.responseText).card) } catch {}
+          } else {
             sent.delete(key) // let the poller retry
             toast('Coach server error (' + res.status + ')', false)
           }
@@ -72,6 +103,7 @@
         .then((res) => {
           if (!res.ok) sent.delete(key)
           toast(res.ok ? 'Round sent to coach' : 'Coach server error (' + res.status + ')', res.ok)
+          if (res.ok) res.json().then((j) => showCard(j.card)).catch(() => {})
         })
         .catch(() => {
           sent.delete(key)
