@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.6.0
+// @version      1.6.1
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -104,6 +104,9 @@
         ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none">Open Plonkit guide ↗</a>`
         : '')
     el.appendChild(wrap)
+    // Set by both gestures (move-drag and resize) so the click that fires on
+    // release doesn't read as "open the guide and dismiss".
+    let dragMoved = false
     // Corner grip: drag to resize; the chosen size sticks for future cards.
     const grip = document.createElement('div')
     grip.className = 'gc-grip'
@@ -115,6 +118,7 @@
       if (e.button !== 0) return
       e.preventDefault()
       e.stopPropagation()
+      dragMoved = true // a grip press is a resize, never a card click
       const rect = el.getBoundingClientRect()
       // Anchor top-left so the card grows toward the cursor.
       el.style.left = rect.left + 'px'
@@ -138,13 +142,13 @@
           'gc-card-pos',
           JSON.stringify({ left: parseFloat(el.style.left), top: parseFloat(el.style.top) }),
         )
+        setTimeout(() => (dragMoved = false), 0) // let the click handler see the resize first
       }
       addEventListener('pointermove', resize)
       addEventListener('pointerup', up)
     })
     // Drag anywhere on the card to move it; it remembers where you left it
     // (position persists in localStorage and applies to every future card).
-    let dragMoved = false
     try {
       const pos = JSON.parse(localStorage.getItem('gc-card-pos'))
       if (pos && typeof pos.left === 'number' && typeof pos.top === 'number') {
