@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.5.0
+// @version      1.6.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -64,15 +64,28 @@
     el.id = 'geocoach-card'
     el.style.cssText =
       'position:fixed;bottom:80px;right:16px;z-index:999998;width:380px;max-width:calc(100vw - 32px);' +
+      'max-height:calc(100vh - 120px);display:flex;flex-direction:column;' +
       'background:linear-gradient(165deg,#2b1b58 0%,#1a1038 100%);color:#e8e4f6;' +
       'border:1px solid rgba(255,255,255,.14);border-radius:16px;overflow:hidden;' +
       'box-shadow:0 16px 48px rgba(5,0,25,.6);font-size:13px;line-height:1.55;' +
       (url ? 'cursor:pointer;' : 'cursor:grab;') +
       'opacity:0;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease'
+    // Size persists like position: the resize grip stores the card's width and
+    // height cap, so every card arrives at the size you chose.
+    try {
+      const size = JSON.parse(localStorage.getItem('gc-card-size'))
+      if (size && size.w) el.style.width = Math.max(300, Math.min(innerWidth - 24, size.w)) + 'px'
+      if (size && size.h) el.style.maxHeight = Math.max(160, Math.min(innerHeight - 24, size.h)) + 'px'
+    } catch {}
     const badge = card.correct
       ? '<span style="background:#a3e961;color:#1c2a08;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>'
       : '<span style="background:#ffb84c;color:#33230a;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✗ Missed clue</span>'
-    el.innerHTML =
+    // Content scrolls inside the card; the card itself never leaves the screen.
+    // Images stay full-width but are height-capped (object-fit keeps the whole
+    // photo visible) so one tall Plonkit image can't blow the card up.
+    const wrap = document.createElement('div')
+    wrap.style.cssText = 'flex:1 1 auto;min-height:0;overflow-y:auto'
+    wrap.innerHTML =
       `<div style="padding:14px 16px 12px">` +
       `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px">` +
       `<b style="font-size:15px;letter-spacing:.01em">${card.metaName ?? ''}</b>` +
@@ -81,12 +94,54 @@
       `<div style="color:#d6d0ea">${card.note ?? ''}</div></div>` +
       (card.images && card.images.length
         ? `<div style="display:grid;gap:2px">` +
-          card.images.slice(0, 2).map((u) => `<img src="${u}" style="width:100%;display:block">`).join('') +
+          card.images
+            .slice(0, 2)
+            .map((u) => `<img src="${u}" style="width:100%;display:block;max-height:38vh;object-fit:contain;background:#150c33">`)
+            .join('') +
           `</div>`
         : '') +
       (url
         ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none">Open Plonkit guide ↗</a>`
         : '')
+    el.appendChild(wrap)
+    // Corner grip: drag to resize; the chosen size sticks for future cards.
+    const grip = document.createElement('div')
+    grip.className = 'gc-grip'
+    grip.style.cssText =
+      'position:absolute;right:0;bottom:0;width:20px;height:20px;cursor:nwse-resize;z-index:2;' +
+      'background:linear-gradient(135deg,transparent 55%,rgba(255,255,255,.35) 55%)'
+    el.appendChild(grip)
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return
+      e.preventDefault()
+      e.stopPropagation()
+      const rect = el.getBoundingClientRect()
+      // Anchor top-left so the card grows toward the cursor.
+      el.style.left = rect.left + 'px'
+      el.style.top = rect.top + 'px'
+      el.style.right = 'auto'
+      el.style.bottom = 'auto'
+      const resize = (ev) => {
+        el.style.transition = 'none'
+        el.style.width = Math.max(300, Math.min(640, ev.clientX - rect.left + 8)) + 'px'
+        el.style.maxHeight = 'none'
+        el.style.height = Math.max(180, Math.min(innerHeight - rect.top - 10, ev.clientY - rect.top + 8)) + 'px'
+      }
+      const up = () => {
+        removeEventListener('pointermove', resize)
+        removeEventListener('pointerup', up)
+        localStorage.setItem(
+          'gc-card-size',
+          JSON.stringify({ w: parseFloat(el.style.width), h: parseFloat(el.style.height) }),
+        )
+        localStorage.setItem(
+          'gc-card-pos',
+          JSON.stringify({ left: parseFloat(el.style.left), top: parseFloat(el.style.top) }),
+        )
+      }
+      addEventListener('pointermove', resize)
+      addEventListener('pointerup', up)
+    })
     // Drag anywhere on the card to move it; it remembers where you left it
     // (position persists in localStorage and applies to every future card).
     let dragMoved = false
@@ -100,9 +155,10 @@
       }
     } catch {}
     el.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || e.target.closest('a,.gc-close')) return
-      e.preventDefault() // stops native image-drag from hijacking the gesture
+      if (e.button !== 0 || e.target.closest('a,.gc-close,.gc-grip')) return
       const rect = el.getBoundingClientRect()
+      if (e.clientX > rect.right - 16 && wrap.scrollHeight > wrap.clientHeight) return // scrollbar
+      e.preventDefault() // stops native image-drag from hijacking the gesture
       const offX = e.clientX - rect.left
       const offY = e.clientY - rect.top
       const startX = e.clientX
@@ -154,11 +210,11 @@
   function post(key, payload, onAccepted) {
     if (sent.has(key)) return
     sent.add(key)
-    const quiet = payload.source === 'duel' // ranked capture is silent
     const body = JSON.stringify(payload)
+    // Success is silent — the card (or its absence) is the signal. Only
+    // failures toast, since those need acting on.
     const accepted = (j) => {
       if (j && j.duplicate) return
-      if (!quiet) toast('Round sent to coach', true)
       if (j) showCard(j.card)
       if (onAccepted) onAccepted()
     }
@@ -442,7 +498,10 @@
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
       const existing = document.getElementById('geocoach-widget')
       if (inGame && existing) existing.remove()
-      if (!inGame) mountWidget()
+      if (!inGame) {
+        removeCard() // the last round's card follows you out of the game otherwise
+        mountWidget()
+      }
     }
     placeWidget()
     setInterval(placeWidget, 3000)
