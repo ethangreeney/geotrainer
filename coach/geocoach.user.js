@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.4.2
+// @version      1.5.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -67,7 +67,7 @@
       'background:linear-gradient(165deg,#2b1b58 0%,#1a1038 100%);color:#e8e4f6;' +
       'border:1px solid rgba(255,255,255,.14);border-radius:16px;overflow:hidden;' +
       'box-shadow:0 16px 48px rgba(5,0,25,.6);font-size:13px;line-height:1.55;' +
-      (url ? 'cursor:pointer;' : '') +
+      (url ? 'cursor:pointer;' : 'cursor:grab;') +
       'opacity:0;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease'
     const badge = card.correct
       ? '<span style="background:#a3e961;color:#1c2a08;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>'
@@ -87,7 +87,51 @@
       (url
         ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none">Open Plonkit guide ↗</a>`
         : '')
+    // Drag anywhere on the card to move it; it remembers where you left it
+    // (position persists in localStorage and applies to every future card).
+    let dragMoved = false
+    try {
+      const pos = JSON.parse(localStorage.getItem('gc-card-pos'))
+      if (pos && typeof pos.left === 'number' && typeof pos.top === 'number') {
+        el.style.right = 'auto'
+        el.style.bottom = 'auto'
+        el.style.left = Math.max(0, Math.min(innerWidth - 100, pos.left)) + 'px'
+        el.style.top = Math.max(0, Math.min(innerHeight - 60, pos.top)) + 'px'
+      }
+    } catch {}
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.target.closest('a,.gc-close')) return
+      e.preventDefault() // stops native image-drag from hijacking the gesture
+      const rect = el.getBoundingClientRect()
+      const offX = e.clientX - rect.left
+      const offY = e.clientY - rect.top
+      const startX = e.clientX
+      const startY = e.clientY
+      const move = (ev) => {
+        if (!dragMoved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return
+        dragMoved = true
+        el.style.transition = 'none'
+        el.style.right = 'auto'
+        el.style.bottom = 'auto'
+        el.style.left = Math.max(0, Math.min(innerWidth - 100, ev.clientX - offX)) + 'px'
+        el.style.top = Math.max(0, Math.min(innerHeight - 60, ev.clientY - offY)) + 'px'
+      }
+      const up = () => {
+        removeEventListener('pointermove', move)
+        removeEventListener('pointerup', up)
+        if (dragMoved) {
+          localStorage.setItem(
+            'gc-card-pos',
+            JSON.stringify({ left: parseFloat(el.style.left), top: parseFloat(el.style.top) }),
+          )
+          setTimeout(() => (dragMoved = false), 0) // let the click handler see the drag first
+        }
+      }
+      addEventListener('pointermove', move)
+      addEventListener('pointerup', up)
+    })
     el.addEventListener('click', (e) => {
+      if (dragMoved) return // that was a drag, not a click
       // real <a> handles its own navigation; window.open covers body clicks
       if (url && !e.target.closest('a')) window.open(url, '_blank')
       el.remove()
