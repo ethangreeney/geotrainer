@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.2.0
+// @version      1.3.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -212,9 +212,13 @@
 
   let rebuilding = false
 
-  /** Rebuild without a widget: used by the automatic triggers. */
+  /** All rebuilds are automatic: after a game finishes, and on arriving at the
+   * site with reviews due (or a deck that has never been built). The throttle
+   * stops the menu re-mount from repeating the game-finished rebuild. */
   async function rebuildSilently(reason) {
     if (rebuilding) return
+    const last = Number(localStorage.getItem('gc-last-rebuild') || 0)
+    if (reason !== 'game finished' && Date.now() - last < 3 * 60 * 1000) return
     rebuilding = true
     try {
       const deck = await serverGet('/deck')
@@ -234,6 +238,7 @@
         }),
       })
       await gg(`${draftUrl}/publish`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      localStorage.setItem('gc-last-rebuild', String(Date.now()))
       toast(`Deck rebuilt (${reason}): ${deck.summary.due} due, ${deck.summary.introduced} new`, true)
       const w = document.getElementById('geocoach-widget')
       if (w) w.querySelector('.gc-status').textContent =
@@ -242,46 +247,6 @@
       console.error('[geocoach] auto-rebuild failed', err)
     } finally {
       rebuilding = false
-    }
-  }
-
-  async function rebuildDeck(widget) {
-    const status = widget.querySelector('.gc-status')
-    try {
-      status.textContent = 'Composing deck…'
-      const deck = await serverGet('/deck')
-      if (!deck.customCoordinates || deck.customCoordinates.length < 5) {
-        status.textContent = 'Deck too small — play more rounds first'
-        return
-      }
-      status.textContent = `Uploading ${deck.customCoordinates.length} locations…`
-      const draftUrl = `https://www.geoguessr.com/api/v4/user-maps/drafts/${deck.trainerMapId}`
-      const draft = await gg(draftUrl)
-      await gg(draftUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          avatar: draft.avatar,
-          description: deck.description || draft.description || 'Auto-generated spaced-repetition deck',
-          highlighted: draft.highlighted,
-          name: draft.name,
-          customCoordinates: deck.customCoordinates,
-          version: draft.version + 1,
-        }),
-      })
-      status.textContent = 'Publishing…'
-      await gg(`${draftUrl}/publish`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      })
-      status.textContent = `Deck live: ${deck.summary.due} due · ${deck.summary.introduced} new · tier ${deck.summary.unlockedTiers}`
-      const play = widget.querySelector('.gc-play')
-      play.style.display = 'inline-block'
-      play.href = `https://www.geoguessr.com/maps/${deck.trainerMapId}/play`
-    } catch (err) {
-      console.error('[geocoach] rebuild failed', err)
-      status.textContent = 'Rebuild failed: ' + err.message
     }
   }
 
@@ -296,16 +261,18 @@
     w.innerHTML =
       '<div style="font-weight:700;margin-bottom:4px">GeoCoach</div>' +
       '<div class="gc-status" style="color:#a8adb8;margin-bottom:8px">Checking…</div>' +
-      '<button class="gc-rebuild" style="background:#2e9e6b;color:#fff;border:0;border-radius:6px;' +
-      'padding:6px 12px;font:600 12px system-ui;cursor:pointer">Rebuild deck</button> ' +
-      '<a class="gc-play" style="display:none;color:#7fd7a8;font-weight:700;margin-left:6px" href="#">Play</a>'
+      '<a class="gc-play" style="display:none;color:#7fd7a8;font-weight:700" href="#">Play trainer map</a>'
     document.body.appendChild(w)
-    w.querySelector('.gc-rebuild').addEventListener('click', () => rebuildDeck(w))
     serverGet('/status')
       .then((s) => {
         w.querySelector('.gc-status').textContent =
           `${s.due} due · ${s.unseen} unseen · tier ${s.unlockedTiers}`
-        if (s.due > 0) rebuildSilently('reviews due')
+        const play = w.querySelector('.gc-play')
+        play.style.display = 'inline-block'
+        play.href = `https://www.geoguessr.com/maps/${s.trainerMapId}/play`
+        // Keep the published deck current without any manual step: rebuild when
+        // reviews are waiting, or if the deck has never been built at all.
+        if (s.due > 0 || !localStorage.getItem('gc-last-rebuild')) rebuildSilently('reviews due')
       })
       .catch(() => (w.querySelector('.gc-status').textContent = 'Coach server offline'))
   }
