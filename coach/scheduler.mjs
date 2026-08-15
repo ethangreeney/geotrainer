@@ -110,9 +110,9 @@ function tierMastered(cards, rung) {
 }
 
 /**
- * How far up the ladder the player has earned their way. Tier 1 is always open;
- * each rung opens the next only once most of it is scheduled a week out. Stops
- * at the first unmastered rung, so a fluke run at a hard tier can't skip ahead.
+ * How many rungs the player has mastered, for the dashboard's progress display.
+ * This no longer gates anything: like Anki, the deck introduces new material in
+ * ladder order without locks — mastery is a scoreboard, not a wall.
  */
 export function unlockedTiers(cards, catalog) {
   if (!catalog?.length) return 1
@@ -151,8 +151,10 @@ const dueAt = (card) => new Date(card.due).getTime()
  * spare capacity goes to unseen material rather than re-serving cards the player
  * already holds, so a light review day means more of the ladder, not Colombia on
  * loop. minNew keeps new material flowing even when reviews alone fill the deck.
- * New metas drain the lowest unlocked tier before spilling upward, and locked
- * tiers stay locked. Padding — already-held cards, soonest-due first — appears
+ * New metas drain the lowest tier before spilling upward — the ladder orders
+ * introductions, it never locks them (standard Anki semantics: due reviews
+ * plus a budget of new cards; no mastery gates). Padding — already-held
+ * cards, soonest-due first — appears
  * only once the unseen supply runs dry, and if even that can't fill minSize the
  * deck is simply short, since inventing a card would corrupt the schedule to
  * pad a number.
@@ -167,8 +169,7 @@ const dueAt = (card) => new Date(card.due).getTime()
 export function buildDeck(cards, catalog, opts = {}, now) {
   const minNew = opts?.minNew ?? DEFAULT_MIN_NEW
   const minSize = opts?.minSize ?? DEFAULT_MIN_SIZE
-  const tiers = unlockedTiers(cards, catalog)
-  const entries = unlockedMetas(catalog ?? [], tiers)
+  const entries = unlockedMetas(catalog ?? [], catalog?.length ?? 0)
 
   const due = entries
     .filter((e) => cards[e.name] && dueAt(cards[e.name]) <= now.getTime())
@@ -199,7 +200,7 @@ export function buildDeck(cards, catalog, opts = {}, now) {
       introduced: introduced.length,
       padding: padding.length,
       total: metas.length,
-      unlockedTiers: tiers,
+      unlockedTiers: unlockedTiers(cards, catalog),
     },
   }
 }
@@ -216,8 +217,7 @@ export function retrievabilityOf(stored, now) {
 }
 
 export function deckSummary(cards, catalog, now) {
-  const tiers = unlockedTiers(cards, catalog)
-  const entries = unlockedMetas(catalog ?? [], tiers)
+  const entries = unlockedMetas(catalog ?? [], catalog?.length ?? 0)
   let due = 0
   let learning = 0
   let unseen = 0
@@ -239,7 +239,7 @@ export function deckSummary(cards, catalog, now) {
     due,
     learning,
     unseen,
-    unlockedTiers: tiers,
+    unlockedTiers: unlockedTiers(cards, catalog),
     nextDue: nextDue === null ? null : new Date(nextDue).toISOString(),
   }
 }
