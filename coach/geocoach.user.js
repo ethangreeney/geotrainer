@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.6.2
+// @version      1.6.3
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -324,6 +324,12 @@
   // dossiers, but no lesson card and no toasts — ranked play gets no help.
   let myId = null
   function resolveMyId() {
+    // The account id ships in every page's Next.js payload — synchronous, no
+    // fetch to fail at startup. The API call stays as a markup-change fallback.
+    try {
+      const id = W.__NEXT_DATA__?.props?.accountProps?.account?.user?.userId
+      if (id) { myId = id; return }
+    } catch {}
     fetch('https://www.geoguessr.com/api/v3/profiles/me', { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : null))
       .then((m) => { if (m && m.id) myId = m.id })
@@ -331,7 +337,11 @@
   }
 
   function handleDuelState(d) {
-    if (!d || !d.gameId || !Array.isArray(d.rounds) || !Array.isArray(d.teams) || !myId) return
+    if (!d || !d.gameId || !Array.isArray(d.rounds) || !Array.isArray(d.teams)) return
+    if (!myId) {
+      console.warn('[geocoach] duel state seen but profile id unresolved — rounds not captured yet')
+      return
+    }
     for (const team of d.teams) {
       for (const pl of team.players || []) {
         if (pl.playerId !== myId) continue
@@ -365,6 +375,7 @@
   function pollDuel() {
     const m = location.pathname.match(/^\/(?:duels|team-duels)\/([\w-]+)/)
     if (!m) return
+    if (!myId) resolveMyId() // self-heal: without it every duel round is silently skipped
     fetch(`https://game-server.geoguessr.com/api/duels/${m[1]}`, { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : null))
       .then(handleDuelState)
