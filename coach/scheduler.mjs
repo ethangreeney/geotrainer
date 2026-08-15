@@ -65,9 +65,13 @@ function fromStored(stored) {
   }
 }
 
-export function ratingFor(correctCountry, score) {
+export function ratingFor(correctCountry, score, firstSight = false) {
   if (!correctCountry) return Rating.Again
-  return (score ?? 0) >= PINPOINT_SCORE ? Rating.Easy : Rating.Good
+  // First-sight correct is prior knowledge, not learning: rate it Easy so the
+  // card starts at a week-plus interval (8d under current FSRS defaults, past
+  // MASTERY_DAYS immediately). The ladder then paces on what the player
+  // actually misses instead of walking known material through sleep cycles.
+  return firstSight || (score ?? 0) >= PINPOINT_SCORE ? Rating.Easy : Rating.Good
 }
 
 /**
@@ -84,7 +88,7 @@ export function gradeRound(cards, round, now) {
   const { card: graded } = scheduler.next(
     prev ? fromStored(prev) : createEmptyCard(now),
     now,
-    ratingFor(round.correctCountry, round.score),
+    ratingFor(round.correctCountry, round.score, !prev),
   )
 
   next[metaName] = {

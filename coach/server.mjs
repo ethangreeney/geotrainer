@@ -72,6 +72,13 @@ async function loadCatalogs() {
  */
 const metaKeyOf = (country, name) => (name ? (country ? `${country}: ${name}` : name) : null)
 
+/** Metas whose physical design is shared across countries: any country in the
+ * set is a correct read. Codes are the uppercase ISO codes countryOf returns. */
+const LOOKALIKE_METAS = {
+  'Czechia: Bollard': new Set(['CZ', 'SK']),
+  'Slovakia: Bollard': new Set(['CZ', 'SK']),
+}
+
 /** The scheduler's view: tiers with their meta key lists. */
 function toLadder(catalogs) {
   return catalogs.map((c) => ({
@@ -334,7 +341,15 @@ async function handleRound(payload) {
   const meta = lmDirect ?? (await metaFromCatalogs(location.panoId))
 
   const state = await loadState()
-  const correctCountry = guessed ? guessed.code === answer.code : false
+  const metaName = metaKeyOf(meta?.country, meta?.metaName ?? meta?.name) ?? null
+  // Identical-design metas: Plonkit documents the Czech and Slovak bollards as
+  // the same design ("the only other country with the same design is..."), so
+  // guessing the twin still means the clue was read correctly. Telling the
+  // twins apart is a different skill; don't grade it here.
+  const twins = metaName ? LOOKALIKE_METAS[metaName] : null
+  const correctCountry = guessed
+    ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
+    : false
   const distanceKm = guess ? haversineKm(location, guess) : null
 
   const round = {
@@ -349,7 +364,7 @@ async function handleRound(payload) {
     guess: guessed ? { ...guessed, lat: guess.lat, lng: guess.lng } : null,
     correctCountry,
     distanceKm,
-    metaName: metaKeyOf(meta?.country, meta?.metaName ?? meta?.name) ?? null,
+    metaName,
   }
 
   // Running stats: what keeps going wrong is the coach's real curriculum.
