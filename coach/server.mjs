@@ -14,7 +14,7 @@
  */
 import { execFile } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildDeck, deckSummary, gradeRound, MASTERY_DAYS, retrievabilityOf } from './scheduler.mjs'
@@ -128,35 +128,45 @@ async function countryOf(lat, lng) {
 
 /** Street-view tiles for the pano: zoom 2 is a 4x2 grid covering the full 360°. */
 async function saveTiles(panoId, dir) {
-  const saved = []
-  const jobs = []
-  // zoom 3 = 8x4 tiles (4096x2048): enough resolution to read mid-distance
-  // detail from a single tile, while pano.jpg gives the one-look overview
-  for (let y = 0; y < 4; y++) {
-    for (let x = 0; x < 8; x++) {
-      const url =
-        `https://streetviewpixels-pa.googleapis.com/v1/tile?cb_client=maps_sv.tactile` +
-        `&panoid=${encodeURIComponent(panoId)}&x=${x}&y=${y}&zoom=3&nbt=1&fover=2`
-      jobs.push(
-        fetch(url, {
-          signal: AbortSignal.timeout(10000),
-          headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh)', Referer: 'https://www.google.com/' },
-        })
-          .then(async (res) => {
-            if (!res.ok) return
-            const buf = Buffer.from(await res.arrayBuffer())
-            if (buf.length < 2000) return // blank tile
-            const file = join(dir, `pano_${y}_${x}.jpg`)
-            await writeFile(file, buf)
-            saved.push(`pano_${y}_${x}.jpg`)
+  const fetchGrid = async (zoom, cols, rows) => {
+    const saved = []
+    const coords = []
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) coords.push([x, y])
+    const CHUNK = 32 // be polite to the tile CDN
+    for (let i = 0; i < coords.length; i += CHUNK) {
+      await Promise.all(
+        coords.slice(i, i + CHUNK).map(([x, y]) => {
+          const url =
+            `https://streetviewpixels-pa.googleapis.com/v1/tile?cb_client=maps_sv.tactile` +
+            `&panoid=${encodeURIComponent(panoId)}&x=${x}&y=${y}&zoom=${zoom}&nbt=1&fover=2`
+          return fetch(url, {
+            signal: AbortSignal.timeout(10000),
+            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh)', Referer: 'https://www.google.com/' },
           })
-          .catch(() => {}),
+            .then(async (res) => {
+              if (!res.ok) return
+              const buf = Buffer.from(await res.arrayBuffer())
+              if (buf.length < 2000) return // blank tile
+              const file = `pano_${y}_${x}.jpg`
+              await writeFile(join(dir, file), buf)
+              saved.push(file)
+            })
+            .catch(() => {})
+        }),
       )
     }
+    return saved
   }
-  await Promise.all(jobs)
+
+  // zoom 4 = 16x8 tiles (8192x4096): the camera's full published detail for
+  // modern coverage. Older panos stop at zoom 3 — wipe partial tiles and refetch.
+  let saved = await fetchGrid(4, 16, 8)
+  if (saved.length < 8) {
+    await Promise.all(saved.map((f) => unlink(join(dir, f)).catch(() => {})))
+    saved = await fetchGrid(3, 8, 4)
+  }
   if (saved.length) {
-    // one composite image per round so the coach reads a single file
+    // pano.jpg (2048-wide overview) + pano_full.jpg (native resolution)
     await new Promise((resolve) => {
       execFile('python3', [join(ROOT, 'stitch.py'), dir], () => resolve())
     })

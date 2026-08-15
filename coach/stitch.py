@@ -32,6 +32,7 @@ def stitch(rdir: Path) -> bool:
         except OSError:
             pass
     if out.width > MAX_W:
+        out.save(rdir / "pano_full.jpg", quality=85)  # native-res single file
         out = out.resize((MAX_W, out.height * MAX_W // out.width))
     out.save(rdir / "pano.jpg", quality=82)
     return True
