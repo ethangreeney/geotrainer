@@ -509,10 +509,19 @@ const server = createServer(async (req, res) => {
     return
   }
   // Serving the userscript from here lets Tampermonkey install and update it
-  // by URL instead of copy-paste.
+  // by URL instead of copy-paste. The script is templated to whatever host it
+  // was fetched from, so installing from another machine (e.g. the Windows PC
+  // hitting this MacBook over the LAN) points it back at the right server.
   if (req.method === 'GET' && req.url === '/geocoach.user.js') {
     try {
-      const src = await readFile(join(ROOT, 'geocoach.user.js'))
+      let src = (await readFile(join(ROOT, 'geocoach.user.js'), 'utf8'))
+      const host = req.headers.host // e.g. "ethans-macbook-air-2.local:5177"
+      if (host && host !== `127.0.0.1:${PORT}`) {
+        const bare = host.replace(/:\d+$/, '')
+        src = src
+          .replaceAll(`127.0.0.1:${PORT}`, host)
+          .replace('// @connect      127.0.0.1', `// @connect      127.0.0.1\n// @connect      ${bare}`)
+      }
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
       res.end(src)
     } catch {
@@ -625,6 +634,7 @@ const server = createServer(async (req, res) => {
 })
 
 await mkdir(ROUNDS_DIR, { recursive: true })
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[coach] bridge listening on http://127.0.0.1:${PORT}`)
+// 0.0.0.0 so the Windows machine can reach the coach over the LAN
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`[coach] bridge listening on http://127.0.0.1:${PORT} (and LAN)`)
 })
