@@ -277,7 +277,7 @@ const haversineKm = (a, b) => {
 }
 
 async function handleRound(payload) {
-  const { location, mapId, roundNumber, score } = payload
+  const { location, mapId, roundNumber, score, source } = payload
   // A timed-out round records a (0,0) guess — that is "no guess", not the Atlantic.
   const guess =
     payload.guess && !(Math.abs(payload.guess.lat) < 0.001 && Math.abs(payload.guess.lng) < 0.001)
@@ -287,11 +287,13 @@ async function handleRound(payload) {
   const dir = join(ROUNDS_DIR, id)
   await mkdir(dir, { recursive: true })
 
-  const [answer, guessed, tiles, lmDirect] = await Promise.all([
+  // Tiles are ~128 fetches + a stitch: they run in the background so the
+  // response (and the in-game lesson card) is never held up by them.
+  const tilesPromise = location.panoId ? saveTiles(location.panoId, dir) : Promise.resolve([])
+  const [answer, guessed, lmDirect] = await Promise.all([
     countryOf(location.lat, location.lng),
     guess ? countryOf(guess.lat, guess.lng) : null,
-    location.panoId ? saveTiles(location.panoId, dir) : [],
-    mapId && location.panoId ? lmMeta(mapId, location.panoId) : null,
+    mapId && source !== 'duel' && location.panoId ? lmMeta(mapId, location.panoId) : null,
   ])
   // Rounds on the trainer map get their meta from our catalogs instead of LM.
   const meta = lmDirect ?? (await metaFromCatalogs(location.panoId))
@@ -304,6 +306,7 @@ async function handleRound(payload) {
     id,
     ts: new Date().toISOString(),
     mapId,
+    mode: source === 'duel' ? 'duel' : 'trainer',
     roundNumber,
     score: score ?? null,
     panoId: location.panoId ?? null,
@@ -354,7 +357,7 @@ async function handleRound(payload) {
   const history = state.rounds.filter((r) => r.answer.code === cc)
   const dossier = {
     ...round,
-    tiles,
+    tiles: [],
     lm: meta,
     history: {
       thisCountry: { seen: row.seen, correctCountry: row.correctCountry },
@@ -370,21 +373,32 @@ async function handleRound(payload) {
   }
   await writeFile(join(dir, 'dossier.json'), JSON.stringify(dossier, null, 2))
   console.log(
-    `[coach] round ${id}: ${answer.name}${guessed ? ` (guessed ${guessed.name}${correctCountry ? ', correct' : ''})` : ''}, ${tiles.length} tiles${meta ? `, meta: ${round.metaName ?? 'yes'}` : ''}`,
+    `[coach] round ${id}: ${answer.name}${guessed ? ` (guessed ${guessed.name}${correctCountry ? ', correct' : ''})` : ''}${round.mode === 'duel' ? ' [duel]' : ''}${meta ? `, meta: ${round.metaName ?? 'yes'}` : ''}`,
   )
+  tilesPromise
+    .then((tiles) => {
+      if (!tiles.length) return
+      dossier.tiles = tiles
+      console.log(`[coach] round ${id}: ${tiles.length} tiles ready`)
+      return writeFile(join(dir, 'dossier.json'), JSON.stringify(dossier, null, 2))
+    })
+    .catch((err) => console.error(`[coach] tiles failed for ${id}:`, err))
   return {
     ok: true,
     id,
-    // the userscript renders this as the post-round lesson card
-    card: meta
-      ? {
-          metaName: round.metaName,
-          correct: correctCountry,
-          note: meta.note ?? null,
-          images: meta.images ?? [],
-          footer: meta.footer ?? null,
-        }
-      : null,
+    // The userscript renders this as the post-round lesson card. Duels never
+    // get one: metas are unknowable for arbitrary world locations, and ranked
+    // play gets no live assistance — duel dossiers are for after-match review.
+    card:
+      meta && source !== 'duel'
+        ? {
+            metaName: round.metaName,
+            correct: correctCountry,
+            note: meta.note ?? null,
+            images: meta.images ?? [],
+            footer: meta.footer ?? null,
+          }
+        : null,
   }
 }
 

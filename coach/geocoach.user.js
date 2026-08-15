@@ -1,19 +1,19 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.3.0
+// @version      1.4.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
-// @require      https://cdn.jsdelivr.net/gh/miraclewhips/geoguessr-event-framework@master/geoguessr-event-framework.min.js
 // @updateURL    http://127.0.0.1:5177/geocoach.user.js
 // @downloadURL  http://127.0.0.1:5177/geocoach.user.js
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      127.0.0.1
 // @connect      localhost
 // ==/UserScript==
 
-/* global GeoGuessrEventFramework, GM_xmlhttpRequest */
+/* global GM_xmlhttpRequest, unsafeWindow */
 ;(function () {
   'use strict'
   const COACH_URL = 'http://127.0.0.1:5177/round'
@@ -33,38 +33,80 @@
   // One send per (game, round), whichever path notices it first.
   const sent = new Set()
 
-  /** Post-round lesson card: the meta you were meant to spot, LM's own words. */
+  function removeCard() {
+    document.getElementById('geocoach-card')?.remove()
+  }
+
+  /** The Plonkit guide for this card: LM's footer usually links it; otherwise
+   * derive the country page from the "Country: Meta" name. */
+  function guideUrl(card) {
+    const m = (card.footer ?? '').match(/https?:\/\/(?:www\.)?plonkit\.net\/[a-z0-9-]+/i)
+    if (m) return m[0]
+    const country = (card.metaName ?? '').split(':')[0].trim()
+    if (!country) return null
+    const slug = country
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '')
+    return slug ? `https://www.plonkit.net/${slug}` : null
+  }
+
+  /** Post-round lesson card: the meta you were meant to spot, LM's own words.
+   * Clicking it opens the Plonkit guide; it clears itself on the next round. */
   function showCard(card) {
     if (!card || (!card.note && !card.metaName)) return
-    document.getElementById('geocoach-card')?.remove()
+    if (/^\/(duels|team-duels)\//.test(location.pathname)) return // never during ranked
+    removeCard()
+    const url = guideUrl(card)
     const el = document.createElement('div')
     el.id = 'geocoach-card'
     el.style.cssText =
-      'position:fixed;bottom:76px;right:18px;z-index:999998;max-width:360px;' +
-      'background:rgba(18,22,18,.96);color:#e9ede8;border:1px solid rgba(255,255,255,.14);' +
-      'border-radius:12px;padding:14px 16px;font:13px/1.5 system-ui;box-shadow:0 12px 40px rgba(0,0,0,.5)'
+      'position:fixed;bottom:80px;right:16px;z-index:999998;width:380px;max-width:calc(100vw - 32px);' +
+      'background:linear-gradient(165deg,#2b1b58 0%,#1a1038 100%);color:#e8e4f6;' +
+      'border:1px solid rgba(255,255,255,.14);border-radius:16px;overflow:hidden;' +
+      'box-shadow:0 16px 48px rgba(5,0,25,.6);font-size:13px;line-height:1.55;' +
+      (url ? 'cursor:pointer;' : '') +
+      'opacity:0;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease'
     const badge = card.correct
-      ? '<span style="color:#7fd6a4;font-weight:700">✓ got it</span>'
-      : '<span style="color:#e8b04b;font-weight:700">✗ the clue you missed</span>'
+      ? '<span style="background:#a3e961;color:#1c2a08;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>'
+      : '<span style="background:#ffb84c;color:#33230a;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✗ Missed clue</span>'
     el.innerHTML =
-      `<div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:6px">` +
-      `<b style="font-size:14px">${card.metaName ?? ''}</b>${badge}</div>` +
-      `<div>${card.note ?? ''}</div>` +
+      `<div style="padding:14px 16px 12px">` +
+      `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px">` +
+      `<b style="font-size:15px;letter-spacing:.01em">${card.metaName ?? ''}</b>` +
+      `<div style="display:flex;gap:8px;align-items:center">${badge}` +
+      `<span class="gc-close" style="cursor:pointer;opacity:.55;font-size:16px;line-height:1;padding:2px">✕</span></div></div>` +
+      `<div style="color:#d6d0ea">${card.note ?? ''}</div></div>` +
       (card.images && card.images.length
-        ? `<div style="display:flex;gap:6px;margin-top:8px">` +
-          card.images.slice(0, 2).map((u) => `<img src="${u}" style="width:50%;border-radius:8px">`).join('') +
+        ? `<div style="display:grid;gap:2px">` +
+          card.images.slice(0, 2).map((u) => `<img src="${u}" style="width:100%;display:block">`).join('') +
           `</div>`
         : '') +
-      (card.footer ? `<div style="margin-top:8px;font-size:11px;opacity:.65">${card.footer}</div>` : '') +
-      `<div style="margin-top:8px;font-size:11px;opacity:.5">click to dismiss</div>`
-    el.addEventListener('click', () => el.remove())
+      (url
+        ? `<div style="padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em">Open Plonkit guide ↗</div>`
+        : '')
+    el.addEventListener('click', () => {
+      if (url) window.open(url, '_blank')
+      el.remove()
+    })
+    el.querySelector('.gc-close').addEventListener('click', (e) => {
+      e.stopPropagation()
+      el.remove()
+    })
     document.body.appendChild(el)
+    requestAnimationFrame(() => {
+      el.style.opacity = '1'
+      el.style.transform = 'translateY(0)'
+    })
     setTimeout(() => el.remove(), 45000)
   }
 
   function post(key, payload) {
     if (sent.has(key)) return
     sent.add(key)
+    const quiet = payload.source === 'duel' // ranked capture is silent
     const body = JSON.stringify(payload)
     // GM_xmlhttpRequest when running under Tampermonkey; plain fetch otherwise
     // (Chrome allows https pages to reach localhost, and the server answers the
@@ -78,10 +120,10 @@
         timeout: 30000,
         onload: (res) => {
           if (res.status === 200) {
-            toast('Round sent to coach', true)
+            if (!quiet) toast('Round sent to coach', true)
             try { showCard(JSON.parse(res.responseText).card) } catch {}
           } else {
-            sent.delete(key) // let the poller retry
+            sent.delete(key) // the next intercepted game-state response retries
             toast('Coach server error (' + res.status + ')', false)
           }
         },
@@ -102,7 +144,7 @@
       })
         .then((res) => {
           if (!res.ok) sent.delete(key)
-          toast(res.ok ? 'Round sent to coach' : 'Coach server error (' + res.status + ')', res.ok)
+          if (!res.ok || !quiet) toast(res.ok ? 'Round sent to coach' : 'Coach server error (' + res.status + ')', res.ok)
           if (res.ok) res.json().then((j) => showCard(j.card)).catch(() => {})
         })
         .catch(() => {
@@ -145,36 +187,83 @@
     }
   }
 
-  function sendRound(state) {
-    const round = state.rounds[state.rounds.length - 1]
-    if (!round || !round.location) return
-    post(`${state.current_game_id}:${state.rounds.length}`, {
-      mapId: state.map && state.map.id,
-      mapName: state.map && state.map.name,
-      roundNumber: state.rounds.length,
-      score: round.score && round.score.amount,
-      location: {
-        lat: round.location.lat,
-        lng: round.location.lng,
-        panoId: round.location.panoId,
-        heading: round.location.heading,
-      },
-      guess: round.player_guess
-        ? { lat: round.player_guess.lat, lng: round.player_guess.lng }
-        : null,
-    })
+  function handleGameState(g) {
+    if (!g || !g.token || !g.player || !Array.isArray(g.player.guesses)) return
+    // A served-but-unguessed round means play has moved on: clear the card.
+    if (g.rounds && g.rounds.length > g.player.guesses.length) removeCard()
+    sendFromGameState(g)
   }
 
-  // Fallback: the event framework can miss rounds when the page captured its
-  // fetch reference before the hook installed. Polling the game state directly
-  // is timing-proof, and the dedupe set makes the two paths safe together.
-  function poll() {
-    const m = location.pathname.match(/^\/(?:game|challenge)\/([^/]+)/)
-    if (!m) return
-    fetch(`https://www.geoguessr.com/api/v3/games/${m[1]}`, { credentials: 'include' })
-      .then((res) => (res.ok ? res.json() : null))
-      .then(sendFromGameState)
+  // ------------------------------------------------------------- duels
+  // Ranked duels are captured for after-match review only: rounds become
+  // dossiers, but no lesson card and no toasts — ranked play gets no help.
+  let myId = null
+  function resolveMyId() {
+    fetch('https://www.geoguessr.com/api/v3/profiles/me', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => { if (m && m.id) myId = m.id })
       .catch(() => {})
+  }
+
+  function handleDuelState(d) {
+    if (!d || !d.gameId || !Array.isArray(d.rounds) || !Array.isArray(d.teams) || !myId) return
+    for (const team of d.teams) {
+      for (const pl of team.players || []) {
+        if (pl.playerId !== myId) continue
+        for (const guess of pl.guesses || []) {
+          const round = d.rounds.find((r) => r.roundNumber === guess.roundNumber)
+          if (!round || !round.panorama) continue
+          const pid = round.panorama.panoId
+          post(`${d.gameId}:${guess.roundNumber}:duel`, {
+            source: 'duel',
+            mapId: null,
+            mapName: 'Ranked duel',
+            roundNumber: guess.roundNumber,
+            score: guess.score ?? null,
+            location: {
+              lat: round.panorama.lat,
+              lng: round.panorama.lng,
+              panoId: pid ? (/^[0-9A-Fa-f]+$/.test(pid) ? hex2a(pid) : pid) : null,
+              heading: round.panorama.heading,
+            },
+            guess: { lat: guess.lat, lng: guess.lng },
+          })
+        }
+      }
+    }
+  }
+
+  // Duel state lives on game-server and mostly moves over websockets, so the
+  // page may never re-fetch it; reading it is side-effect-free for duels
+  // (rounds advance on the server's own clock, unlike singleplayer games).
+  function pollDuel() {
+    const m = location.pathname.match(/^\/(?:duels|team-duels)\/([\w-]+)/)
+    if (!m) return
+    fetch(`https://game-server.geoguessr.com/api/duels/${m[1]}`, { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(handleDuelState)
+      .catch(() => {})
+  }
+
+  // ------------------------------------------------------------- capture
+  // Passive interception of the page's own traffic. The old 4s poller is gone
+  // for cause: a bare GET on /api/v3/games/<token> SERVES the next round, so
+  // polling on the result screen started the round (and its timer) long
+  // before the player clicked Next. Reading responses adds no requests, and
+  // every guess POST echoes the full game state back, so capture is instant.
+  const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+  const pageFetch = W.fetch.bind(W)
+  W.fetch = function (input, opts) {
+    const p = pageFetch(input, opts)
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || ''
+      if (/\/api\/v3\/games\/[A-Za-z0-9]+/.test(url)) {
+        p.then((res) => res.clone().json().then(handleGameState).catch(() => {})).catch(() => {})
+      } else if (/\/api\/duels\/[\w-]+(\?|$)/.test(url)) {
+        p.then((res) => res.clone().json().then(handleDuelState).catch(() => {})).catch(() => {})
+      }
+    } catch {}
+    return p
   }
 
   // ---------------------------------------------------------------- deck
@@ -270,34 +359,27 @@
         const play = w.querySelector('.gc-play')
         play.style.display = 'inline-block'
         play.href = `https://www.geoguessr.com/maps/${s.trainerMapId}/play`
-        // Keep the published deck current without any manual step: rebuild when
-        // reviews are waiting, or if the deck has never been built at all.
-        if (s.due > 0 || !localStorage.getItem('gc-last-rebuild')) rebuildSilently('reviews due')
+        // One rebuild per sitting: reviews come due with elapsed time, so the
+        // deck is refreshed when you arrive after an hour-plus away. Between
+        // games the game-finished trigger is the only one that fires.
+        const last = Number(localStorage.getItem('gc-last-rebuild') || 0)
+        if (Date.now() - last > 60 * 60 * 1000) rebuildSilently('arrival')
       })
       .catch(() => (w.querySelector('.gc-status').textContent = 'Coach server offline'))
   }
 
   function init() {
-    setInterval(poll, 4000)
+    resolveMyId()
+    setInterval(pollDuel, 10000)
     // The widget lives on non-game pages only — never over an active round.
     const placeWidget = () => {
-      const inGame = /^\/(game|challenge|live-challenge)\//.test(location.pathname)
+      const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
       const existing = document.getElementById('geocoach-widget')
       if (inGame && existing) existing.remove()
       if (!inGame) mountWidget()
     }
     placeWidget()
     setInterval(placeWidget, 3000)
-    if (typeof GeoGuessrEventFramework === 'undefined') return
-    GeoGuessrEventFramework.init().then(() => {
-      GeoGuessrEventFramework.events.addEventListener('round_end', (event) => {
-        try {
-          sendRound(event.detail)
-        } catch (err) {
-          console.error('[geocoach]', err)
-        }
-      })
-    })
   }
 
   if (document.readyState === 'loading') {
