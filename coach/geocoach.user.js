@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.8.0
+// @version      1.8.1
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -118,7 +118,11 @@
         el.style.bottom === 'auto'
           ? innerHeight - Math.max(0, parseFloat(el.style.top) || 0) - 12
           : innerHeight - 92 // 80px bottom offset + 12px top margin
-      el.style.maxHeight = Math.min(capH, Math.max(160, room)) + 'px'
+      // The head never scrolls and the foot never clips: a too-small saved cap
+      // is overruled by what those two bands actually need (plus an image
+      // sliver), up to whatever the viewport can hold.
+      const need = head.offsetHeight + foot.offsetHeight + (mid.childElementCount ? 90 : 0) + 2
+      el.style.maxHeight = Math.max(Math.min(capH, room), Math.min(need, room), 160) + 'px'
     }
     const onResize = () =>
       el.isConnected ? clampH() : removeEventListener('resize', onResize)
@@ -131,10 +135,9 @@
     // scroll. However small the card gets, you can read what the meta is and
     // reach the rating buttons — the middle absorbs all the overflow.
     const head = document.createElement('div')
-    // Shrinkable (it scrolls internally) so a small card never pushes the
-    // footer out of view — but the images band gives way first (higher shrink
-    // factor below), so squeezing starts with the pictures, not the text.
-    head.style.cssText = 'flex:0 1 auto;max-height:38vh;overflow-y:auto;padding:14px 16px 12px'
+    // Never shrinks, never scrolls — the note is always fully readable.
+    // clampH grows the card to guarantee this fits alongside the footer.
+    head.style.cssText = 'flex:0 0 auto;padding:14px 16px 12px'
     head.innerHTML =
       `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px">` +
       `<b style="font-size:15px;letter-spacing:.01em">${card.metaName ?? ''}</b>` +
@@ -151,7 +154,9 @@
         `<div style="display:grid;gap:2px">` +
         card.images
           .slice(0, 2)
-          .map((u) => `<img src="${u}" style="width:100%;display:block;background:#150c33">`)
+          // Tall/thin images letterbox inside a capped frame instead of
+          // scaling to full width and forcing a mile of scrolling.
+          .map((u) => `<img src="${u}" style="width:100%;max-height:min(45vh,360px);object-fit:contain;display:block;background:#150c33">`)
           .join('') +
         `</div>`
     el.appendChild(mid)
@@ -167,7 +172,11 @@
     foot.innerHTML =
       (card.rating && card.roundId
         ? `<div class="gc-rate" style="padding:12px 14px 4px">` +
-          `<div style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:rgba(232,228,246,.42);margin:0 2px 7px">Rate your recall</div>` +
+          // The ⓘ advertises the button tooltips (and carries one itself) —
+          // without it there's no hint that hovering a grade explains it.
+          `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 2px 7px">` +
+          `<span style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:rgba(232,228,246,.42)">Rate your recall</span>` +
+          `<span title="Hover any grade to see what it means for your review schedule" style="cursor:help;font-size:9px;font-weight:700;font-style:italic;font-family:Georgia,serif;color:rgba(232,228,246,.5);border:1px solid rgba(232,228,246,.32);border-radius:999px;width:13px;height:13px;line-height:11px;text-align:center;user-select:none">i</span></div>` +
           `<div style="display:flex;gap:7px">` +
           ['again', 'hard', 'good', 'easy']
             .map((r) => `<button data-rate="${r}" title="${RATE_TIP[r]}">${r[0].toUpperCase() + r.slice(1)}</button>`)
@@ -262,6 +271,7 @@
           'gc-card-size',
           JSON.stringify({ w: parseFloat(el.style.width), h: capH }),
         )
+        clampH() // snap back up if the drag went below what head+foot need
         localStorage.setItem(
           'gc-card-pos',
           JSON.stringify({ left: parseFloat(el.style.left), top: parseFloat(el.style.top) }),
@@ -587,7 +597,9 @@
       })
       await gg(`${draftUrl}/publish`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       localStorage.setItem('gc-last-rebuild', String(Date.now()))
-      toast(`Deck rebuilt (${reason}): ${deck.summary.due} due, ${deck.summary.introduced} new`, true)
+      // Silent by design: rebuilds are routine housekeeping. Only failures
+      // (the catch below / server toasts) deserve attention.
+      console.log(`[geocoach] deck rebuilt (${reason}): ${deck.summary.due} due, ${deck.summary.introduced} new`)
     } catch (err) {
       console.error('[geocoach] auto-rebuild failed', err)
     } finally {
