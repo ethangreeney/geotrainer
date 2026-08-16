@@ -315,52 +315,46 @@ const haversineKm = (a, b) => {
 }
 
 /**
- * Region-scoped grading. Many metas pin down a REGION of their country —
- * Kansai plates, Ontario diamond signs, Brittlebush in northern Mexico — and
- * those regions rarely align with admin subdivisions, so scope is tested
- * against the meta's own catalog footprint: the cluster of locations it was
- * indexed from. A meta counts as region-scoped when that footprint is markedly
- * tighter than its country (bbox diagonal under 45% of the country's, country
- * over 700km, at least 3 points); a guess is then in scope only within 150km
- * of one of the meta's locations. Countrywide metas, tiny countries, and metas
- * the catalogs don't know fall through to plain right-country. Computed from
- * the catalogs at grade time — no geocoding, no API calls.
+ * Region-scoped grading. Some metas pin down a named REGION of their country —
+ * WA yellow sign posts, Ontario diamonds, Kansai plates — and for those,
+ * clicking the right country in the wrong region is still a miss.
+ * scope-regions.json is hand-curated from the clue texts: metaKey → the admin
+ * subdivisions the clue actually covers. The guess pin's reverse geocode
+ * already carries its subdivision (countryOf's `region`), so the test costs
+ * nothing extra. Metas absent from the file are countrywide, and a guess whose
+ * geocode returned no subdivision passes rather than failing on missing data.
  */
-const SCOPE_RATIO = 0.45
-const SCOPE_MIN_COUNTRY_KM = 700
-const SCOPE_MIN_LOCS = 3
-const SCOPE_PAD_KM = 150
-
-const bboxDiagonalKm = (locs) => {
-  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
-  for (const l of locs) {
-    if (l.lat < minLat) minLat = l.lat
-    if (l.lat > maxLat) maxLat = l.lat
-    if (l.lng < minLng) minLng = l.lng
-    if (l.lng > maxLng) maxLng = l.lng
+let scopeRegions = null
+async function loadScopeRegions() {
+  if (!scopeRegions) {
+    try {
+      scopeRegions = JSON.parse(await readFile(join(ROOT, 'scope-regions.json'), 'utf8'))
+    } catch {
+      scopeRegions = {}
+    }
   }
-  return haversineKm({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng })
+  return scopeRegions
 }
+
+/** Subdivision names compared loosely: case, diacritics, đ, and generic
+ * suffixes ("Osaka Prefecture", "Vientiane Province") don't matter. */
+const normRegion = (s) =>
+  s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/đ/g, 'd')
+    .replace(/\b(prefecture|province|region|state|district|county|governorate|oblast)\b/g, '')
+    .replace(/[^a-z]+/g, ' ')
+    .trim()
 
 /** True when the guess satisfies the meta's scope (which, for most metas, is
  * simply "anywhere" — the caller has already checked the country). */
-async function inMetaScope(metaName, guess) {
-  if (!guess) return false
-  const metaLocs = []
-  const countryLocs = []
-  const country = metaName.includes(': ') ? metaName.slice(0, metaName.indexOf(': ')) : null
-  for (const c of await loadCatalogs()) {
-    for (const l of c.locations) {
-      if (l.country !== country) continue
-      countryLocs.push(l)
-      if (metaKeyOf(l.country, l.metaName) === metaName) metaLocs.push(l)
-    }
-  }
-  if (metaLocs.length < SCOPE_MIN_LOCS) return true
-  const countrySpread = bboxDiagonalKm(countryLocs)
-  if (countrySpread <= SCOPE_MIN_COUNTRY_KM) return true
-  if (bboxDiagonalKm(metaLocs) >= SCOPE_RATIO * countrySpread) return true
-  return metaLocs.some((l) => haversineKm(l, guess) <= SCOPE_PAD_KM)
+async function inMetaScope(metaName, guessRegion) {
+  const scopedTo = (await loadScopeRegions())[metaName]
+  if (!scopedTo || !guessRegion) return true
+  const got = normRegion(guessRegion)
+  return scopedTo.some((r) => normRegion(r) === got)
 }
 
 /**
@@ -427,11 +421,11 @@ async function handleRound(payload) {
     : false
   const distanceKm = guess ? haversineKm(location, guess) : null
   // Scope-gated correctness drives the FSRS grade and the card's verdict:
-  // the right country outside a region-scoped meta's footprint means the
+  // the right country outside a region-scoped meta's subdivisions means the
   // country was deduced but the meta wasn't read. Country-level stats and
   // confusions keep using plain correctCountry.
   const correctScope =
-    correctCountry && (!metaName || (await inMetaScope(metaName, guess)))
+    correctCountry && (!metaName || (await inMetaScope(metaName, guessed?.region)))
 
   const round = {
     id,

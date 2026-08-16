@@ -18,6 +18,7 @@ import {
   gradeRound,
   ratingNameFor,
 } from '../../coach/scheduler.mjs'
+import SCOPE_REGIONS from '../../coach/scope-regions.json'
 
 const metaKeyOf = (country, name) => (name ? (country ? `${country}: ${name}` : name) : null)
 
@@ -45,42 +46,24 @@ const haversineKm = (a, b) => {
   return Math.round(2 * 6371 * Math.asin(Math.sqrt(h)))
 }
 
-// Region-scoped grading: same footprint test as the local bridge (see
-// coach/server.mjs for the rationale and thresholds). With no R2 the catalogs
-// are empty and every meta degrades to plain right-country.
-const SCOPE_RATIO = 0.45
-const SCOPE_MIN_COUNTRY_KM = 700
-const SCOPE_MIN_LOCS = 3
-const SCOPE_PAD_KM = 150
+// Region-scoped grading: same curated subdivision test as the local bridge
+// (see coach/server.mjs and coach/scope-regions.json for the rationale). The
+// map is bundled at deploy time, so this works without R2.
+const normRegion = (s) =>
+  s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/đ/g, 'd')
+    .replace(/\b(prefecture|province|region|state|district|county|governorate|oblast)\b/g, '')
+    .replace(/[^a-z]+/g, ' ')
+    .trim()
 
-const bboxDiagonalKm = (locs) => {
-  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
-  for (const l of locs) {
-    if (l.lat < minLat) minLat = l.lat
-    if (l.lat > maxLat) maxLat = l.lat
-    if (l.lng < minLng) minLng = l.lng
-    if (l.lng > maxLng) maxLng = l.lng
-  }
-  return haversineKm({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng })
-}
-
-async function inMetaScope(env, metaName, guess) {
-  if (!guess) return false
-  const metaLocs = []
-  const countryLocs = []
-  const country = metaName.includes(': ') ? metaName.slice(0, metaName.indexOf(': ')) : null
-  for (const c of await loadCatalogs(env)) {
-    for (const l of c.locations) {
-      if (l.country !== country) continue
-      countryLocs.push(l)
-      if (metaKeyOf(l.country, l.metaName) === metaName) metaLocs.push(l)
-    }
-  }
-  if (metaLocs.length < SCOPE_MIN_LOCS) return true
-  const countrySpread = bboxDiagonalKm(countryLocs)
-  if (countrySpread <= SCOPE_MIN_COUNTRY_KM) return true
-  if (bboxDiagonalKm(metaLocs) >= SCOPE_RATIO * countrySpread) return true
-  return metaLocs.some((l) => haversineKm(l, guess) <= SCOPE_PAD_KM)
+function inMetaScope(metaName, guessRegion) {
+  const scopedTo = SCOPE_REGIONS[metaName]
+  if (!scopedTo || !guessRegion) return true
+  const got = normRegion(guessRegion)
+  return scopedTo.some((r) => normRegion(r) === got)
 }
 
 // Module-scope caches live for the isolate's lifetime — perfect for data that
@@ -221,7 +204,7 @@ async function handleRound(env, user, payload) {
     : false
   const distanceKm = guess ? haversineKm(location, guess) : null
   const correctScope =
-    correctCountry && (!metaName || (await inMetaScope(env, metaName, guess)))
+    correctCountry && (!metaName || inMetaScope(metaName, guessed?.region))
 
   const round = {
     id,

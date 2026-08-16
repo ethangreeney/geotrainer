@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.8.2
+// @version      1.8.3
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -192,15 +192,14 @@
     // so the zero-interaction flow behaves exactly as before.
     const rateRow = foot.querySelector('.gc-rate')
     if (rateRow) {
-      // One spectrum, one meaning: hue tracks how well you knew it, red
-      // (forgot) through amber into GeoGuessr's own green ramp — good and
-      // easy are their ds-color-green 50→70 and 70→80 tokens, so the greens
-      // read as native GeoGuessr, easy one step deeper than good.
+      // Hue tracks how well you knew it: red (forgot) through amber to
+      // GeoGuessr's own green for good. Easy gets its own blue rather than a
+      // deeper green — two greens next to each other read as the same button.
       const RATE_STYLE = {
         again: ['#ff8d7d', '#e2544a', '#330703'],
         hard: ['#ffc76e', '#ef9f2e', '#33230a'],
         good: ['#97e851', '#68c045', '#17300d'],
-        easy: ['#68c045', '#479440', '#0c2508'],
+        easy: ['#7dc4ff', '#3f8fdf', '#081c33'],
       }
       if (!document.getElementById('gc-anim')) {
         const st = document.createElement('style')
