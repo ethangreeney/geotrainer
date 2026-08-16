@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.6.4
+// @version      1.7.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -17,6 +17,32 @@
 ;(function () {
   'use strict'
   const COACH_URL = 'http://127.0.0.1:5177/round'
+  const RATE_URL = 'http://127.0.0.1:5177/rate'
+
+  /** Fire-and-forget rating override; only failures surface. */
+  function postRate(id, rating) {
+    const body = JSON.stringify({ id, rating })
+    if (typeof GM_xmlhttpRequest === 'function') {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: RATE_URL,
+        headers: { 'Content-Type': 'application/json' },
+        data: body,
+        timeout: 15000,
+        onload: (res) => {
+          if (res.status !== 200) toast('Rating not saved (' + res.status + ')', false)
+        },
+        onerror: () => toast('Rating not saved — server unreachable', false),
+        ontimeout: () => toast('Rating not saved — timed out', false),
+      })
+    } else {
+      fetch(RATE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+        .then((res) => {
+          if (!res.ok) toast('Rating not saved (' + res.status + ')', false)
+        })
+        .catch(() => toast('Rating not saved — server unreachable', false))
+    }
+  }
 
   function toast(text, ok) {
     const el = document.createElement('div')
@@ -67,7 +93,11 @@
       'max-height:calc(100vh - 120px);display:flex;flex-direction:column;' +
       'background:linear-gradient(165deg,#2b1b58 0%,#1a1038 100%);color:#e8e4f6;' +
       'border:1px solid rgba(255,255,255,.14);border-radius:16px;overflow:hidden;' +
-      'box-shadow:0 16px 48px rgba(5,0,25,.6);font-size:13px;line-height:1.55;' +
+      // Layered depth: a hairline top highlight (light from above), a tight
+      // contact shadow, and two soft falloffs — reads as a raised panel.
+      'box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 2px 6px rgba(5,0,25,.4),' +
+      '0 14px 28px -6px rgba(5,0,25,.55),0 32px 64px -12px rgba(5,0,25,.65);' +
+      'font-size:13px;line-height:1.55;' +
       (url ? 'cursor:pointer;' : 'cursor:grab;') +
       'opacity:0;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease'
     // Size persists like position: the resize grip stores the card's width and
@@ -100,10 +130,55 @@
             .join('') +
           `</div>`
         : '') +
+      (card.rating && card.roundId
+        ? `<div class="gc-rate" style="padding:12px 14px 4px">` +
+          `<div style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:rgba(232,228,246,.42);margin:0 2px 7px">Rate your recall</div>` +
+          `<div style="display:flex;gap:7px">` +
+          ['again', 'hard', 'good', 'easy']
+            .map((r) => `<button data-rate="${r}">${r[0].toUpperCase() + r.slice(1)}</button>`)
+            .join('') +
+          `</div></div>`
+        : '') +
       (url
-        ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:10px 16px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none">Open Plonkit guide ↗</a>`
+        ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:11px 16px;margin-top:8px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none;background:rgba(5,0,25,.25);border-top:1px solid rgba(255,255,255,.07)">Open Plonkit guide ↗</a>`
         : '')
     el.appendChild(wrap)
+    // FSRS rating row: the server pre-selects the inferred grade; tapping a
+    // different button re-grades the round. Doing nothing keeps the default,
+    // so the zero-interaction flow behaves exactly as before.
+    const rateRow = wrap.querySelector('.gc-rate')
+    if (rateRow) {
+      const RATE_STYLE = {
+        again: ['#ff8d7d', '#e2544a', '#330703'],
+        hard: ['#ffc76e', '#ef9f2e', '#33230a'],
+        good: ['#b2ef73', '#8cd747', '#1c2a08'],
+        easy: ['#7fd0ff', '#4fb1f0', '#062a44'],
+      }
+      const btns = rateRow.querySelectorAll('button')
+      // Selected = raised key (gradient, lifted, drop shadow); others = pressed
+      // into the card (inset shadow) — the same light model as the card itself.
+      const paint = (sel) =>
+        btns.forEach((b) => {
+          const on = b.dataset.rate === sel
+          const [top, bot, ink] = RATE_STYLE[b.dataset.rate]
+          b.style.cssText =
+            'flex:1;padding:8px 0;border:0;border-radius:10px;font:700 11px/1 system-ui;' +
+            'letter-spacing:.03em;cursor:pointer;user-select:none;transition:all .15s ease;' +
+            (on
+              ? `background:linear-gradient(180deg,${top},${bot});color:${ink};transform:translateY(-1px);` +
+                'box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 3px 8px rgba(5,0,25,.5),0 1px 2px rgba(5,0,25,.4)'
+              : 'background:rgba(255,255,255,.05);color:#a99fce;transform:none;' +
+                'box-shadow:inset 0 2px 4px rgba(5,0,25,.35),inset 0 -1px 0 rgba(255,255,255,.05)')
+        })
+      paint(card.rating)
+      rateRow.addEventListener('click', (e) => {
+        e.stopPropagation() // a rating tap must never open the guide or dismiss
+        const b = e.target.closest('button')
+        if (!b || dragMoved) return
+        paint(b.dataset.rate)
+        postRate(card.roundId, b.dataset.rate)
+      })
+    }
     // Set by both gestures (move-drag and resize) so the click that fires on
     // release doesn't read as "open the guide and dismiss".
     let dragMoved = false

@@ -65,13 +65,25 @@ function fromStored(stored) {
   }
 }
 
-export function ratingFor(correctCountry, score, firstSight = false) {
-  if (!correctCountry) return Rating.Again
+export const RATING_BY_NAME = {
+  again: Rating.Again,
+  hard: Rating.Hard,
+  good: Rating.Good,
+  easy: Rating.Easy,
+}
+
+/** The inferred FSRS button name, so the card UI can pre-select it. */
+export function ratingNameFor(correctCountry, score, firstSight = false) {
+  if (!correctCountry) return 'again'
   // First-sight correct is prior knowledge, not learning: rate it Easy so the
   // card starts at a week-plus interval (8d under current FSRS defaults, past
   // MASTERY_DAYS immediately). The ladder then paces on what the player
   // actually misses instead of walking known material through sleep cycles.
-  return firstSight || (score ?? 0) >= PINPOINT_SCORE ? Rating.Easy : Rating.Good
+  return firstSight || (score ?? 0) >= PINPOINT_SCORE ? 'easy' : 'good'
+}
+
+export function ratingFor(correctCountry, score, firstSight = false) {
+  return RATING_BY_NAME[ratingNameFor(correctCountry, score, firstSight)]
 }
 
 /**
@@ -85,18 +97,20 @@ export function gradeRound(cards, round, now) {
   if (!metaName) return next
 
   const prev = cards[metaName]
-  const { card: graded } = scheduler.next(
-    prev ? fromStored(prev) : createEmptyCard(now),
-    now,
-    ratingFor(round.correctCountry, round.score, !prev),
-  )
+  // An explicit rating (the player tapped a button on the card) overrides the
+  // inferred one — the player knows better than the score whether they read the
+  // meta or lucked into the country off other clues.
+  const rating =
+    RATING_BY_NAME[round.rating] ?? ratingFor(round.correctCountry, round.score, !prev)
+  const success = rating !== Rating.Again
+  const { card: graded } = scheduler.next(prev ? fromStored(prev) : createEmptyCard(now), now, rating)
 
   next[metaName] = {
     ...toStored(graded),
     seen: (prev?.seen ?? 0) + 1,
-    correct: (prev?.correct ?? 0) + (round.correctCountry ? 1 : 0),
+    correct: (prev?.correct ?? 0) + (success ? 1 : 0),
     // One miss resets the streak: knowing a meta means reading it cold, repeatedly.
-    streak: round.correctCountry ? (prev?.streak ?? 0) + 1 : 0,
+    streak: success ? (prev?.streak ?? 0) + 1 : 0,
     source: round.source ?? prev?.source ?? 'round',
   }
   return next

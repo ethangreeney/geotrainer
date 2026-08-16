@@ -17,7 +17,14 @@ import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildDeck, deckSummary, gradeRound, MASTERY_DAYS, retrievabilityOf } from './scheduler.mjs'
+import {
+  buildDeck,
+  deckSummary,
+  gradeRound,
+  MASTERY_DAYS,
+  ratingNameFor,
+  retrievabilityOf,
+} from './scheduler.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const ROUNDS_DIR = join(ROOT, 'rounds')
@@ -307,6 +314,25 @@ const haversineKm = (a, b) => {
   return Math.round(2 * 6371 * Math.asin(Math.sqrt(h)))
 }
 
+/**
+ * Pre-grade snapshots for rating overrides, keyed by round id. The card UI
+ * pre-selects the inferred FSRS rating; tapping a different button POSTs
+ * /rate, which restores this snapshot and re-grades with the explicit rating
+ * at the original review time — so overriding (even repeatedly) is
+ * indistinguishable from having graded it right the first time.
+ * In-memory on purpose: an override only makes sense while the card is on
+ * screen, and the map is pruned so a long session can't grow it unbounded.
+ */
+const rateSnapshots = new Map()
+const SNAPSHOT_LIMIT = 50
+
+function rememberSnapshot(id, snap) {
+  rateSnapshots.set(id, snap)
+  while (rateSnapshots.size > SNAPSHOT_LIMIT) {
+    rateSnapshots.delete(rateSnapshots.keys().next().value)
+  }
+}
+
 async function handleRound(payload) {
   const { location, mapId, roundNumber, score, source } = payload
   const dupKey = payload.token
@@ -378,7 +404,19 @@ async function handleRound(payload) {
   }
   // Per-meta mastery: consecutive cold hits are what earn a meta its way OFF
   // the personal map. One miss resets the streak.
+  let inferredRating = null
   if (round.metaName) {
+    const isPadding = !!state.lastDeck?.padding?.includes(round.metaName)
+    inferredRating = ratingNameFor(correctCountry, score ?? 0, !state.deckCards[round.metaName])
+    // Snapshot the pre-grade state so a rating-button tap can redo this grade.
+    rememberSnapshot(id, {
+      metaName: round.metaName,
+      ts: round.ts,
+      padding: isPadding,
+      prevCard: state.deckCards[round.metaName] ?? null,
+      prevMeta: state.metas[round.metaName] ? { ...state.metas[round.metaName] } : null,
+    })
+
     const m = (state.metas[round.metaName] ??= { seen: 0, correct: 0, streak: 0 })
     m.seen += 1
     if (correctCountry) {
@@ -392,7 +430,6 @@ async function handleRound(payload) {
     // reads to FSRS as a memory that needs propping up and wrecks the card's
     // difficulty — so correct padding rounds are free practice, ungraded.
     // A WRONG padding answer is real forgetting and always counts.
-    const isPadding = state.lastDeck?.padding?.includes(round.metaName)
     if (!(isPadding && correctCountry)) {
       state.deckCards = gradeRound(
         state.deckCards,
@@ -447,6 +484,10 @@ async function handleRound(payload) {
             note: meta.note ?? null,
             images: meta.images ?? [],
             footer: meta.footer ?? null,
+            // FSRS rating row: the inferred grade to pre-select, and the round
+            // id to override it against. Absent when the round wasn't gradeable.
+            roundId: round.metaName ? id : null,
+            rating: inferredRating,
           }
         : null,
   }
@@ -675,6 +716,61 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(plan, null, 2))
+    return
+  }
+  // Rating override from the card's Again/Hard/Good/Easy row. Restores the
+  // pre-grade snapshot and re-grades with the explicit rating at the original
+  // review time — last tap wins, tapping the same button twice is a no-op.
+  if (req.method === 'POST' && req.url === '/rate') {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', async () => {
+      const respond = (code, obj) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(obj))
+      }
+      try {
+        const { id, rating } = JSON.parse(body)
+        if (!['again', 'hard', 'good', 'easy'].includes(rating))
+          return respond(400, { ok: false, error: `unknown rating: ${rating}` })
+        const snap = rateSnapshots.get(id)
+        if (!snap)
+          return respond(410, { ok: false, error: 'round no longer overridable (server restarted or too old)' })
+
+        const state = await loadState()
+        const success = rating !== 'again'
+
+        // Rewind to before the original grade, then replay with the explicit
+        // rating. Country/confusion stats stay untouched — where the pin
+        // landed is a fact; the buttons only re-judge meta recall.
+        if (snap.prevCard) state.deckCards[snap.metaName] = snap.prevCard
+        else delete state.deckCards[snap.metaName]
+        const prevMeta = snap.prevMeta ?? { seen: 0, correct: 0, streak: 0 }
+        state.metas[snap.metaName] = {
+          ...prevMeta,
+          seen: prevMeta.seen + 1,
+          correct: prevMeta.correct + (success ? 1 : 0),
+          streak: success ? prevMeta.streak + 1 : 0,
+        }
+        // Same padding rule as the original grade: a successful padding round
+        // stays ungraded; a failed one is real forgetting and counts.
+        if (!(snap.padding && success)) {
+          state.deckCards = gradeRound(
+            state.deckCards,
+            { metaName: snap.metaName, rating, correctCountry: success, score: 0 },
+            new Date(snap.ts),
+          )
+        }
+        const roundRow = state.rounds.find((r) => r.id === id)
+        if (roundRow) roundRow.rating = rating
+        await writeFile(STATE_PATH, JSON.stringify(state, null, 2))
+        console.log(`[coach] rating override: ${snap.metaName} → ${rating}`)
+        respond(200, { ok: true, metaName: snap.metaName, rating })
+      } catch (err) {
+        console.error('[coach] rate failed:', err)
+        respond(500, { ok: false, error: String(err) })
+      }
+    })
     return
   }
   if (req.method === 'POST' && req.url === '/round') {
