@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.8.1
+// @version      1.8.2
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -129,7 +129,7 @@
     addEventListener('resize', onResize)
     const badgeDepth = 'box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 2px 5px rgba(5,0,25,.4);'
     const badge = card.correct
-      ? `<span style="background:linear-gradient(180deg,#b8f27c,#8fd94e);color:#1c2a08;${badgeDepth}font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>`
+      ? `<span style="background:linear-gradient(180deg,#c9f75d,#97e851);color:#17300d;${badgeDepth}font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>`
       : `<span style="background:linear-gradient(180deg,#ffcf7c,#f5a838);color:#33230a;${badgeDepth}font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✗ Missed clue</span>`
     // Three bands: header and footer are always visible; only the images
     // scroll. However small the card gets, you can read what the meta is and
@@ -193,12 +193,14 @@
     const rateRow = foot.querySelector('.gc-rate')
     if (rateRow) {
       // One spectrum, one meaning: hue tracks how well you knew it, red
-      // (forgot) through amber and lime to deep green (instant recall).
+      // (forgot) through amber into GeoGuessr's own green ramp — good and
+      // easy are their ds-color-green 50→70 and 70→80 tokens, so the greens
+      // read as native GeoGuessr, easy one step deeper than good.
       const RATE_STYLE = {
         again: ['#ff8d7d', '#e2544a', '#330703'],
         hard: ['#ffc76e', '#ef9f2e', '#33230a'],
-        good: ['#b2ef73', '#8cd747', '#1c2a08'],
-        easy: ['#63e6a9', '#2ec27e', '#04321c'],
+        good: ['#97e851', '#68c045', '#17300d'],
+        easy: ['#68c045', '#479440', '#0c2508'],
       }
       if (!document.getElementById('gc-anim')) {
         const st = document.createElement('style')
