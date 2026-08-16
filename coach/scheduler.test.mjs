@@ -5,7 +5,7 @@ import {
   deckSummary,
   gradeRound,
   MASTERY_DAYS,
-  PINPOINT_SCORE,
+  ratingNameFor,
   unlockedTiers,
 } from './scheduler.mjs'
 
@@ -69,36 +69,35 @@ function mastered(names, count, { days = MASTERY_DAYS, due = '2026-06-01T00:00:0
 }
 
 /** Plays one round through the real grader, so tests exercise FSRS not fixtures. */
-const drill = (cards, metaName, correctCountry, score, now) =>
-  gradeRound(cards, { metaName, correctCountry, score }, now)
+const drill = (cards, metaName, correct, now) => gradeRound(cards, { metaName, correct }, now)
 
 describe('gradeRound', () => {
   it('creates a card on first sighting of a meta', () => {
-    const cards = drill({}, T1[0], true, 3000, T0)
+    const cards = drill({}, T1[0], true, T0)
     expect(Object.keys(cards)).toEqual([T1[0]])
     expect(cards[T1[0]]).toMatchObject({ seen: 1, correct: 1, streak: 1, source: 'round', reps: 1 })
     expect(cards[T1[0]].last_review).toBe(T0.toISOString())
   })
 
   it('serialises to plain JSON so state.json round-trips', () => {
-    const cards = drill({}, T1[0], true, 3000, T0)
+    const cards = drill({}, T1[0], true, T0)
     expect(JSON.parse(JSON.stringify(cards))).toEqual(cards)
     expect(typeof cards[T1[0]].due).toBe('string')
     expect(new Date(cards[T1[0]].due).toISOString()).toBe(cards[T1[0]].due)
   })
 
   it('does not mutate the table it was given', () => {
-    const before = drill({}, T1[0], true, 3000, T0)
+    const before = drill({}, T1[0], true, T0)
     const snapshot = structuredClone(before)
-    const after = drill(before, T1[0], true, 3000, plus(T0, 1))
+    const after = drill(before, T1[0], true, plus(T0, 1))
     expect(before).toEqual(snapshot)
     expect(after).not.toBe(before)
     expect(after[T1[0]].seen).toBe(2)
   })
 
   it('passes rounds with no identified meta straight through', () => {
-    const cards = drill({}, T1[0], true, 3000, T0)
-    const after = gradeRound(cards, { metaName: null, correctCountry: false, score: 0 }, T0)
+    const cards = drill({}, T1[0], true, T0)
+    const after = gradeRound(cards, { metaName: null, correct: false }, T0)
     expect(after).toEqual(cards)
     expect(after).not.toBe(cards)
   })
@@ -107,7 +106,7 @@ describe('gradeRound', () => {
     let cards = {}
     let now = T0
     for (let i = 0; i < 3; i++) {
-      cards = drill(cards, T1[0], true, 3000, now)
+      cards = drill(cards, T1[0], true, now)
       now = at(cards[T1[0]].due)
     }
     expect(cards[T1[0]]).toMatchObject({ seen: 3, correct: 3, streak: 3 })
@@ -117,14 +116,14 @@ describe('gradeRound', () => {
     let cards = {}
     let now = T0
     for (let i = 0; i < 4; i++) {
-      cards = drill(cards, T1[0], true, 3000, now)
+      cards = drill(cards, T1[0], true, now)
       now = at(cards[T1[0]].due)
     }
     const before = cards[T1[0]]
     expect(before.streak).toBe(4)
     expect(before.scheduled_days).toBeGreaterThan(0)
 
-    const after = drill(cards, T1[0], false, 200, now)[T1[0]]
+    const after = drill(cards, T1[0], false, now)[T1[0]]
     expect(after.streak).toBe(0)
     expect(after.correct).toBe(4) // a miss never un-earns past correct answers
     expect(after.seen).toBe(5)
@@ -132,41 +131,37 @@ describe('gradeRound', () => {
     expect(after.scheduled_days).toBeLessThan(before.scheduled_days)
     // graded at the moment it fell due, a miss comes back within the hour,
     // where the same round answered correctly would have pushed weeks out
-    const ifCorrect = drill(cards, T1[0], true, 3000, now)[T1[0]]
+    const ifCorrect = drill(cards, T1[0], true, now)[T1[0]]
     expect(at(after.due).getTime()).toBeLessThan(at(ifCorrect.due).getTime())
     expect(at(after.due).getTime() - now.getTime()).toBeLessThan(DAY)
   })
 
-  it('grows the interval faster for a near-pinpoint answer than a plain correct one', () => {
-    const good = drill({}, T1[0], true, PINPOINT_SCORE - 1, T0)[T1[0]]
-    const easy = drill({}, T1[0], true, PINPOINT_SCORE + 500, T0)[T1[0]]
-    expect(at(easy.due).getTime()).toBeGreaterThan(at(good.due).getTime())
-    expect(easy.stability).toBeGreaterThan(good.stability)
+  it('rates a first-sight correct easy, a repeat correct good, and a miss again', () => {
+    expect(ratingNameFor(true, true)).toBe('easy')
+    expect(ratingNameFor(true, false)).toBe('good')
+    expect(ratingNameFor(false, true)).toBe('again')
+    expect(ratingNameFor(false, false)).toBe('again')
   })
 
-  it('keeps the easy-beats-good gap on a mature card', () => {
-    let base = {}
-    let now = T0
-    for (let i = 0; i < 3; i++) {
-      base = drill(base, T1[0], true, 3000, now)
-      now = at(base[T1[0]].due)
-    }
-    const good = drill(base, T1[0], true, PINPOINT_SCORE - 1, now)[T1[0]]
-    const easy = drill(base, T1[0], true, PINPOINT_SCORE, now)[T1[0]]
-    expect(easy.scheduled_days).toBeGreaterThan(good.scheduled_days)
+  it('gives a first sighting the easy head start over a hypothetical good', () => {
+    const firstSight = drill({}, T1[0], true, T0)[T1[0]]
+    const asRepeat = gradeRound({}, { metaName: T1[0], correct: true, rating: 'good' }, T0)[T1[0]]
+    expect(at(firstSight.due).getTime()).toBeGreaterThan(at(asRepeat.due).getTime())
+    expect(firstSight.stability).toBeGreaterThan(asRepeat.stability)
   })
 
-  it('treats exactly the pinpoint score as easy and a missing score as good', () => {
-    const boundary = drill({}, T1[0], true, PINPOINT_SCORE, T0)[T1[0]]
-    const under = drill({}, T1[0], true, PINPOINT_SCORE - 1, T0)[T1[0]]
-    const missing = gradeRound({}, { metaName: T1[0], correctCountry: true }, T0)[T1[0]]
-    expect(at(boundary.due).getTime()).toBeGreaterThan(at(under.due).getTime())
-    expect(missing.stability).toBe(under.stability)
+  it('lets an explicit rating override the inferred one', () => {
+    let base = drill({}, T1[0], true, T0)
+    const now = at(base[T1[0]].due)
+    const inferred = drill(base, T1[0], true, now)[T1[0]] // good
+    const tapped = gradeRound(base, { metaName: T1[0], correct: true, rating: 'easy' }, now)[T1[0]]
+    expect(tapped.scheduled_days).toBeGreaterThanOrEqual(inferred.scheduled_days)
+    expect(tapped.stability).toBeGreaterThan(inferred.stability)
   })
 
-  it('grades a wrong country again even at a high score', () => {
-    const wrong = drill({}, T1[0], false, 4900, T0)[T1[0]]
-    const right = drill({}, T1[0], true, 4900, T0)[T1[0]]
+  it('grades a wrong scope again regardless of anything else in the round', () => {
+    const wrong = gradeRound({}, { metaName: T1[0], correct: false, score: 4900 }, T0)[T1[0]]
+    const right = drill({}, T1[0], true, T0)[T1[0]]
     expect(wrong.stability).toBeLessThan(right.stability)
     expect(wrong.streak).toBe(0)
   })
@@ -194,8 +189,10 @@ describe('unlockedTiers', () => {
   it('ignores stability when the card is still in a learning step', () => {
     // One Good leaves stability above 2 with a ten-minute step: the player has
     // not slept on it, so it must not count toward opening the next tier.
+    // (Explicit Good: the inferred first-sight rating is Easy, which graduates.)
     let cards = {}
-    for (const name of T1) cards = drill(cards, name, true, 3000, T0)
+    for (const name of T1)
+      cards = gradeRound(cards, { metaName: name, correct: true, rating: 'good' }, T0)
     for (const name of T1) {
       expect(cards[name].stability).toBeGreaterThan(2)
       expect(cards[name].scheduled_days).toBe(0)
@@ -220,17 +217,17 @@ describe('unlockedTiers', () => {
 })
 
 describe('buildDeck: empty state', () => {
-  it('fills the deck with tier-one material when nothing is due', () => {
+  it('fills the deck with new material in ladder order when nothing is due', () => {
     const deck = buildDeck({}, CATALOG, {}, T0)
-    expect(deck.metas).toEqual(T1.slice(0, 5).map((name) => ({ name, mapId: 'lm-tier1' })))
-    expect(deck.introduced).toEqual(T1.slice(0, 5))
-    expect(deck.stats).toMatchObject({ due: 0, introduced: 5, padding: 0, unlockedTiers: 1 })
+    expect(deck.introduced).toEqual([...T1, ...T2, ...T3]) // 15 metas, still under minSize 18
+    expect(deck.metas.slice(0, 5)).toEqual(T1.map((name) => ({ name, mapId: 'lm-tier1' })))
+    expect(deck.stats).toMatchObject({ due: 0, introduced: 15, padding: 0, unlockedTiers: 1 })
   })
 
   it('leaves the deck short rather than inventing cards to reach minSize', () => {
     const cards = {}
     const deck = buildDeck(cards, CATALOG, { minSize: 18 }, T0)
-    expect(deck.metas.length).toBe(5)
+    expect(deck.metas.length).toBe(15) // the whole catalog, and that is all there is
     expect(deck.metas.length).toBeLessThan(18)
     expect(cards).toEqual({}) // buildDeck never writes state
     const names = new Set(CATALOG.flatMap((t) => t.metas))
@@ -277,18 +274,18 @@ describe('buildDeck: composition', () => {
     expect(deck.metas.map((m) => m.name)).toEqual([T1[1], T1[0]])
   })
 
-  it('puts due cards first, then new metas, then padding', () => {
+  it('puts due cards first, then new metas spilling up the ladder before padding', () => {
     const cards = {
       [T1[0]]: card({ due: plus(T0, -5).toISOString() }), // due
-      [T1[1]]: card({ due: plus(T0, 3).toISOString() }), // padding
-      [T1[2]]: card({ due: plus(T0, 9).toISOString() }), // padding
+      [T1[1]]: card({ due: plus(T0, 3).toISOString() }), // held, not owed
+      [T1[2]]: card({ due: plus(T0, 9).toISOString() }), // held, not owed
     }
-    // room for 3 beyond the due card, but tier 1 only has two unseen left —
-    // new material takes priority and padding covers just the shortfall
+    // room for 3 beyond the due card: tier 1's two unseen metas, then the
+    // ladder spills into tier 2 rather than re-serving held cards as padding
     const deck = buildDeck(cards, CATALOG, { minNew: 1, minSize: 4 }, T0)
-    expect(deck.metas.map((m) => m.name)).toEqual([T1[0], T1[3], T1[4], T1[1]])
-    expect(deck.introduced).toEqual([T1[3], T1[4]])
-    expect(deck.stats).toMatchObject({ due: 1, introduced: 2, padding: 1, total: 4 })
+    expect(deck.metas.map((m) => m.name)).toEqual([T1[0], T1[3], T1[4], T2[0]])
+    expect(deck.introduced).toEqual([T1[3], T1[4], T2[0]])
+    expect(deck.stats).toMatchObject({ due: 1, introduced: 3, padding: 0, total: 4 })
   })
 
   it('fills spare capacity with new material, spilling into the next unlocked tier', () => {
@@ -316,19 +313,16 @@ describe('buildDeck: composition', () => {
     ])
   })
 
-  it('introduces from tier 2 once tier 1 is exhausted, never from a locked tier', () => {
+  it('drains tier 2 then keeps introducing from tier 3 — the ladder orders, it never locks', () => {
     const cards = { ...mastered(T1, 5), ...mastered(T2, 3) }
     const deck = buildDeck(cards, CATALOG, { minNew: 5, minSize: 0 }, T0)
-    expect(deck.introduced).toEqual([T2[3], T2[4]]) // tier 2 has only two left
+    expect(deck.introduced).toEqual([T2[3], T2[4], T3[0], T3[1], T3[2]])
     expect(deck.stats.unlockedTiers).toBe(2)
-    for (const meta of deck.metas) expect(T3).not.toContain(meta.name)
   })
 
-  it('never offers a meta from a locked tier', () => {
+  it('offers the whole catalog in ladder order when asked for more than it holds', () => {
     const deck = buildDeck({}, CATALOG, { minNew: 99, minSize: 99 }, T0)
-    const names = deck.metas.map((m) => m.name)
-    expect(names).toEqual(T1)
-    for (const name of [...T2, ...T3]) expect(names).not.toContain(name)
+    expect(deck.metas.map((m) => m.name)).toEqual([...T1, ...T2, ...T3])
   })
 
   it('lists a meta once when it appears on two maps', () => {
@@ -405,13 +399,13 @@ describe('deckSummary', () => {
     expect(deckSummary({}, CATALOG, T0)).toEqual({
       due: 0,
       learning: 0,
-      unseen: 5,
+      unseen: 15, // the whole ladder: introductions are ordered, never locked
       unlockedTiers: 1,
       nextDue: null,
     })
   })
 
-  it('counts due, learning and unseen across the unlocked ladder', () => {
+  it('counts due, learning and unseen across the whole ladder', () => {
     const cards = {
       ...mastered(T1, 4, { due: plus(T0, 12).toISOString() }),
       [T1[0]]: card({ due: plus(T0, -1).toISOString() }),
@@ -422,7 +416,7 @@ describe('deckSummary', () => {
     expect(summary).toEqual({
       due: 1,
       learning: 2,
-      unseen: 4, // tier 2 is open, and four of its metas are untouched
+      unseen: 9, // four of tier 2 plus all of tier 3 are untouched
       unlockedTiers: 2,
       nextDue: plus(T0, 2).toISOString(),
     })
@@ -436,9 +430,9 @@ describe('deckSummary', () => {
     expect(deckSummary(cards, CATALOG, T0)).toMatchObject({ due: 2, nextDue: null })
   })
 
-  it('ignores cards belonging to locked tiers', () => {
+  it('counts a due card on a high tier even while the scoreboard reads tier 1', () => {
     const cards = { [T3[0]]: card({ due: plus(T0, -1).toISOString() }) }
-    expect(deckSummary(cards, CATALOG, T0)).toMatchObject({ due: 0, unseen: 5, unlockedTiers: 1 })
+    expect(deckSummary(cards, CATALOG, T0)).toMatchObject({ due: 1, unseen: 14, unlockedTiers: 1 })
   })
 
   it('tracks the same ladder the deck is built from', () => {

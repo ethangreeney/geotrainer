@@ -272,7 +272,7 @@ async function demoState() {
         const pair = `${answer.code}>${guess.code}`
         state.confusions[pair] = (state.confusions[pair] ?? 0) + 1
       }
-      state.deckCards = gradeRound(state.deckCards, { metaName: metaKey, correctCountry: correct, score: round.score }, new Date(ts))
+      state.deckCards = gradeRound(state.deckCards, { metaName: metaKey, correct }, new Date(ts))
     }
   }
   // mark demo rounds so the client knows dossier files may not exist
@@ -312,6 +312,55 @@ const haversineKm = (a, b) => {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2
   return Math.round(2 * 6371 * Math.asin(Math.sqrt(h)))
+}
+
+/**
+ * Region-scoped grading. Many metas pin down a REGION of their country —
+ * Kansai plates, Ontario diamond signs, Brittlebush in northern Mexico — and
+ * those regions rarely align with admin subdivisions, so scope is tested
+ * against the meta's own catalog footprint: the cluster of locations it was
+ * indexed from. A meta counts as region-scoped when that footprint is markedly
+ * tighter than its country (bbox diagonal under 45% of the country's, country
+ * over 700km, at least 3 points); a guess is then in scope only within 150km
+ * of one of the meta's locations. Countrywide metas, tiny countries, and metas
+ * the catalogs don't know fall through to plain right-country. Computed from
+ * the catalogs at grade time — no geocoding, no API calls.
+ */
+const SCOPE_RATIO = 0.45
+const SCOPE_MIN_COUNTRY_KM = 700
+const SCOPE_MIN_LOCS = 3
+const SCOPE_PAD_KM = 150
+
+const bboxDiagonalKm = (locs) => {
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
+  for (const l of locs) {
+    if (l.lat < minLat) minLat = l.lat
+    if (l.lat > maxLat) maxLat = l.lat
+    if (l.lng < minLng) minLng = l.lng
+    if (l.lng > maxLng) maxLng = l.lng
+  }
+  return haversineKm({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng })
+}
+
+/** True when the guess satisfies the meta's scope (which, for most metas, is
+ * simply "anywhere" — the caller has already checked the country). */
+async function inMetaScope(metaName, guess) {
+  if (!guess) return false
+  const metaLocs = []
+  const countryLocs = []
+  const country = metaName.includes(': ') ? metaName.slice(0, metaName.indexOf(': ')) : null
+  for (const c of await loadCatalogs()) {
+    for (const l of c.locations) {
+      if (l.country !== country) continue
+      countryLocs.push(l)
+      if (metaKeyOf(l.country, l.metaName) === metaName) metaLocs.push(l)
+    }
+  }
+  if (metaLocs.length < SCOPE_MIN_LOCS) return true
+  const countrySpread = bboxDiagonalKm(countryLocs)
+  if (countrySpread <= SCOPE_MIN_COUNTRY_KM) return true
+  if (bboxDiagonalKm(metaLocs) >= SCOPE_RATIO * countrySpread) return true
+  return metaLocs.some((l) => haversineKm(l, guess) <= SCOPE_PAD_KM)
 }
 
 /**
@@ -377,6 +426,12 @@ async function handleRound(payload) {
     ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
     : false
   const distanceKm = guess ? haversineKm(location, guess) : null
+  // Scope-gated correctness drives the FSRS grade and the card's verdict:
+  // the right country outside a region-scoped meta's footprint means the
+  // country was deduced but the meta wasn't read. Country-level stats and
+  // confusions keep using plain correctCountry.
+  const correctScope =
+    correctCountry && (!metaName || (await inMetaScope(metaName, guess)))
 
   const round = {
     id,
@@ -389,6 +444,7 @@ async function handleRound(payload) {
     answer: { ...answer, lat: location.lat, lng: location.lng },
     guess: guessed ? { ...guessed, lat: guess.lat, lng: guess.lng } : null,
     correctCountry,
+    correctScope,
     distanceKm,
     metaName,
   }
@@ -407,7 +463,7 @@ async function handleRound(payload) {
   let inferredRating = null
   if (round.metaName) {
     const isPadding = !!state.lastDeck?.padding?.includes(round.metaName)
-    inferredRating = ratingNameFor(correctCountry, score ?? 0, !state.deckCards[round.metaName])
+    inferredRating = ratingNameFor(correctScope, !state.deckCards[round.metaName])
     // Snapshot the pre-grade state so a rating-button tap can redo this grade.
     rememberSnapshot(id, {
       metaName: round.metaName,
@@ -419,7 +475,7 @@ async function handleRound(payload) {
 
     const m = (state.metas[round.metaName] ??= { seen: 0, correct: 0, streak: 0 })
     m.seen += 1
-    if (correctCountry) {
+    if (correctScope) {
       m.correct += 1
       m.streak += 1
     } else {
@@ -430,10 +486,10 @@ async function handleRound(payload) {
     // reads to FSRS as a memory that needs propping up and wrecks the card's
     // difficulty — so correct padding rounds are free practice, ungraded.
     // A WRONG padding answer is real forgetting and always counts.
-    if (!(isPadding && correctCountry)) {
+    if (!(isPadding && correctScope)) {
       state.deckCards = gradeRound(
         state.deckCards,
-        { metaName: round.metaName, correctCountry, score: score ?? 0 },
+        { metaName: round.metaName, correct: correctScope },
         new Date(),
       )
     }
@@ -460,7 +516,7 @@ async function handleRound(payload) {
   }
   await writeFile(join(dir, 'dossier.json'), JSON.stringify(dossier, null, 2))
   console.log(
-    `[coach] round ${id}: ${answer.name}${guessed ? ` (guessed ${guessed.name}${correctCountry ? ', correct' : ''})` : ''}${round.mode === 'duel' ? ' [duel]' : ''}${meta ? `, meta: ${round.metaName ?? 'yes'}` : ''}`,
+    `[coach] round ${id}: ${answer.name}${guessed ? ` (guessed ${guessed.name}${correctScope ? ', correct' : correctCountry ? ', right country wrong region' : ''})` : ''}${round.mode === 'duel' ? ' [duel]' : ''}${meta ? `, meta: ${round.metaName ?? 'yes'}` : ''}`,
   )
   tilesPromise
     .then((tiles) => {
@@ -480,7 +536,7 @@ async function handleRound(payload) {
       meta && source !== 'duel'
         ? {
             metaName: round.metaName,
-            correct: correctCountry,
+            correct: correctScope,
             note: meta.note ?? null,
             images: meta.images ?? [],
             footer: meta.footer ?? null,
@@ -757,7 +813,7 @@ const server = createServer(async (req, res) => {
         if (!(snap.padding && success)) {
           state.deckCards = gradeRound(
             state.deckCards,
-            { metaName: snap.metaName, rating, correctCountry: success, score: 0 },
+            { metaName: snap.metaName, rating, correct: success },
             new Date(snap.ts),
           )
         }

@@ -45,6 +45,44 @@ const haversineKm = (a, b) => {
   return Math.round(2 * 6371 * Math.asin(Math.sqrt(h)))
 }
 
+// Region-scoped grading: same footprint test as the local bridge (see
+// coach/server.mjs for the rationale and thresholds). With no R2 the catalogs
+// are empty and every meta degrades to plain right-country.
+const SCOPE_RATIO = 0.45
+const SCOPE_MIN_COUNTRY_KM = 700
+const SCOPE_MIN_LOCS = 3
+const SCOPE_PAD_KM = 150
+
+const bboxDiagonalKm = (locs) => {
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180
+  for (const l of locs) {
+    if (l.lat < minLat) minLat = l.lat
+    if (l.lat > maxLat) maxLat = l.lat
+    if (l.lng < minLng) minLng = l.lng
+    if (l.lng > maxLng) maxLng = l.lng
+  }
+  return haversineKm({ lat: minLat, lng: minLng }, { lat: maxLat, lng: maxLng })
+}
+
+async function inMetaScope(env, metaName, guess) {
+  if (!guess) return false
+  const metaLocs = []
+  const countryLocs = []
+  const country = metaName.includes(': ') ? metaName.slice(0, metaName.indexOf(': ')) : null
+  for (const c of await loadCatalogs(env)) {
+    for (const l of c.locations) {
+      if (l.country !== country) continue
+      countryLocs.push(l)
+      if (metaKeyOf(l.country, l.metaName) === metaName) metaLocs.push(l)
+    }
+  }
+  if (metaLocs.length < SCOPE_MIN_LOCS) return true
+  const countrySpread = bboxDiagonalKm(countryLocs)
+  if (countrySpread <= SCOPE_MIN_COUNTRY_KM) return true
+  if (bboxDiagonalKm(metaLocs) >= SCOPE_RATIO * countrySpread) return true
+  return metaLocs.some((l) => haversineKm(l, guess) <= SCOPE_PAD_KM)
+}
+
 // Module-scope caches live for the isolate's lifetime — perfect for data that
 // changes rarely (catalogs) or is keyed finely enough to never go stale (geocode).
 let catalogCache = null
@@ -182,6 +220,8 @@ async function handleRound(env, user, payload) {
     ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
     : false
   const distanceKm = guess ? haversineKm(location, guess) : null
+  const correctScope =
+    correctCountry && (!metaName || (await inMetaScope(env, metaName, guess)))
 
   const round = {
     id,
@@ -194,6 +234,7 @@ async function handleRound(env, user, payload) {
     answer: { ...answer, lat: location.lat, lng: location.lng },
     guess: guessed ? { ...guessed, lat: guess.lat, lng: guess.lng } : null,
     correctCountry,
+    correctScope,
     distanceKm,
     metaName,
   }
@@ -211,7 +252,7 @@ async function handleRound(env, user, payload) {
   let snapshot = null
   if (metaName) {
     const isPadding = !!state.lastDeck?.padding?.includes(metaName)
-    inferredRating = ratingNameFor(correctCountry, score ?? 0, !state.deckCards[metaName])
+    inferredRating = ratingNameFor(correctScope, !state.deckCards[metaName])
     snapshot = {
       metaName,
       ts: round.ts,
@@ -222,7 +263,7 @@ async function handleRound(env, user, payload) {
 
     const m = (state.metas[metaName] ??= { seen: 0, correct: 0, streak: 0 })
     m.seen += 1
-    if (correctCountry) {
+    if (correctScope) {
       m.correct += 1
       m.streak += 1
     } else {
@@ -230,12 +271,8 @@ async function handleRound(env, user, payload) {
     }
     // Correct padding rounds are free practice, ungraded (see the local bridge
     // for the FSRS rationale); a wrong padding answer is real forgetting.
-    if (!(isPadding && correctCountry)) {
-      state.deckCards = gradeRound(
-        state.deckCards,
-        { metaName, correctCountry, score: score ?? 0 },
-        new Date(),
-      )
+    if (!(isPadding && correctScope)) {
+      state.deckCards = gradeRound(state.deckCards, { metaName, correct: correctScope }, new Date())
     }
   }
 
@@ -253,7 +290,7 @@ async function handleRound(env, user, payload) {
       meta && source !== 'duel'
         ? {
             metaName,
-            correct: correctCountry,
+            correct: correctScope,
             note: meta.note ?? null,
             images: meta.images ?? [],
             footer: meta.footer ?? null,
@@ -294,7 +331,7 @@ async function handleRate(env, user, { id, rating }) {
   if (!(snap.padding && success)) {
     state.deckCards = gradeRound(
       state.deckCards,
-      { metaName: snap.metaName, rating, correctCountry: success, score: 0 },
+      { metaName: snap.metaName, rating, correct: success },
       new Date(snap.ts),
     )
   }

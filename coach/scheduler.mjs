@@ -12,12 +12,6 @@ import { createEmptyCard, fsrs, Rating, State } from 'ts-fsrs'
 const scheduler = fsrs()
 
 /**
- * A correct country this close to the pin means the meta was *read*, not
- * narrowed down from context — the difference between recall and deduction.
- */
-export const PINPOINT_SCORE = 4500
-
-/**
  * The interval that counts as "learned" for tier progression, measured in
  * scheduled_days rather than stability.
  *
@@ -72,18 +66,24 @@ export const RATING_BY_NAME = {
   easy: Rating.Easy,
 }
 
-/** The inferred FSRS button name, so the card UI can pre-select it. */
-export function ratingNameFor(correctCountry, score, firstSight = false) {
-  if (!correctCountry) return 'again'
+/**
+ * The inferred FSRS button name, so the card UI can pre-select it.
+ * `correct` is scope-aware: for region-scoped metas the server only passes
+ * true when the guess landed inside the meta's own footprint, not merely the
+ * right country. Right scope is a plain Good — Easy and Hard are judgement
+ * calls only the player can make, via the card's rating buttons.
+ */
+export function ratingNameFor(correct, firstSight = false) {
+  if (!correct) return 'again'
   // First-sight correct is prior knowledge, not learning: rate it Easy so the
   // card starts at a week-plus interval (8d under current FSRS defaults, past
   // MASTERY_DAYS immediately). The ladder then paces on what the player
   // actually misses instead of walking known material through sleep cycles.
-  return firstSight || (score ?? 0) >= PINPOINT_SCORE ? 'easy' : 'good'
+  return firstSight ? 'easy' : 'good'
 }
 
-export function ratingFor(correctCountry, score, firstSight = false) {
-  return RATING_BY_NAME[ratingNameFor(correctCountry, score, firstSight)]
+export function ratingFor(correct, firstSight = false) {
+  return RATING_BY_NAME[ratingNameFor(correct, firstSight)]
 }
 
 /**
@@ -100,8 +100,7 @@ export function gradeRound(cards, round, now) {
   // An explicit rating (the player tapped a button on the card) overrides the
   // inferred one — the player knows better than the score whether they read the
   // meta or lucked into the country off other clues.
-  const rating =
-    RATING_BY_NAME[round.rating] ?? ratingFor(round.correctCountry, round.score, !prev)
+  const rating = RATING_BY_NAME[round.rating] ?? ratingFor(round.correct, !prev)
   const success = rating !== Rating.Again
   const { card: graded } = scheduler.next(prev ? fromStored(prev) : createEmptyCard(now), now, rating)
 
