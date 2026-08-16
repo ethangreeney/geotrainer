@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.7.0
+// @version      1.8.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -80,7 +80,8 @@
   }
 
   /** Post-round lesson card: the meta you were meant to spot, LM's own words.
-   * Clicking it opens the Plonkit guide; it clears itself on the next round. */
+   * The footer link opens the Plonkit guide; the card stays until the next
+   * round starts (or you ✕ it) so you can read the guide and come back. */
   function showCard(card) {
     if (!card || (!card.note && !card.metaName)) return
     if (/^\/(duels|team-duels)\//.test(location.pathname)) return // never during ranked
@@ -97,62 +98,105 @@
       // contact shadow, and two soft falloffs — reads as a raised panel.
       'box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 2px 6px rgba(5,0,25,.4),' +
       '0 14px 28px -6px rgba(5,0,25,.55),0 32px 64px -12px rgba(5,0,25,.65);' +
-      'font-size:13px;line-height:1.55;' +
-      (url ? 'cursor:pointer;' : 'cursor:grab;') +
+      'font-size:13px;line-height:1.55;cursor:grab;' +
       'opacity:0;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease'
-    // Size persists like position: the resize grip stores the card's width and
-    // height cap, so every card arrives at the size you chose.
+    // Size persists like position — but only as a *cap*. The card's real height
+    // is min(content, your cap, space to the bottom of the screen), so it can
+    // never be stretched past its content or hang off the viewport.
+    let capH = Infinity
     try {
       const size = JSON.parse(localStorage.getItem('gc-card-size'))
       if (size && size.w) el.style.width = Math.max(300, Math.min(innerWidth - 24, size.w)) + 'px'
-      if (size && size.h) el.style.maxHeight = Math.max(160, Math.min(innerHeight - 24, size.h)) + 'px'
+      if (size && size.h) capH = Math.max(160, size.h)
     } catch {}
+    // Room is measured from fixed anchors only (the bottom offset, or the
+    // dragged top), never from the card's own rect — a bottom-anchored card's
+    // top moves down as the cap shrinks, so rect-based room would feed back
+    // into an ever-smaller cap.
+    const clampH = () => {
+      const room =
+        el.style.bottom === 'auto'
+          ? innerHeight - Math.max(0, parseFloat(el.style.top) || 0) - 12
+          : innerHeight - 92 // 80px bottom offset + 12px top margin
+      el.style.maxHeight = Math.min(capH, Math.max(160, room)) + 'px'
+    }
+    const onResize = () =>
+      el.isConnected ? clampH() : removeEventListener('resize', onResize)
+    addEventListener('resize', onResize)
+    const badgeDepth = 'box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 2px 5px rgba(5,0,25,.4);'
     const badge = card.correct
-      ? '<span style="background:#a3e961;color:#1c2a08;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>'
-      : '<span style="background:#ffb84c;color:#33230a;font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✗ Missed clue</span>'
-    // Content scrolls inside the card; the card itself never leaves the screen.
-    // Images stay full-width but are height-capped (object-fit keeps the whole
-    // photo visible) so one tall Plonkit image can't blow the card up.
-    const wrap = document.createElement('div')
-    wrap.style.cssText = 'flex:1 1 auto;min-height:0;overflow-y:auto'
-    wrap.innerHTML =
-      `<div style="padding:14px 16px 12px">` +
+      ? `<span style="background:linear-gradient(180deg,#b8f27c,#8fd94e);color:#1c2a08;${badgeDepth}font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✓ Got it</span>`
+      : `<span style="background:linear-gradient(180deg,#ffcf7c,#f5a838);color:#33230a;${badgeDepth}font-weight:700;font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap">✗ Missed clue</span>`
+    // Three bands: header and footer are always visible; only the images
+    // scroll. However small the card gets, you can read what the meta is and
+    // reach the rating buttons — the middle absorbs all the overflow.
+    const head = document.createElement('div')
+    // Shrinkable (it scrolls internally) so a small card never pushes the
+    // footer out of view — but the images band gives way first (higher shrink
+    // factor below), so squeezing starts with the pictures, not the text.
+    head.style.cssText = 'flex:0 1 auto;max-height:38vh;overflow-y:auto;padding:14px 16px 12px'
+    head.innerHTML =
       `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px">` +
       `<b style="font-size:15px;letter-spacing:.01em">${card.metaName ?? ''}</b>` +
       `<div style="display:flex;gap:8px;align-items:center">${badge}` +
       `<span class="gc-close" style="cursor:pointer;opacity:.55;font-size:16px;line-height:1;padding:2px">✕</span></div></div>` +
-      `<div style="color:#d6d0ea">${card.note ?? ''}</div></div>` +
-      (card.images && card.images.length
-        ? `<div style="display:grid;gap:2px">` +
-          card.images
-            .slice(0, 2)
-            .map((u) => `<img src="${u}" style="width:100%;display:block;max-height:38vh;object-fit:contain;background:#150c33">`)
-            .join('') +
-          `</div>`
-        : '') +
+      `<div style="color:#d6d0ea">${card.note ?? ''}</div>`
+    el.appendChild(head)
+    const mid = document.createElement('div')
+    // Absorbs the overflow first (shrink 99), but keeps a scrollable sliver
+    // when images exist so they never vanish entirely from a squeezed card.
+    mid.style.cssText = `flex:1 99 auto;min-height:${card.images && card.images.length ? 90 : 0}px;overflow-y:auto`
+    if (card.images && card.images.length)
+      mid.innerHTML =
+        `<div style="display:grid;gap:2px">` +
+        card.images
+          .slice(0, 2)
+          .map((u) => `<img src="${u}" style="width:100%;display:block;background:#150c33">`)
+          .join('') +
+        `</div>`
+    el.appendChild(mid)
+    // What each grade means for the schedule — hover any button to see it.
+    const RATE_TIP = {
+      again: "Didn't know it — the meta comes back within minutes",
+      hard: 'Got it, but slowly or unsurely — shorter wait than normal',
+      good: 'Recalled it with a bit of thought — the normal interval',
+      easy: 'Knew it instantly — waits much longer before returning',
+    }
+    const foot = document.createElement('div')
+    foot.style.cssText = 'flex:0 0 auto'
+    foot.innerHTML =
       (card.rating && card.roundId
         ? `<div class="gc-rate" style="padding:12px 14px 4px">` +
           `<div style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:rgba(232,228,246,.42);margin:0 2px 7px">Rate your recall</div>` +
           `<div style="display:flex;gap:7px">` +
           ['again', 'hard', 'good', 'easy']
-            .map((r) => `<button data-rate="${r}">${r[0].toUpperCase() + r.slice(1)}</button>`)
+            .map((r) => `<button data-rate="${r}" title="${RATE_TIP[r]}">${r[0].toUpperCase() + r.slice(1)}</button>`)
             .join('') +
           `</div></div>`
         : '') +
       (url
         ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:11px 16px;margin-top:8px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none;background:rgba(5,0,25,.25);border-top:1px solid rgba(255,255,255,.07)">Open Plonkit guide ↗</a>`
         : '')
-    el.appendChild(wrap)
+    el.appendChild(foot)
     // FSRS rating row: the server pre-selects the inferred grade; tapping a
     // different button re-grades the round. Doing nothing keeps the default,
     // so the zero-interaction flow behaves exactly as before.
-    const rateRow = wrap.querySelector('.gc-rate')
+    const rateRow = foot.querySelector('.gc-rate')
     if (rateRow) {
+      // One spectrum, one meaning: hue tracks how well you knew it, red
+      // (forgot) through amber and lime to deep green (instant recall).
       const RATE_STYLE = {
         again: ['#ff8d7d', '#e2544a', '#330703'],
         hard: ['#ffc76e', '#ef9f2e', '#33230a'],
         good: ['#b2ef73', '#8cd747', '#1c2a08'],
-        easy: ['#7fd0ff', '#4fb1f0', '#062a44'],
+        easy: ['#63e6a9', '#2ec27e', '#04321c'],
+      }
+      if (!document.getElementById('gc-anim')) {
+        const st = document.createElement('style')
+        st.id = 'gc-anim'
+        st.textContent =
+          '@keyframes gc-pop{0%{transform:translateY(-1px) scale(1)}45%{transform:translateY(-2px) scale(1.05)}100%{transform:translateY(-1px) scale(1)}}'
+        document.head.appendChild(st)
       }
       const btns = rateRow.querySelectorAll('button')
       // Selected = raised key (gradient, lifted, drop shadow); others = pressed
@@ -176,6 +220,9 @@
         const b = e.target.closest('button')
         if (!b || dragMoved) return
         paint(b.dataset.rate)
+        // A quick overshoot-and-settle on the chosen button — enough motion
+        // to confirm the tap without turning the card into a toy.
+        b.style.animation = 'gc-pop .3s cubic-bezier(.34,1.56,.64,1)'
         postRate(card.roundId, b.dataset.rate)
       })
     }
@@ -203,15 +250,17 @@
       const resize = (ev) => {
         el.style.transition = 'none'
         el.style.width = Math.max(300, Math.min(640, ev.clientX - rect.left + 8)) + 'px'
-        el.style.maxHeight = 'none'
-        el.style.height = Math.max(180, Math.min(innerHeight - rect.top - 10, ev.clientY - rect.top + 8)) + 'px'
+        // Height is only ever a cap: dragging past the content does nothing,
+        // so the card can't be stretched into empty space.
+        el.style.maxHeight = Math.max(180, Math.min(innerHeight - rect.top - 10, ev.clientY - rect.top + 8)) + 'px'
       }
       const up = () => {
         removeEventListener('pointermove', resize)
         removeEventListener('pointerup', up)
+        capH = parseFloat(el.style.maxHeight)
         localStorage.setItem(
           'gc-card-size',
-          JSON.stringify({ w: parseFloat(el.style.width), h: parseFloat(el.style.height) }),
+          JSON.stringify({ w: parseFloat(el.style.width), h: capH }),
         )
         localStorage.setItem(
           'gc-card-pos',
@@ -236,7 +285,8 @@
     el.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || e.target.closest('a,.gc-close,.gc-grip')) return
       const rect = el.getBoundingClientRect()
-      if (e.clientX > rect.right - 16 && wrap.scrollHeight > wrap.clientHeight) return // scrollbar
+      const scrolls = head.scrollHeight > head.clientHeight || mid.scrollHeight > mid.clientHeight
+      if (e.clientX > rect.right - 16 && scrolls) return // scrollbar
       e.preventDefault() // stops native image-drag from hijacking the gesture
       const offX = e.clientX - rect.left
       const offY = e.clientY - rect.top
@@ -259,28 +309,25 @@
             'gc-card-pos',
             JSON.stringify({ left: parseFloat(el.style.left), top: parseFloat(el.style.top) }),
           )
+          clampH() // wherever it landed, the bottom edge stays on screen
           setTimeout(() => (dragMoved = false), 0) // let the click handler see the drag first
         }
       }
       addEventListener('pointermove', move)
       addEventListener('pointerup', up)
     })
-    el.addEventListener('click', (e) => {
-      if (dragMoved) return // that was a drag, not a click
-      // real <a> handles its own navigation; window.open covers body clicks
-      if (url && !e.target.closest('a')) window.open(url, '_blank')
-      el.remove()
-    })
+    // Dismissal is deliberate only: the ✕ or the next round. Opening the
+    // Plonkit guide (the footer link) leaves the card exactly where it was.
     el.querySelector('.gc-close').addEventListener('click', (e) => {
       e.stopPropagation()
       el.remove()
     })
     document.body.appendChild(el)
+    clampH()
     requestAnimationFrame(() => {
       el.style.opacity = '1'
       el.style.transform = 'translateY(0)'
     })
-    setTimeout(() => el.remove(), 45000)
   }
 
   /** onAccepted fires only when the server actually recorded the round — a
