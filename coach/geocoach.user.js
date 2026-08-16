@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.8.3
+// @version      1.8.4
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -19,29 +19,38 @@
   const COACH_URL = 'http://127.0.0.1:5177/round'
   const RATE_URL = 'http://127.0.0.1:5177/rate'
 
-  /** Fire-and-forget rating override; only failures surface. */
+  /** Fire-and-forget rating override; only failures surface. Unlike round
+   * posts there is no game-state backstop, so a transient LAN blip would lose
+   * the rating for good — retry silently before giving up. */
   function postRate(id, rating) {
     const body = JSON.stringify({ id, rating })
-    if (typeof GM_xmlhttpRequest === 'function') {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: RATE_URL,
-        headers: { 'Content-Type': 'application/json' },
-        data: body,
-        timeout: 15000,
-        onload: (res) => {
-          if (res.status !== 200) toast('Rating not saved (' + res.status + ')', false)
-        },
-        onerror: () => toast('Rating not saved — server unreachable', false),
-        ontimeout: () => toast('Rating not saved — timed out', false),
-      })
-    } else {
-      fetch(RATE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
-        .then((res) => {
-          if (!res.ok) toast('Rating not saved (' + res.status + ')', false)
+    const attempt = (retriesLeft) => {
+      const failed = (message) => {
+        if (retriesLeft > 0) setTimeout(() => attempt(retriesLeft - 1), 1500)
+        else toast(message, false)
+      }
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: RATE_URL,
+          headers: { 'Content-Type': 'application/json' },
+          data: body,
+          timeout: 15000,
+          onload: (res) => {
+            if (res.status !== 200) toast('Rating not saved (' + res.status + ')', false)
+          },
+          onerror: () => failed('Rating not saved — server unreachable'),
+          ontimeout: () => failed('Rating not saved — timed out'),
         })
-        .catch(() => toast('Rating not saved — server unreachable', false))
+      } else {
+        fetch(RATE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+          .then((res) => {
+            if (!res.ok) toast('Rating not saved (' + res.status + ')', false)
+          })
+          .catch(() => failed('Rating not saved — server unreachable'))
+      }
     }
+    attempt(2)
   }
 
   function toast(text, ok) {
@@ -355,53 +364,64 @@
       if (j) showCard(j.card)
       if (onAccepted) onAccepted()
     }
+    // A single LAN blip (lost SYN, WiFi hiccup on the gaming PC) shouldn't
+    // toast or defer the clue card to the next round screen — retry silently
+    // first. Only after retries are exhausted do we toast and fall back to the
+    // game-state re-post backstop.
+    const RETRIES = 2
+    const RETRY_DELAY = 1500
+    const fail = (retriesLeft, retry, message) => {
+      if (retriesLeft > 0) {
+        setTimeout(() => retry(retriesLeft - 1), RETRY_DELAY)
+        return
+      }
+      sent.delete(key) // the next intercepted game-state response retries
+      toast(message, false)
+    }
     // GM_xmlhttpRequest when running under Tampermonkey; plain fetch otherwise
     // (Chrome allows https pages to reach localhost, and the server answers the
     // private-network preflight).
     if (typeof GM_xmlhttpRequest === 'function') {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: COACH_URL,
-        headers: { 'Content-Type': 'application/json' },
-        data: body,
-        timeout: 30000,
-        onload: (res) => {
-          if (res.status === 200) {
-            let j = null
-            try { j = JSON.parse(res.responseText) } catch {}
-            accepted(j)
-          } else {
-            sent.delete(key) // the next intercepted game-state response retries
-            toast('Coach server error (' + res.status + ')', false)
-          }
-        },
-        onerror: () => {
-          sent.delete(key)
-          toast('Coach server not running', false)
-        },
-        ontimeout: () => {
-          sent.delete(key)
-          toast('Coach server timed out', false)
-        },
-      })
+      const attempt = (retriesLeft) => {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: COACH_URL,
+          headers: { 'Content-Type': 'application/json' },
+          data: body,
+          timeout: 30000,
+          onload: (res) => {
+            if (res.status === 200) {
+              let j = null
+              try { j = JSON.parse(res.responseText) } catch {}
+              accepted(j)
+            } else {
+              sent.delete(key) // the next intercepted game-state response retries
+              toast('Coach server error (' + res.status + ')', false)
+            }
+          },
+          onerror: () => fail(retriesLeft, attempt, 'Coach server not running'),
+          ontimeout: () => fail(retriesLeft, attempt, 'Coach server timed out'),
+        })
+      }
+      attempt(RETRIES)
     } else {
-      fetch(COACH_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      })
-        .then((res) => {
-          if (!res.ok) {
-            sent.delete(key)
-            toast('Coach server error (' + res.status + ')', false)
-            return
-          }
-          res.json().then(accepted).catch(() => {})
+      const attempt = (retriesLeft) => {
+        fetch(COACH_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
         })
-        .catch(() => {
-          sent.delete(key)
-          toast('Coach server not running', false)
-        })
+          .then((res) => {
+            if (!res.ok) {
+              sent.delete(key)
+              toast('Coach server error (' + res.status + ')', false)
+              return
+            }
+            res.json().then(accepted).catch(() => {})
+          })
+          .catch(() => fail(retriesLeft, attempt, 'Coach server not running'))
+      }
+      attempt(RETRIES)
     }
   }
 
