@@ -309,6 +309,33 @@ async function handleRate(env, user, { id, rating }) {
 
 // ---------- HTTP ----------
 
+// The one public page. Everything else is a token-gated API; this stub is the
+// seed of the "FSRS for GeoGuessr" landing/setup tour planned for Stage 2.
+const LANDING = `<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GeoCoach — FSRS for GeoGuessr</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #0b0620; color: #efeaff;
+    font: 16px/1.6 system-ui, -apple-system, sans-serif; }
+  main { max-width: 34rem; padding: 3rem 1.5rem; text-align: center; }
+  h1 { font-size: 2rem; margin: 0 0 .3rem; letter-spacing: -.02em; }
+  h1 span { background: linear-gradient(100deg, #7fd0ff, #b2ef73);
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  p { color: #a89fc9; margin: .8rem 0; }
+  code { background: rgba(255,255,255,.08); border-radius: 6px; padding: .1rem .45rem; }
+</style>
+<main>
+  <h1><span>GeoCoach</span></h1>
+  <p><strong>Spaced repetition (FSRS) for GeoGuessr metas.</strong>
+  Every round you play is captured, graded, and scheduled for review —
+  so the clues you forget come back until you don't.</p>
+  <p>This instance is a personal, token-gated API. Public setup guide coming later.</p>
+  <p><code>GET /health</code> is the only other public route.</p>
+</main>`
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -328,6 +355,9 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS })
     if (path === '/health') return json({ ok: true })
+    if (request.method === 'GET' && path === '/') return new Response(LANDING, {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    })
 
     const user = await authUser(env, request, url)
     if (!user) return json({ ok: false, error: 'missing or unknown token' }, 401)
