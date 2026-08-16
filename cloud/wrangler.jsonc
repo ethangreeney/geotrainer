@@ -1,0 +1,16 @@
+{
+  "name": "geocoach",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-08-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "geocoach",
+      "database_id": "4a2ece03-b45c-4625-86cb-863a77ad7c19"
+    }
+  ],
+  // Re-enable once R2 is switched on for the account (dashboard > R2, one-time
+  // terms acceptance), then: wrangler r2 bucket create geocoach && wrangler deploy
+  // "r2_buckets": [{ "binding": "STORE", "bucket_name": "geocoach" }]
+  "r2_buckets": []
+}
