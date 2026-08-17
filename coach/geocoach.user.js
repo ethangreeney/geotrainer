@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.2.2
+// @version      2.2.3
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -809,7 +809,9 @@
     )
     const watchPage = () => {
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
-      if (dash) dash.style.display = inGame ? 'none' : ''
+      // '' would delete the display property and drop the pill back to inline
+      // layout, which un-centers the ggFont text — restore the real value.
+      if (dash) dash.style.display = inGame ? 'none' : 'inline-flex'
       if (inGame) {
         arrivalChecked = false
       } else {
