@@ -1,0 +1,7 @@
+# Memorable-hostname shim: geofsrs.pages.dev -> geocoach Worker.
+name = "geofsrs"
+pages_build_output_dir = "public"
+
+[[services]]
+binding = "API"
+service = "geocoach"
