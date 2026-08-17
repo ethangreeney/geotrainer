@@ -4,9 +4,10 @@
  *
  * Same shapes as the local bridge on purpose: a client switches by changing
  * its base URL and adding a bearer token. D1 holds users, per-user state
- * (coach/state.json minus `rounds`) and one row per round; R2 holds the meta
- * catalogs, the personal Plonkit snapshot, and (later) pano imagery. The FSRS
- * layer is coach/scheduler.mjs imported verbatim — one scheduler, two hosts.
+ * (coach/state.json minus `rounds`) and one row per round; the meta catalogs
+ * and region scopes are bundled into the Worker at deploy time. R2 (optional,
+ * not yet provisioned) would hold the Plonkit snapshot and pano imagery. The
+ * FSRS layer is coach/scheduler.mjs imported verbatim — one scheduler, two hosts.
  *
  * Not ported: street-view tile fetching/stitching (Workers have no canvas —
  * panos will be stitched client-side and uploaded), the Vite dashboard, and
@@ -19,6 +20,15 @@ import {
   ratingNameFor,
 } from '../../coach/scheduler.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
+// The four meta catalogs, bundled at deploy time (≈600KB gzipped, well under
+// the Worker limit) — deck building and meta resolution need no R2 at all.
+// Import order is tier order: Basics 0, Beginner 1, Intermediate 2, World 3.
+import CATALOG_BASICS from '../../coach/catalog/66fda352ee1c8ee4735e1aa8.json'
+import CATALOG_BEGINNER from '../../coach/catalog/66c0d3feff4dbe492e06174e.json'
+import CATALOG_INTERMEDIATE from '../../coach/catalog/67695a0a9c0874b92709eedb.json'
+import CATALOG_WORLD from '../../coach/catalog/66fda2e27e08dc03b5bb3d6e.json'
+
+const CATALOGS = [CATALOG_BASICS, CATALOG_BEGINNER, CATALOG_INTERMEDIATE, CATALOG_WORLD]
 
 const metaKeyOf = (country, name) => (name ? (country ? `${country}: ${name}` : name) : null)
 
@@ -66,23 +76,12 @@ function inMetaScope(metaName, guessRegion) {
   return scopedTo.some((r) => normRegion(r) === got)
 }
 
-// Module-scope caches live for the isolate's lifetime — perfect for data that
-// changes rarely (catalogs) or is keyed finely enough to never go stale (geocode).
-let catalogCache = null
+// Geocode cache lives for the isolate's lifetime — keyed finely enough to
+// never go stale. Catalogs are bundled (CATALOGS above), so no cache needed.
 const geocodeCache = new Map()
 
-async function loadCatalogs(env) {
-  if (catalogCache) return catalogCache
-  if (!env.STORE) return [] // R2 not provisioned yet — degrade to no catalogs
-  const catalogs = []
-  const list = await env.STORE.list({ prefix: 'catalog/' })
-  for (const obj of list.objects) {
-    const body = await env.STORE.get(obj.key)
-    if (body) catalogs.push(await body.json())
-  }
-  catalogs.sort((a, b) => a.tier - b.tier)
-  catalogCache = catalogs
-  return catalogs
+async function loadCatalogs() {
+  return CATALOGS
 }
 
 async function countryOf(lat, lng) {
@@ -473,6 +472,7 @@ export default {
       if (request.method === 'GET' && path.startsWith('/plonkit/')) {
         const key = path.slice(1) // "plonkit/..."
         if (key.includes('..')) return json({ ok: false, error: 'bad path' }, 400)
+        if (!env.STORE) return json({ ok: false, error: 'plonkit not provisioned (no R2)' }, 503)
         const obj = await env.STORE.get(key)
         if (!obj) return json({ ok: false, error: 'not found' }, 404)
         const type = key.endsWith('.md')

@@ -677,6 +677,16 @@ const server = createServer(async (req, res) => {
           .replaceAll(`127.0.0.1:${PORT}`, host)
           .replace('// @connect      127.0.0.1', `// @connect      127.0.0.1\n// @connect      ${bare}`)
       }
+      // Cloud credentials live only in the gitignored config.json — injected
+      // here so the installed script talks to the Worker while the committed
+      // source never carries the token.
+      if (CONFIG.cloud?.url && CONFIG.cloud?.token) {
+        const cloudHost = new URL(CONFIG.cloud.url).host
+        src = src
+          .replace("'__CLOUD_URL__'", JSON.stringify(CONFIG.cloud.url))
+          .replace("'__CLOUD_TOKEN__'", JSON.stringify(CONFIG.cloud.token))
+          .replace('// @connect      127.0.0.1', `// @connect      127.0.0.1\n// @connect      ${cloudHost}`)
+      }
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
       res.end(src)
     } catch {

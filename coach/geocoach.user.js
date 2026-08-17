@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.8.4
+// @version      1.9.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -16,8 +16,40 @@
 /* global GM_xmlhttpRequest, unsafeWindow */
 ;(function () {
   'use strict'
-  const COACH_URL = 'http://127.0.0.1:5177/round'
-  const RATE_URL = 'http://127.0.0.1:5177/rate'
+  // Cloud bridge: the local server injects the real URL and token from the
+  // gitignored coach/config.json when it serves this file. Installed raw from
+  // the repo the placeholders survive, CLOUD stays null, and everything talks
+  // to the local server exactly as before.
+  const CLOUD_URL = '__CLOUD_URL__'
+  const CLOUD_TOKEN = '__CLOUD_TOKEN__'
+  const CLOUD = CLOUD_URL.startsWith('http') ? { url: CLOUD_URL, token: CLOUD_TOKEN } : null
+  const AUTH_HEADERS = CLOUD ? { Authorization: 'Bearer ' + CLOUD.token } : {}
+  const LOCAL = 'http://127.0.0.1:5177'
+  const COACH_URL = (CLOUD ? CLOUD.url : LOCAL) + '/round'
+  const RATE_URL = (CLOUD ? CLOUD.url : LOCAL) + '/rate'
+
+  /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
+   * server still gets every round so pano dossiers keep building at home.
+   * Fire-and-forget — away from the Mac this fails silently, and its card
+   * and grading are ignored (the cloud response drives the UI). */
+  function postLocalDossier(body) {
+    if (!CLOUD) return
+    if (typeof GM_xmlhttpRequest === 'function') {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: LOCAL + '/round',
+        headers: { 'Content-Type': 'application/json' },
+        data: body,
+        timeout: 30000,
+      })
+    } else {
+      fetch(LOCAL + '/round', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      }).catch(() => {})
+    }
+  }
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
    * posts there is no game-state backstop, so a transient LAN blip would lose
@@ -33,7 +65,7 @@
         GM_xmlhttpRequest({
           method: 'POST',
           url: RATE_URL,
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
           data: body,
           timeout: 15000,
           onload: (res) => {
@@ -43,7 +75,7 @@
           ontimeout: () => failed('Rating not saved — timed out'),
         })
       } else {
-        fetch(RATE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+        fetch(RATE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS }, body })
           .then((res) => {
             if (!res.ok) toast('Rating not saved (' + res.status + ')', false)
           })
@@ -357,6 +389,7 @@
     if (sent.has(key)) return
     sent.add(key)
     const body = JSON.stringify(payload)
+    postLocalDossier(body)
     // Success is silent — the card (or its absence) is the signal. Only
     // failures toast, since those need acting on.
     const accepted = (j) => {
@@ -386,7 +419,7 @@
         GM_xmlhttpRequest({
           method: 'POST',
           url: COACH_URL,
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
           data: body,
           timeout: 30000,
           onload: (res) => {
@@ -408,7 +441,7 @@
       const attempt = (retriesLeft) => {
         fetch(COACH_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
           body,
         })
           .then((res) => {
@@ -565,18 +598,20 @@
   const SERVER = 'http://127.0.0.1:5177'
 
   function serverGet(path) {
+    const base = CLOUD ? CLOUD.url : SERVER
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest === 'function') {
         GM_xmlhttpRequest({
           method: 'GET',
-          url: SERVER + path,
+          url: base + path,
+          headers: { ...AUTH_HEADERS },
           timeout: 60000,
           onload: (r) => (r.status === 200 ? resolve(JSON.parse(r.responseText)) : reject(new Error('server ' + r.status))),
           onerror: () => reject(new Error('server unreachable')),
           ontimeout: () => reject(new Error('server timeout')),
         })
       } else {
-        fetch(SERVER + path)
+        fetch(base + path, { headers: { ...AUTH_HEADERS } })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error('server ' + r.status))))
           .then(resolve, reject)
       }
