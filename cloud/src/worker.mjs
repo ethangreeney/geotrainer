@@ -169,6 +169,36 @@ async function metaFromCatalogs(env, panoId) {
   return null
 }
 
+/** The reverse of metaFromCatalogs: a meta key ("Brazil: Pole") back to some
+ * location that teaches it. Built once per isolate — the catalogs are bundled,
+ * so this is a few hundred entries of pure in-memory work. */
+let metaLocations = null
+function locationForMeta(metaName) {
+  if (!metaLocations) {
+    metaLocations = new Map()
+    for (const c of CATALOGS)
+      for (const l of c.locations) {
+        const key = metaKeyOf(l.country, l.metaName)
+        if (key && !metaLocations.has(key)) metaLocations.set(key, { mapId: c.mapId, panoId: l.panoId })
+      }
+  }
+  return metaLocations.get(metaName) ?? null
+}
+
+/** The picture that goes with a clue, borrowed from its LM card (cached in D1
+ * forever by lmMeta, so the dashboard pays the network cost once per clue).
+ * Every failure is a null image, never a broken dashboard. */
+async function metaImage(env, metaName) {
+  const loc = locationForMeta(metaName)
+  if (!loc) return null
+  try {
+    const lm = await lmMeta(env, loc.mapId, loc.panoId)
+    return lm?.images?.[0] ?? null
+  } catch {
+    return null
+  }
+}
+
 // ---------- per-user persistence ----------
 
 const EMPTY_STATE = { countries: {}, confusions: {}, metas: {}, deckCards: {}, lastDeck: null }
@@ -293,12 +323,16 @@ async function buildDashboard(env, user) {
     .sort((a, b) => pct(a.correct, a.seen) - pct(b.correct, b.seen) || b.seen - a.seen)
     .slice(0, 12)
 
-  const [countRow, roundRows] = await Promise.all([
+  const [countRow, roundRows, weakestImages] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ?').bind(user.id).first(),
     env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT 300')
       .bind(user.id)
       .all(),
+    // A slipping clue is worth looking at, not just reading — so each one
+    // carries the picture from its LM card.
+    Promise.all(weakest.map((m) => metaImage(env, m.metaName))),
   ])
+  const weakestWithImages = weakest.map((m, i) => ({ ...m, image: weakestImages[i] }))
 
   const nameByCode = new Map()
   const rounds = (roundRows?.results ?? []).map((row) => {
@@ -350,7 +384,7 @@ async function buildDashboard(env, user) {
       holding: metaRows.length - solid.length - shaky.length,
       shaky: shaky.length,
       total: metaRows.length,
-      weakest,
+      weakest: weakestWithImages,
     },
     countries,
     totals: { rounds: countRow?.n ?? 0, correctPct: Math.round(100 * pct(correctAll, seenAll)) },
@@ -577,6 +611,19 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS })
     if (path === '/health') return json({ ok: true })
+
+    // People should read geofsrs.pages.dev in the address bar. Only page
+    // navigations hop domains — the userscript's API calls and Tampermonkey's
+    // update checks (no text/html Accept) must keep working wherever they
+    // were installed to point.
+    if (
+      url.hostname.endsWith('.workers.dev') &&
+      request.method === 'GET' &&
+      (request.headers.get('Accept') ?? '').includes('text/html') &&
+      !isApiPath(path)
+    ) {
+      return Response.redirect(`https://geofsrs.pages.dev${path}${url.search}`, 301)
+    }
 
     // ---------- public ----------
     try {

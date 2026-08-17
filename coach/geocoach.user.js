@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.1.0
+// @version      2.2.1
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -750,23 +750,37 @@
   }
 
   /** The website signs in with ?token= in the URL, so any machine running
-   * this script can open the dashboard already signed in. A quiet pill in
-   * the corner, hidden mid-round so it never sits over gameplay. */
+   * this script can open the dashboard already signed in. Styled as a native
+   * GeoGuessr button — exact gradient, shadows, and italic ggFont lifted from
+   * the variantPurple "Edit avatar" button on the signed-in home (green
+   * variantPrimary clashed there) — and hidden mid-round so it never sits
+   * over gameplay. */
   function mountDashboardLink() {
     if (!CLOUD) return null
     const a = document.createElement('a')
     a.id = 'geocoach-dash'
-    a.textContent = 'GeoCoach ↗'
+    a.textContent = 'GeoCoach'
     a.href = CLOUD.url + '/app?token=' + encodeURIComponent(CLOUD.token)
     a.target = '_blank'
     a.rel = 'noreferrer'
     a.style.cssText =
-      'position:fixed;bottom:18px;left:18px;z-index:999997;padding:8px 14px;' +
-      'border-radius:999px;font:600 12px/1 system-ui;letter-spacing:.02em;' +
-      'color:#fff;background:rgba(22,60,40,.85);text-decoration:none;opacity:.7;' +
-      'transition:opacity .2s'
-    a.addEventListener('mouseenter', () => (a.style.opacity = '1'))
-    a.addEventListener('mouseleave', () => (a.style.opacity = '.7'))
+      'position:fixed;bottom:18px;left:18px;z-index:999997;' +
+      'display:inline-flex;align-items:center;height:38px;padding:0 24px 2px;' +
+      'border-radius:60px;font:italic 700 14px ggFont,sans-serif;' +
+      'text-transform:uppercase;color:#fff;text-decoration:none;' +
+      'text-shadow:oklch(0.2115 0.066 285.82) 0 1px 2px;' +
+      'background:linear-gradient(oklch(0.7005 0.1745 293.89),oklch(0.3879 0.1768 290.8));' +
+      'box-shadow:rgba(0,0,0,.25) 0 4.4px 18px,' +
+      'oklch(1 0 0/.2) 0 1px 0 inset,rgba(0,0,0,.3) 0 -2px 0 inset;' +
+      'transition:filter .15s,transform .15s'
+    a.addEventListener('mouseenter', () => {
+      a.style.filter = 'brightness(1.1)'
+      a.style.transform = 'translateY(-1px)'
+    })
+    a.addEventListener('mouseleave', () => {
+      a.style.filter = ''
+      a.style.transform = ''
+    })
     document.body.appendChild(a)
     return a
   }

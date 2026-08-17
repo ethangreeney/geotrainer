@@ -77,6 +77,8 @@ export interface WeakMeta {
   seen: number
   correct: number
   lapses: number
+  /** The clue's picture from its Learnable Meta card, when one exists. */
+  image: string | null
 }
 export interface CountryStat {
   code: string

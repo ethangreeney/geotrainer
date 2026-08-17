@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Globe from '../GlobeLazy'
 import type { CountryTint } from '../Globe'
 import { Link, Wordmark, navigate } from '../router'
-import { ApiError, clearToken, fetchDashboard, getToken, type DashboardData } from '../api'
+import { ApiError, clearToken, fetchDashboard, getToken, type DashboardData, type WeakMeta } from '../api'
 
 const MIN = 60_000
 const HOUR = 3_600_000
@@ -39,6 +39,102 @@ function whenNext(ts: string | null) {
 
 /** The geocoder hands back names like "Philippines (the)". Nobody says that. */
 const clean = (n: string) => n.replace(/\s*\(the\)$/i, '')
+
+/** Meta keys arrive as "Cambodia: Pole" — the country is an overline, not a title. */
+function splitMeta(name: string) {
+  const i = name.indexOf(': ')
+  return i < 0 ? { country: null, clue: name } : { country: name.slice(0, i), clue: name.slice(i + 2) }
+}
+
+/** One slipping clue: its picture, its name, and how badly it is going. */
+function SlipCard({ m }: { m: WeakMeta }) {
+  const { country, clue } = splitMeta(m.metaName)
+  const inner = (
+    <>
+      <div className="shot">
+        {m.image ? (
+          <img src={m.image} alt={clue} loading="lazy" decoding="async" />
+        ) : (
+          <span className="noShot">No picture for this one</span>
+        )}
+      </div>
+      {country && <span className="where">{country}</span>}
+      <span className="clue">{clue}</span>
+      <span className="tally">
+        {m.correct} of {m.seen} right
+        {m.lapses > 0 && (
+          <em>
+            {' '}
+            · forgotten {m.lapses} {m.lapses === 1 ? 'time' : 'times'}
+          </em>
+        )}
+      </span>
+    </>
+  )
+  return m.image ? (
+    <a className="slipCard" href={m.image} target="_blank" rel="noreferrer">
+      {inner}
+    </a>
+  ) : (
+    <div className="slipCard is-blank">{inner}</div>
+  )
+}
+
+/** A rail you can drag, wheel or step through — the arrows fade out at the ends. */
+function SlipStrip({ metas }: { metas: WeakMeta[] }) {
+  const rail = useRef<HTMLDivElement>(null)
+  const [edge, setEdge] = useState({ start: true, end: true })
+
+  useEffect(() => {
+    const el = rail.current
+    if (!el) return
+    const read = () =>
+      setEdge({
+        start: el.scrollLeft < 8,
+        end: el.scrollLeft + el.clientWidth > el.scrollWidth - 8,
+      })
+    read()
+    el.addEventListener('scroll', read, { passive: true })
+    const ro = new ResizeObserver(read)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', read)
+      ro.disconnect()
+    }
+  }, [metas])
+
+  const step = (dir: 1 | -1) => {
+    const el = rail.current
+    if (el) el.scrollBy({ left: dir * Math.max(240, el.clientWidth * 0.8), behavior: 'smooth' })
+  }
+
+  return (
+    <>
+      <div className="secHead">
+        <div>
+          <h2>Slipping</h2>
+          <p className="secNote">The clues you keep misreading. Open one to see it full size.</p>
+        </div>
+        <div className="stepper">
+          <button aria-label="Scroll left" disabled={edge.start} onClick={() => step(-1)}>
+            ←
+          </button>
+          <button aria-label="Scroll right" disabled={edge.end} onClick={() => step(1)}>
+            →
+          </button>
+        </div>
+      </div>
+      <div
+        className={`slipRail${edge.start ? ' at-start' : ''}${edge.end ? ' at-end' : ''}`}
+        ref={rail}
+      >
+        {metas.map((m) => (
+          <SlipCard key={m.metaName} m={m} />
+        ))}
+      </div>
+    </>
+  )
+}
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -169,40 +265,44 @@ export default function Dashboard() {
       </div>
 
       {!empty && (
-        <div className="cols">
-          <div className="col">
-            <h2>Slipping</h2>
-            {metas.weakest.length === 0 && <p className="empty">Nothing is slipping right now.</p>}
-            {metas.weakest.map((m) => (
-              <div className="slipRow" key={m.metaName}>
-                <span className="nm">{m.metaName}</span>
-                <span className="sc">
-                  {m.correct}/{m.seen}
-                </span>
-                {m.lapses > 0 && (
-                  <span className="lp">
-                    forgotten {m.lapses} {m.lapses === 1 ? 'time' : 'times'}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
+        <>
+          <section className="dashSec">
+            {metas.weakest.length === 0 ? (
+              <>
+                <div className="secHead">
+                  <div>
+                    <h2>Slipping</h2>
+                  </div>
+                </div>
+                <p className="empty">Nothing is slipping right now.</p>
+              </>
+            ) : (
+              <SlipStrip metas={metas.weakest} />
+            )}
+          </section>
 
-          <div className="col">
-            <h2>Recent rounds</h2>
-            {recent.map((r) => (
-              <div className="roundRow" key={r.id}>
-                <i className={r.correct ? 'ok' : 'no'} />
-                <span className="place">
-                  {r.country ? clean(r.country) : 'Unknown'}
-                  {!r.correct && r.guessCountry && <s> read as {clean(r.guessCountry)}</s>}
-                </span>
-                <span className="when">{ago(r.ts)}</span>
-                {r.metaName && <span className="meta">{r.metaName}</span>}
+          <section className="dashSec">
+            <div className="secHead">
+              <div>
+                <h2>Recent rounds</h2>
+                <p className="secNote">Where you landed, and what you read it as.</p>
               </div>
-            ))}
-          </div>
-        </div>
+            </div>
+            <div className="roundList">
+              {recent.map((r) => (
+                <div className="roundRow" key={r.id}>
+                  <i className={r.correct ? 'ok' : 'no'} />
+                  <span className="place">
+                    {r.country ? clean(r.country) : 'Unknown'}
+                    {!r.correct && r.guessCountry && <s> read as {clean(r.guessCountry)}</s>}
+                  </span>
+                  <span className="when">{ago(r.ts)}</span>
+                  {r.metaName && <span className="meta">{r.metaName}</span>}
+                </div>
+              ))}
+            </div>
+          </section>
+        </>
       )}
 
       <footer>
