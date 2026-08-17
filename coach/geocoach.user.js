@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.0.0
+// @version      2.1.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -749,8 +749,31 @@
     if (Date.now() - last > 60 * 60 * 1000) rebuildSilently('arrival')
   }
 
+  /** The website signs in with ?token= in the URL, so any machine running
+   * this script can open the dashboard already signed in. A quiet pill in
+   * the corner, hidden mid-round so it never sits over gameplay. */
+  function mountDashboardLink() {
+    if (!CLOUD) return null
+    const a = document.createElement('a')
+    a.id = 'geocoach-dash'
+    a.textContent = 'GeoCoach ↗'
+    a.href = CLOUD.url + '/app?token=' + encodeURIComponent(CLOUD.token)
+    a.target = '_blank'
+    a.rel = 'noreferrer'
+    a.style.cssText =
+      'position:fixed;bottom:18px;left:18px;z-index:999997;padding:8px 14px;' +
+      'border-radius:999px;font:600 12px/1 system-ui;letter-spacing:.02em;' +
+      'color:#fff;background:rgba(22,60,40,.85);text-decoration:none;opacity:.7;' +
+      'transition:opacity .2s'
+    a.addEventListener('mouseenter', () => (a.style.opacity = '1'))
+    a.addEventListener('mouseleave', () => (a.style.opacity = '.7'))
+    document.body.appendChild(a)
+    return a
+  }
+
   function init() {
     resolveMyId()
+    const dash = mountDashboardLink()
     setInterval(pollDuel, 10000)
     // The last round's card outlives both removal triggers: "Show results"
     // keeps the /game/<token> path and serves no new round, so the card sat
@@ -772,6 +795,7 @@
     )
     const watchPage = () => {
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
+      if (dash) dash.style.display = inGame ? 'none' : ''
       if (inGame) {
         arrivalChecked = false
       } else {
