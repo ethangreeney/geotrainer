@@ -786,6 +786,17 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify(plan, null, 2))
     return
   }
+  // Round-start cache warmer, cloud-parity no-op: local card lookups read
+  // bundled files, so there is nothing to warm — acknowledged so a local-only
+  // install's fire-and-forget ping doesn't 404 in the log every round.
+  if (req.method === 'POST' && req.url === '/prewarm') {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+    return
+  }
   // Rating override from the card's Again/Hard/Good/Easy row. Restores the
   // pre-grade snapshot and re-grades with the explicit rating at the original
   // review time — last tap wins, tapping the same button twice is a no-op.
