@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, Wordmark, navigate } from '../router'
+import { Foot, Link, Mast, navigate } from '../router'
 import { ApiError, clearToken, fetchDashboard, fetchMe, getToken, installUrl, setToken, signup } from '../api'
 
 /* Steps 2 and 3 happen inside the browser, where the server cannot see them.
@@ -48,7 +48,7 @@ type StepState = 'done' | 'current' | 'upcoming'
 function Tick() {
   return (
     <svg className="tick" viewBox="0 0 20 20" aria-hidden>
-      <path d="M4 10.4 8 14.4 16 5.6" />
+      <path d="M3 10.6 7.6 15 17 5" />
     </svg>
   )
 }
@@ -74,8 +74,8 @@ function Step({
   return (
     <li className={`stepBlock is-${state}`} aria-current={state === 'current' ? 'step' : undefined}>
       <div className="stepHead">
-        <span className={'n' + (state === 'done' ? ' is-check' : '')} aria-hidden>
-          {state === 'done' ? <Tick /> : label}
+        <span className="n" aria-hidden>
+          <span className="no">{state === 'done' ? <Tick /> : label}</span>
         </span>
         {state === 'done' && onToggle ? (
           <button className="stepTitle" onClick={onToggle} aria-expanded={!!open}>
@@ -194,144 +194,162 @@ export default function Start() {
   }
 
   return (
-    <div className="shell">
-      <div className="topline">
-        <Wordmark />
+    <>
+      <Mast>
         {token && (
           <Link to="/app" className="quiet">
-            Your dashboard →
+            Dashboard →
           </Link>
         )}
-      </div>
+      </Mast>
 
-      <div className="start">
-        <p className="kicker">{complete ? 'Setup complete' : `Step ${current + 1} of 4`}</p>
+      <div className="shell">
+        <div className="strip">
+          <span>Setup</span>
+          <span className="sep">/</span>
+          <span>
+            <b>{done.filter(Boolean).length}</b> of 4 steps done
+          </span>
+          <span className="sep">/</span>
+          <span>Takes about two minutes</span>
+        </div>
 
-        {complete ? (
-          <>
-            <h1 style={{ marginTop: 22 }}>You are set up.</h1>
-            <p className="lede">
-              Your first round is in. GeoCoach reads every round from here and builds your deck as you play.
-            </p>
-            <button className="btn" style={{ marginTop: 30 }} onClick={() => navigate('/app')}>
-              See your dashboard <span className="arr">→</span>
-            </button>
-          </>
-        ) : (
-          <>
-            <h1 style={{ marginTop: 22 }}>Pick a name and play.</h1>
-            <p className="lede">
-              There is no password and no email. Your account is a private link, so the link is the one thing worth
-              keeping safe.
-            </p>
-          </>
-        )}
+        <div className="start">
+          <div className="gauge">
+            <span className="tag b">{complete ? 'Setup complete' : `Step ${current + 1} of 4`}</span>
+            <span className="bars" aria-hidden>
+              {done.map((d, i) => (
+                <i key={i} className={d ? 'on' : ''} />
+              ))}
+            </span>
+          </div>
 
-        <ol className="stepList">
-          <Step
-            n={1}
-            state={stateOf(0)}
-            title={account ? `You are ${account}` : checking ? 'Your account' : 'Create your account'}
-            open={openStep === 1}
-            onToggle={account ? () => toggle(1) : undefined}
-          >
-            {checking && !account ? (
-              <p>Checking your account…</p>
-            ) : !account ? (
-              <>
-                <p>Any name will do. It only labels your own dashboard.</p>
-                <form onSubmit={submit}>
-                  <input
-                    className="field"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Your name"
-                    maxLength={40}
-                    autoComplete="off"
-                    autoFocus
-                  />
-                  <button className="btn" type="submit" disabled={busy || !name.trim()}>
-                    {busy ? 'Creating…' : 'Create my account'}
-                  </button>
-                </form>
-                {error && <p className="err">{error}</p>}
-              </>
-            ) : (
-              <>
-                <p>This link is your account. It signs you in and it carries your data.</p>
-                <div className="linkbox">
-                  <code>{link}</code>
-                  <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+          {complete ? (
+            <>
+              <h1>You are set up.</h1>
+              <p className="lede">
+                Your first round is in. GeoCoach reads every round from here and builds your deck as you play.
+              </p>
+              <button className="btn" style={{ marginTop: 26 }} onClick={() => navigate('/app')}>
+                See your dashboard <span className="arr">→</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <h1>Pick a name and play.</h1>
+              <p className="lede">
+                There is no password and no email. Your account is a private link, so the link is the one thing worth
+                keeping safe.
+              </p>
+            </>
+          )}
+
+          <ol className="stepList">
+            <Step
+              n={1}
+              state={stateOf(0)}
+              title={account ? `You are ${account}` : checking ? 'Your account' : 'Create your account'}
+              open={openStep === 1}
+              onToggle={account ? () => toggle(1) : undefined}
+            >
+              {checking && !account ? (
+                <p>Checking your account…</p>
+              ) : !account ? (
+                <>
+                  <p>Any name will do. It only labels your own dashboard.</p>
+                  <form onSubmit={submit}>
+                    <input
+                      className="field"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Your name"
+                      maxLength={40}
+                      autoComplete="off"
+                      autoFocus
+                    />
+                    <button className="btn" type="submit" disabled={busy || !name.trim()}>
+                      {busy ? 'Creating…' : 'Create my account'}
+                    </button>
+                  </form>
+                  {error && <p className="err">{error}</p>}
+                </>
+              ) : (
+                <>
+                  <p>This link is your account. It signs you in and it carries your data.</p>
+                  <div className="linkbox">
+                    <code>{link}</code>
+                    <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+                  </div>
+                  <p className="warn">Anyone with this link has your account. Do not post it or share it.</p>
+                </>
+              )}
+            </Step>
+
+            <Step n={2} state={stateOf(1)} title={done[1] ? 'Tampermonkey installed' : 'Install Tampermonkey'}>
+              <p>GeoCoach runs as a userscript, so your browser needs Tampermonkey first.</p>
+              <a className="btn wide" href={store.url} target="_blank" rel="noreferrer">
+                {browser ? `Add Tampermonkey to ${store.name}` : 'Add Tampermonkey'} <span className="arr">→</span>
+              </a>
+              <details className="others">
+                <summary>Different browser?</summary>
+                <div>
+                  {others.map((s) => (
+                    <a key={s.id} href={s.url} target="_blank" rel="noreferrer" className="quiet">
+                      {s.name} →
+                    </a>
+                  ))}
                 </div>
-                <p className="warn">Anyone with this link has your account. Do not post it or share it.</p>
-              </>
-            )}
-          </Step>
+              </details>
+              <button className="confirm" onClick={confirmTm}>
+                Done, next <span className="arr">→</span>
+              </button>
+            </Step>
 
-          <Step n={2} state={stateOf(1)} title={done[1] ? 'Tampermonkey installed' : 'Install Tampermonkey'}>
-            <p>GeoCoach runs as a userscript, so your browser needs Tampermonkey first.</p>
-            <a className="btn wide" href={store.url} target="_blank" rel="noreferrer" style={{ marginTop: 16 }}>
-              {browser ? `Add Tampermonkey to ${store.name}` : 'Add Tampermonkey'} <span className="arr">→</span>
-            </a>
-            <details className="others">
-              <summary>Different browser?</summary>
-              <div>
-                {others.map((s) => (
-                  <a key={s.id} href={s.url} target="_blank" rel="noreferrer" className="quiet">
-                    {s.name} →
+            <Step
+              n={3}
+              state={stateOf(2)}
+              title={done[2] ? 'GeoCoach installed' : 'Install GeoCoach'}
+              open={openStep === 3}
+              onToggle={link ? () => toggle(3) : undefined}
+            >
+              {link ? (
+                <>
+                  <p>Tampermonkey will open its install screen. Confirm, and the script is live.</p>
+                  <a className="btn wide" href={link} target="_blank" rel="noreferrer">
+                    Install GeoCoach <span className="arr">→</span>
                   </a>
-                ))}
-              </div>
-            </details>
-            <button className="confirm" onClick={confirmTm}>
-              Done, next <span className="arr">→</span>
-            </button>
-          </Step>
+                  {!done[2] && (
+                    <button className="confirm" onClick={confirmUs}>
+                      Done, next <span className="arr">→</span>
+                    </button>
+                  )}
+                </>
+              ) : (
+                <p>Create your account above and your install link appears here.</p>
+              )}
+            </Step>
 
-          <Step
-            n={3}
-            state={stateOf(2)}
-            title={done[2] ? 'GeoCoach installed' : 'Install GeoCoach'}
-            open={openStep === 3}
-            onToggle={link ? () => toggle(3) : undefined}
-          >
-            {link ? (
-              <>
-                <p>Tampermonkey will open its install screen. Confirm, and the script is live.</p>
-                <a className="btn wide" href={link} target="_blank" rel="noreferrer" style={{ marginTop: 16 }}>
-                  Install GeoCoach <span className="arr">→</span>
-                </a>
-                {!done[2] && (
-                  <button className="confirm" onClick={confirmUs}>
-                    Done, next <span className="arr">→</span>
-                  </button>
-                )}
-              </>
-            ) : (
-              <p>Create your account above and your install link appears here.</p>
-            )}
-          </Step>
-
-          <Step n={4} state={stateOf(3)} title={done[3] ? 'First round captured' : 'Play a game'}>
-            <p>Play GeoGuessr as usual and GeoCoach starts reading your rounds.</p>
-            <p>Your trainer map shows up in your GeoGuessr profile once the first deck is built.</p>
-            <a className="btn wide" href="https://www.geoguessr.com/" target="_blank" rel="noreferrer" style={{ marginTop: 16 }}>
-              Open GeoGuessr <span className="arr">→</span>
-            </a>
-            {token && !captured && (
-              <div className="waiting">
-                <i />
-                <span>Waiting for your first round…</span>
-              </div>
-            )}
-          </Step>
-        </ol>
+            <Step n={4} state={stateOf(3)} title={done[3] ? 'First round captured' : 'Play a game'}>
+              <p>Play GeoGuessr as usual and GeoCoach starts reading your rounds.</p>
+              <p>Your trainer map shows up in your GeoGuessr profile once the first deck is built.</p>
+              <a className="btn wide" href="https://www.geoguessr.com/" target="_blank" rel="noreferrer">
+                Open GeoGuessr <span className="arr">→</span>
+              </a>
+              {token && !captured && (
+                <div className="waiting">
+                  <i />
+                  <span>Waiting for your first round…</span>
+                </div>
+              )}
+            </Step>
+          </ol>
+        </div>
       </div>
 
-      <footer>
+      <Foot>
         <Link to="/">GeoCoach</Link>
         <span>Not affiliated with GeoGuessr</span>
-      </footer>
-    </div>
+      </Foot>
+    </>
   )
 }

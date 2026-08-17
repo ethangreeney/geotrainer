@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Globe from '../GlobeLazy'
 import type { CountryTint } from '../Globe'
-import { Link, Wordmark, navigate } from '../router'
+import { Foot, Link, Mast, navigate } from '../router'
 import { ApiError, clearToken, fetchDashboard, getToken, type DashboardData, type WeakMeta } from '../api'
 
 const MIN = 60_000
@@ -37,6 +37,12 @@ function whenNext(ts: string | null) {
   return `on ${new Date(ts).toLocaleDateString([], { month: 'long', day: 'numeric' })}`
 }
 
+/** Every round has a real fix behind it, so set it as one: 41.1496° N 8.6109° W */
+function fix([lat, lng]: [number, number]) {
+  const d = (v: number, pos: string, neg: string) => `${Math.abs(v).toFixed(4)}° ${v >= 0 ? pos : neg}`
+  return `${d(lat, 'N', 'S')}  ${d(lng, 'E', 'W')}`
+}
+
 /** The geocoder hands back names like "Philippines (the)". Nobody says that. */
 const clean = (n: string) => n.replace(/\s*\(the\)$/i, '')
 
@@ -46,37 +52,40 @@ function splitMeta(name: string) {
   return i < 0 ? { country: null, clue: name } : { country: name.slice(0, i), clue: name.slice(i + 2) }
 }
 
-/** One slipping clue: its picture, its name, and how badly it is going. */
-function SlipCard({ m }: { m: WeakMeta }) {
+/** One slipping clue, plated and numbered: its picture, its name, its hit rate. */
+function CluePlate({ m, n }: { m: WeakMeta; n: number }) {
   const { country, clue } = splitMeta(m.metaName)
+  const rate = m.seen > 0 ? Math.round((m.correct / m.seen) * 100) : 0
+  const plate = String(n).padStart(2, '0')
   const inner = (
     <>
       <div className="shot">
+        <span className="pl">Pl. {plate}</span>
         {m.image ? (
           <img src={m.image} alt={clue} loading="lazy" decoding="async" />
         ) : (
-          <span className="noShot">No picture for this one</span>
+          <span className="noShot">No picture</span>
         )}
       </div>
-      {country && <span className="where">{country}</span>}
-      <span className="clue">{clue}</span>
-      <span className="tally">
-        {m.correct} of {m.seen} right
-        {m.lapses > 0 && (
-          <em>
-            {' '}
-            · forgotten {m.lapses} {m.lapses === 1 ? 'time' : 'times'}
-          </em>
-        )}
-      </span>
+      <div className="body">
+        {country && <span className="where">{country}</span>}
+        <span className="what">{clue}</span>
+        <span className="tally">
+          {m.correct}/{m.seen} right
+          {m.lapses > 0 && <em> · {m.lapses} forgotten</em>}
+        </span>
+        <span className="bar" aria-hidden>
+          <span style={{ width: `${rate}%` }} />
+        </span>
+      </div>
     </>
   )
   return m.image ? (
-    <a className="slipCard" href={m.image} target="_blank" rel="noreferrer">
+    <a className="clue" href={m.image} target="_blank" rel="noreferrer">
       {inner}
     </a>
   ) : (
-    <div className="slipCard is-blank">{inner}</div>
+    <div className="clue is-blank">{inner}</div>
   )
 }
 
@@ -110,12 +119,14 @@ function SlipStrip({ metas }: { metas: WeakMeta[] }) {
 
   return (
     <>
-      <div className="secHead">
-        <div>
-          <h2>Slipping</h2>
-          <p className="secNote">The clues you keep misreading. Open one to see it full size.</p>
-        </div>
-        <div className="stepper">
+      <div className="sheetHead">
+        <span className="no">01</span>
+        <h2>Slipping</h2>
+        <span className="lead" />
+        <span className="meta">
+          {metas.length} {metas.length === 1 ? 'clue' : 'clues'}
+        </span>
+        <div className="pager">
           <button aria-label="Scroll left" disabled={edge.start} onClick={() => step(-1)}>
             ←
           </button>
@@ -124,12 +135,10 @@ function SlipStrip({ metas }: { metas: WeakMeta[] }) {
           </button>
         </div>
       </div>
-      <div
-        className={`slipRail${edge.start ? ' at-start' : ''}${edge.end ? ' at-end' : ''}`}
-        ref={rail}
-      >
-        {metas.map((m) => (
-          <SlipCard key={m.metaName} m={m} />
+      <p className="sheetNote">The clues you keep getting wrong. Click one to see the picture full size.</p>
+      <div className={`rail${edge.start ? ' at-start' : ''}${edge.end ? ' at-end' : ''}`} ref={rail}>
+        {metas.map((m, i) => (
+          <CluePlate key={m.metaName} m={m} n={i + 1} />
         ))}
       </div>
     </>
@@ -176,24 +185,14 @@ export default function Dashboard() {
     navigate('/')
   }
 
-  if (error) {
+  if (error || !data) {
     return (
-      <div className="shell">
-        <div className="dashHead">
-          <Wordmark />
+      <>
+        <Mast />
+        <div className="shell">
+          <p className="loading">{error ?? 'Reading your deck…'}</p>
         </div>
-        <p className="loading">{error}</p>
-      </div>
-    )
-  }
-  if (!data) {
-    return (
-      <div className="shell">
-        <div className="dashHead">
-          <Wordmark />
-        </div>
-        <p className="loading">Reading your deck…</p>
-      </div>
+      </>
     )
   }
 
@@ -201,114 +200,161 @@ export default function Dashboard() {
   const empty = totals.rounds === 0
   const pct = totals.correctPct === null ? null : Math.round(totals.correctPct)
   const next = whenNext(deck.nextDue)
-
-  /* the rest of the numbers, told as a sentence rather than a wall of tiles */
-  const met =
-    `You have met ${deck.introduced} of ${deck.total} clues across ${totals.rounds.toLocaleString()} rounds` +
-    (pct !== null ? `, and you name the right country ${pct}% of the time.` : '.')
-  const bits: string[] = []
-  if (metas.total > 0) bits.push(`${metas.solid} of ${metas.total} are holding solid`)
-  if (deck.learning > 0) bits.push(`${deck.learning} ${deck.learning === 1 ? 'is' : 'are'} still bedding in`)
-  const holding = bits.length > 0 ? bits.join(', ') + '.' : ''
+  const last = recent[0] ?? null
 
   return (
-    <div className="shell">
-      <div className="dashHead">
-        <Wordmark />
-        <div className="who">
-          <b>{data.name}</b>
-          <button className="quiet" onClick={signOut}>
-            Sign out
-          </button>
-        </div>
-      </div>
+    <>
+      <Mast>
+        <span className="who">{data.name}</span>
+        <button className="quiet" onClick={signOut}>
+          Sign out
+        </button>
+      </Mast>
 
-      <div className="dashHero">
-        <div className="globeWrap">
-          <Globe tint={tint} />
-          {!empty && <p className="globeNote">Green where you hold it. Amber where it slips.</p>}
+      <div className="shell">
+        <div className="strip">
+          <span>
+            Deck <b>{deck.introduced.toLocaleString()}</b> / {deck.total.toLocaleString()} clues
+          </span>
+          {last && (
+            <>
+              <span className="sep">/</span>
+              <span>
+                Last fix <b>{fix(last.to)}</b> · {ago(last.ts)}
+              </span>
+            </>
+          )}
         </div>
 
-        {empty ? (
-          <div className="emptyState">
-            <p>No rounds yet.</p>
-            <p className="lede">Play a game with the userscript running and this fills in.</p>
-            <Link to="/start" className="btn">
-              Finish setup <span className="arr">→</span>
-            </Link>
-          </div>
-        ) : (
-          <div className="story">
-            {deck.due > 0 ? (
-              <>
-                <h1 className="storyHead">
-                  <span className="due">{deck.due}</span> {deck.due === 1 ? 'clue is' : 'clues are'} ready for review.
-                </h1>
-                <p>They come back to you in your next rounds, so the thing to do now is play.</p>
-              </>
-            ) : (
-              <>
-                <h1 className="storyHead">Nothing is due right now.</h1>
-                <p>
-                  {next
+        <div className="dashHero">
+          <figure className="plate">
+            <Globe tint={tint} />
+            <figcaption className="plateCap">
+              <span className="tag">Fig. 1 — Countries played</span>
+              {!empty && (
+                <span className="legend">
+                  <span>
+                    <i className="h" />
+                    <span className="tag">Hold</span>
+                  </span>
+                  <span>
+                    <i className="s" />
+                    <span className="tag">Slip</span>
+                  </span>
+                </span>
+              )}
+            </figcaption>
+          </figure>
+
+          {empty ? (
+            <div className="emptyState">
+              <span className="tag b">No data yet</span>
+              <h1>No rounds captured.</h1>
+              <p className="lede">Play a game with the userscript running and this sheet fills in.</p>
+              <Link to="/start" className="btn">
+                Finish setup <span className="arr">→</span>
+              </Link>
+            </div>
+          ) : (
+            <div className="story">
+              <h1>
+                <span className={'storyNum' + (deck.due === 0 ? ' zero' : '')}>{deck.due}</span>
+                <span className="storyHead">
+                  {deck.due === 1 ? 'clue is ready for review.' : 'clues are ready for review.'}
+                </span>
+              </h1>
+              <p>
+                {deck.due > 0
+                  ? 'They come back to you in your next rounds, so the thing to do now is play.'
+                  : next
                     ? `Your next review lands ${next}. Play anyway and new clues join the deck.`
                     : 'Play a few rounds and new clues will join the deck.'}
-                </p>
-              </>
-            )}
+              </p>
 
-            <p className="small">
-              {met} {holding}
-            </p>
-          </div>
+              <dl className="readout">
+                <div>
+                  <dt>Rounds played</dt>
+                  <dd>{totals.rounds.toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>Country called right</dt>
+                  <dd>{pct === null ? '—' : `${pct}%`}</dd>
+                </div>
+                <div>
+                  <dt>Holding solid</dt>
+                  <dd className="hold">
+                    {metas.solid.toLocaleString()} <small>/ {metas.total.toLocaleString()}</small>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Bedding in</dt>
+                  <dd>{deck.learning.toLocaleString()}</dd>
+                </div>
+              </dl>
+            </div>
+          )}
+        </div>
+
+        {!empty && (
+          <>
+            <section className="dashSec">
+              {metas.weakest.length === 0 ? (
+                <>
+                  <div className="sheetHead">
+                    <span className="no">01</span>
+                    <h2>Slipping</h2>
+                    <span className="lead" />
+                    <span className="meta">0 clues</span>
+                  </div>
+                  <p className="empty">Nothing is slipping right now.</p>
+                </>
+              ) : (
+                <SlipStrip metas={metas.weakest} />
+              )}
+            </section>
+
+            <section className="dashSec">
+              <div className="sheetHead">
+                <span className="no">02</span>
+                <h2>Round log</h2>
+                <span className="lead" />
+                <span className="meta">Last {recent.length}</span>
+              </div>
+              <p className="sheetNote">Where you landed, and what you read it as.</p>
+
+              <div className="log">
+                <div className="logRow head" aria-hidden>
+                  <span>No.</span>
+                  <span>Location</span>
+                  <span>Fix</span>
+                  <span>Clue</span>
+                  <span>When</span>
+                </div>
+                {recent.map((r, i) => (
+                  <div className="logRow" key={r.id}>
+                    <span className="n">
+                      <i className={r.correct ? 'ok' : 'no'} />
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    <span className="place">
+                      {r.country ? clean(r.country) : 'Unknown'}
+                      {!r.correct && r.guessCountry && <s> — read as {clean(r.guessCountry)}</s>}
+                    </span>
+                    <span className="fix">{fix(r.to)}</span>
+                    <span className="cluecol">{r.metaName ?? '—'}</span>
+                    <span className="when">{ago(r.ts)}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </>
         )}
       </div>
 
-      {!empty && (
-        <>
-          <section className="dashSec">
-            {metas.weakest.length === 0 ? (
-              <>
-                <div className="secHead">
-                  <div>
-                    <h2>Slipping</h2>
-                  </div>
-                </div>
-                <p className="empty">Nothing is slipping right now.</p>
-              </>
-            ) : (
-              <SlipStrip metas={metas.weakest} />
-            )}
-          </section>
-
-          <section className="dashSec">
-            <div className="secHead">
-              <div>
-                <h2>Recent rounds</h2>
-                <p className="secNote">Where you landed, and what you read it as.</p>
-              </div>
-            </div>
-            <div className="roundList">
-              {recent.map((r) => (
-                <div className="roundRow" key={r.id}>
-                  <i className={r.correct ? 'ok' : 'no'} />
-                  <span className="place">
-                    {r.country ? clean(r.country) : 'Unknown'}
-                    {!r.correct && r.guessCountry && <s> read as {clean(r.guessCountry)}</s>}
-                  </span>
-                  <span className="when">{ago(r.ts)}</span>
-                  {r.metaName && <span className="meta">{r.metaName}</span>}
-                </div>
-              ))}
-            </div>
-          </section>
-        </>
-      )}
-
-      <footer>
+      <Foot>
         <Link to="/">GeoCoach</Link>
-        <span>Updated {ago(data.generatedAt)}</span>
-      </footer>
-    </div>
+        <span>Sheet updated {ago(data.generatedAt)}</span>
+      </Foot>
+    </>
   )
 }

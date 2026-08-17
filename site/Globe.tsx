@@ -10,9 +10,11 @@ import { MAP_COUNTRIES } from '../src/data/worldMap'
  * amber where they slip.
  */
 
-const LAND = new THREE.Color('#75876f')
-const HIT = '#1e7a53'
-const MISS = '#c08a2d'
+/* Quad-sheet inks: unsurveyed land is drafting grey, vegetation green means the
+   player holds that country, contour brown means it is slipping. */
+const LAND = new THREE.Color('#6e7a73')
+const HIT = '#33684a'
+const MISS = '#a2521c'
 const TINTS = { good: new THREE.Color(HIT), bad: new THREE.Color(MISS) }
 
 /** Which way a country leans for the signed-in viewer: holds or slips. */
@@ -148,7 +150,7 @@ function Scene({ tint, spin, reduced }: { tint: CountryTint; spin: React.RefObje
       {/* the body the cloud sits on: hides dots on the far side */}
       <mesh>
         <sphereGeometry args={[0.982, 48, 48]} />
-        <meshBasicMaterial color="#f0eee6" />
+        <meshBasicMaterial color="#fbfbf8" />
       </mesh>
       <points geometry={geom}>
         <pointsMaterial vertexColors size={0.0145} sizeAttenuation transparent opacity={0.95} depthWrite={false} />
@@ -221,7 +223,7 @@ export default function Globe({ tint = NO_TINT }: { tint?: CountryTint }) {
     >
       <Canvas
         dpr={[1, 2]}
-        camera={{ position: [0, 0, 3.6], fov: 42 }}
+        camera={{ position: [0, 0, 3.05], fov: 42 }}
         gl={{ alpha: true, antialias: true }}
         style={{ position: 'absolute', inset: 0 }}
       >

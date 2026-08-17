@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import Globe from '../GlobeLazy'
-import { Link, Wordmark } from '../router'
+import { Foot, Link, Mast } from '../router'
 import { fetchStats, getToken, type PublicStats } from '../api'
 
 const STEPS = [
@@ -23,7 +23,8 @@ const STEPS = [
 
 const NOTES = [
   {
-    h: 'It runs in your browser',
+    n: '01',
+    h: 'Runs in your browser',
     p: (
       <>
         GeoCoach is a userscript. Install the{' '}
@@ -34,16 +35,19 @@ const NOTES = [
       </>
     ),
   },
-  { h: 'It is free', p: <>No charge, no email, no password.</> },
+  { n: '02', h: 'Free', p: <>No charge, no email, no password.</> },
   {
+    n: '03',
     h: 'Your account is a link',
     p: <>Signing up hands you a private link. Anyone holding it can read your account, so keep it to yourself.</>,
   },
   {
-    h: 'The schedule is FSRS',
+    n: '04',
+    h: 'Scheduled by FSRS',
     p: <>Reviews are timed by the same memory model Anki uses, fed by how you rate each round.</>,
   },
   {
+    n: '05',
     h: 'Made by a player',
     p: <>Built for the GeoGuessr community. GeoCoach has no connection to GeoGuessr itself.</>,
   },
@@ -60,85 +64,119 @@ export default function Landing() {
   }, [])
 
   return (
-    <div className="shell">
-      <div className="topline">
-        <Wordmark />
+    <>
+      <Mast>
         {hasAccount && (
           <Link to="/app" className="quiet">
-            Your dashboard →
+            Dashboard →
           </Link>
         )}
+        <Link to="/start" className="btn">
+          Get started <span className="arr">→</span>
+        </Link>
+      </Mast>
+
+      <div className="shell">
+        <div className="strip">
+          <span>Spaced repetition for GeoGuessr</span>
+          <span className="sep">/</span>
+          <span>Userscript + FSRS</span>
+          <span className="sep">/</span>
+          <span>Free, no account details</span>
+        </div>
+
+        <header className="hero">
+          <div className="heroCopy">
+            <span className="tag b">Sheet 01 — What this is</span>
+            <h1>
+              Practice the clues you <em>keep getting wrong.</em>
+            </h1>
+            <p className="lede">
+              You play GeoGuessr the way you already do. Every round is captured and graded against the clue it was
+              testing, so GeoCoach learns which tells you actually hold. The next game is dealt from your own weak
+              spots.
+            </p>
+            <div className="heroCta">
+              <Link to="/start" className="btn">
+                Get started <span className="arr">→</span>
+              </Link>
+              {hasAccount && (
+                <Link to="/app" className="quiet">
+                  Dashboard →
+                </Link>
+              )}
+            </div>
+          </div>
+
+          <figure className="plate">
+            <Globe />
+            <figcaption className="plateCap">
+              <span className="tag">Fig. 1 — Dotted earth</span>
+              <span className="tag">Drag to spin</span>
+            </figcaption>
+          </figure>
+        </header>
+
+        {stats && (
+          <dl className="readout">
+            <div>
+              <dt>Players</dt>
+              <dd>{stats.users.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Rounds captured</dt>
+              <dd>{stats.rounds.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Clues tracked</dt>
+              <dd>{stats.metasTracked.toLocaleString()}</dd>
+            </div>
+          </dl>
+        )}
+
+        <section>
+          <div className="sheetHead">
+            <span className="no">02</span>
+            <h2>How it works</h2>
+            <span className="lead" />
+            <span className="meta">3 steps</span>
+          </div>
+          <div className="steps">
+            {STEPS.map((s) => (
+              <div className="step" key={s.n}>
+                <span className="no">{s.n}</span>
+                <h3>{s.h}</h3>
+                <p>{s.p}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <div className="sheetHead">
+            <span className="no">03</span>
+            <h2>Before you start</h2>
+            <span className="lead" />
+            <span className="meta">{NOTES.length} notes</span>
+          </div>
+          <div className="notes">
+            {NOTES.map((note) => (
+              <div className="note" key={note.h}>
+                <span className="no">{note.n}</span>
+                <h3>{note.h}</h3>
+                <p>{note.p}</p>
+              </div>
+            ))}
+          </div>
+        </section>
       </div>
 
-      <header className="hero">
-        <div className="heroCopy">
-          <p className="kicker">Spaced repetition for GeoGuessr</p>
-          <h1>
-            A trainer that knows what you're <em>about to forget.</em>
-          </h1>
-          <p className="lede">
-            You play GeoGuessr the way you already do. Every round is captured and graded against the clue it was
-            testing, so GeoCoach learns which tells you actually hold. The next game is dealt from your own weak spots.
-          </p>
-          <div className="heroCta">
-            <Link to="/start" className="btn">
-              Get started <span className="arr">→</span>
-            </Link>
-            {hasAccount && (
-              <Link to="/app" className="quiet">
-                Your dashboard →
-              </Link>
-            )}
-          </div>
-          {stats && (
-            <p className="heroStat">
-              <b>{stats.users.toLocaleString()}</b> {stats.users === 1 ? 'player' : 'players'} ·{' '}
-              <b>{stats.rounds.toLocaleString()}</b> rounds captured · <b>{stats.metasTracked.toLocaleString()}</b>{' '}
-              clues tracked
-            </p>
-          )}
-        </div>
-        <Globe />
-      </header>
-
-      <section>
-        <div className="secLabel">
-          <span className="kicker">How it works</span>
-        </div>
-        <h2>
-          Play, rate, <em>come back.</em>
-        </h2>
-        <div className="steps">
-          {STEPS.map((s) => (
-            <div className="step" key={s.n}>
-              <span className="n">{s.n}</span>
-              <h3>{s.h}</h3>
-              <p>{s.p}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section>
-        <div className="secLabel">
-          <span className="kicker">Before you start</span>
-        </div>
-        <div className="notes">
-          {NOTES.map((n) => (
-            <div className="note" key={n.h}>
-              <h3>{n.h}</h3>
-              <p>{n.p}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <footer>
-        <span>GeoCoach</span>
+      <Foot>
+        <span>GeoCoach — not affiliated with GeoGuessr</span>
         <Link to="/start" className="quiet">
           Get started →
         </Link>
-      </footer>
-    </div>
+      </Foot>
+    </>
   )
 }

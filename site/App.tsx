@@ -7,7 +7,7 @@ export default function App() {
   const path = usePath()
   return (
     <>
-      <div className="grain" aria-hidden />
+      <div className="grat" aria-hidden />
       {path === '/start' ? <Start /> : path === '/app' ? <Dashboard /> : <Landing />}
     </>
   )
