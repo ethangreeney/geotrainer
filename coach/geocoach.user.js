@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.2.3
+// @version      2.4.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -27,6 +27,22 @@
   const LOCAL = 'http://127.0.0.1:5177'
   const COACH_URL = (CLOUD ? CLOUD.url : LOCAL) + '/round'
   const RATE_URL = (CLOUD ? CLOUD.url : LOCAL) + '/rate'
+  const PREWARM_URL = (CLOUD ? CLOUD.url : LOCAL) + '/prewarm'
+
+  // Timing trace for the guess→card path. Cheap, permanent: reading the
+  // timeline is how latency regressions get caught. Mirrored onto <html
+  // data-geocoach-log> because Tampermonkey sandbox console output is not
+  // always visible to page-context tooling.
+  const tlogLines = []
+  const tlog = (msg) => {
+    const line = '[' + new Date().toISOString().slice(11, 23) + '] ' + msg
+    console.log('[geocoach ⏱]' + line)
+    tlogLines.push(line)
+    try {
+      document.documentElement.setAttribute('data-geocoach-log', tlogLines.slice(-20).join('\n'))
+    } catch {}
+  }
+  tlog('body 2.4.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
    * server still gets every round so pano dossiers keep building at home.
@@ -126,6 +142,7 @@
   function showCard(card) {
     if (!card || (!card.note && !card.metaName)) return
     if (/^\/(duels|team-duels)\//.test(location.pathname)) return // never during ranked
+    tlog('showCard: ' + (card.metaName || 'note-only'))
     removeCard()
     const url = guideUrl(card)
     const el = document.createElement('div')
@@ -388,11 +405,14 @@
   function post(key, payload, onAccepted) {
     if (sent.has(key)) return
     sent.add(key)
+    const tPost = Date.now()
+    tlog('post ' + key + ' → ' + COACH_URL)
     const body = JSON.stringify(payload)
     postLocalDossier(body)
     // Success is silent — the card (or its absence) is the signal. Only
     // failures toast, since those need acting on.
     const accepted = (j) => {
+      tlog('post ' + key + ' accepted after ' + (Date.now() - tPost) + 'ms' + (j && j.duplicate ? ' (duplicate)' : j && j.card ? ' (card)' : ' (no card)') + (j && j.timings ? ' server=' + JSON.stringify(j.timings) : ''))
       if (j && j.duplicate) return
       if (j) showCard(j.card)
       if (onAccepted) onAccepted()
@@ -411,51 +431,55 @@
       sent.delete(key) // the next intercepted game-state response retries
       toast(message, false)
     }
-    // GM_xmlhttpRequest when running under Tampermonkey; plain fetch otherwise
-    // (Chrome allows https pages to reach localhost, and the server answers the
-    // private-network preflight).
-    if (typeof GM_xmlhttpRequest === 'function') {
-      const attempt = (retriesLeft) => {
-        GM_xmlhttpRequest({
-          method: 'POST',
-          url: COACH_URL,
-          headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
-          data: body,
-          timeout: 30000,
-          onload: (res) => {
-            if (res.status === 200) {
-              let j = null
-              try { j = JSON.parse(res.responseText) } catch {}
-              accepted(j)
-            } else {
-              sent.delete(key) // the next intercepted game-state response retries
-              toast('Coach server error (' + res.status + ')', false)
-            }
-          },
-          onerror: () => fail(retriesLeft, attempt, 'Coach server not running'),
-          ontimeout: () => fail(retriesLeft, attempt, 'Coach server timed out'),
-        })
-      }
-      attempt(RETRIES)
-    } else {
-      const attempt = (retriesLeft) => {
-        fetch(COACH_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
-          body,
-        })
-          .then((res) => {
-            if (!res.ok) {
-              sent.delete(key)
-              toast('Coach server error (' + res.status + ')', false)
-              return
-            }
-            res.json().then(accepted).catch(() => {})
-          })
-          .catch(() => fail(retriesLeft, attempt, 'Coach server not running'))
-      }
-      attempt(RETRIES)
+    // Transport is the latency story here: GM_xmlhttpRequest tunnels through
+    // the extension background and opens a fresh TLS connection per request
+    // (~800ms to the cloud), while page-context fetch rides the browser's warm
+    // HTTP/2 pool (~30ms). Cloud posts go page-fetch-first with GM as the
+    // fallback; the local server keeps GM (an https page can't always reach
+    // http://127.0.0.1 without it).
+    const viaGM = (retriesLeft) => {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: COACH_URL,
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
+        data: body,
+        timeout: 30000,
+        onload: (res) => {
+          if (res.status === 200) {
+            let j = null
+            try { j = JSON.parse(res.responseText) } catch {}
+            accepted(j)
+          } else {
+            sent.delete(key) // the next intercepted game-state response retries
+            toast('Coach server error (' + res.status + ')', false)
+          }
+        },
+        onerror: () => fail(retriesLeft, viaGM, 'Coach server not running'),
+        ontimeout: () => fail(retriesLeft, viaGM, 'Coach server timed out'),
+      })
     }
+    const viaFetch = (retriesLeft) => {
+      W.fetch(COACH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
+        body,
+      })
+        .then((res) => {
+          if (!res.ok) {
+            sent.delete(key)
+            toast('Coach server error (' + res.status + ')', false)
+            return
+          }
+          res.json().then(accepted).catch(() => {})
+        })
+        .catch(() => {
+          if (typeof GM_xmlhttpRequest === 'function') viaGM(retriesLeft)
+          else fail(retriesLeft, viaFetch, 'Coach server not running')
+        })
+    }
+    if (COACH_URL.startsWith('https')) viaFetch(RETRIES)
+    else if (typeof GM_xmlhttpRequest === 'function') viaGM(RETRIES)
+    else viaFetch(RETRIES)
   }
 
   const hex2a = (hex) => {
@@ -498,10 +522,38 @@
     }
   }
 
+  // The clue lookup (Learnable Meta metadata, keyed by the round's pano id) is
+  // the one slow server leg (~900ms cold). The round's pano id is visible the
+  // moment the round is served — a whole guess-time earlier — so ping the
+  // server then and the lookup is cached long before the card needs it.
+  const prewarmed = new Set()
+  function prewarmRound(g) {
+    const cur = g.rounds[g.rounds.length - 1]
+    const pano = cur && cur.panoId ? hex2a(cur.panoId) : null
+    if (!pano) return
+    const key = g.token + ':' + g.rounds.length
+    if (prewarmed.has(key)) return
+    prewarmed.add(key)
+    const body = JSON.stringify({ mapId: g.map, panoId: pano })
+    const req = () =>
+      W.fetch(PREWARM_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
+        body,
+      })
+    if (PREWARM_URL.startsWith('https')) req().catch(() => {})
+    else if (typeof GM_xmlhttpRequest === 'function')
+      GM_xmlhttpRequest({ method: 'POST', url: PREWARM_URL, headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS }, data: body })
+    else req().catch(() => {})
+  }
+
   function handleGameState(g) {
     if (!g || !g.token || !g.player || !Array.isArray(g.player.guesses)) return
     // A served-but-unguessed round means play has moved on: clear the card.
-    if (g.rounds && g.rounds.length > g.player.guesses.length) removeCard()
+    if (g.rounds && g.rounds.length > g.player.guesses.length) {
+      removeCard()
+      prewarmRound(g)
+    }
     sendFromGameState(g)
   }
 
@@ -575,18 +627,46 @@
   // before the player clicked Next. Reading responses adds no requests, and
   // every guess POST echoes the full game state back, so capture is instant.
   const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
-  const pageFetch = W.fetch.bind(W)
-  W.fetch = function (input, opts) {
-    const p = pageFetch(input, opts)
+  // The body arrives async (loader fetches it over GM_xmlhttpRequest), long
+  // after the page has bound its own fetch reference — a wrap installed here
+  // is never called. The loader installs a synchronous tap at document-start
+  // and buffers requests until we attach; the direct wrap below only serves
+  // legacy direct installs.
+  function onRequest(rec) {
     try {
-      const url = typeof input === 'string' ? input : (input && input.url) || ''
+      const url = rec.url || ''
       if (/\/api\/v3\/games\/[A-Za-z0-9]+/.test(url)) {
-        p.then((res) => res.clone().json().then(handleGameState).catch(() => {})).catch(() => {})
+        const tFetch = Date.now()
+        tlog('games ' + rec.method + ' intercepted')
+        rec.promise.then((res) =>
+          res.clone().json().then((g) => {
+            if (rec.method === 'POST') tlog('game-state parsed ' + (Date.now() - tFetch) + 'ms after guess POST started')
+            handleGameState(g)
+          }).catch(() => {}),
+        ).catch(() => {})
       } else if (/\/api\/duels\/[\w-]+(\?|$)/.test(url)) {
-        p.then((res) => res.clone().json().then(handleDuelState).catch(() => {})).catch(() => {})
+        rec.promise.then((res) => res.clone().json().then(handleDuelState).catch(() => {})).catch(() => {})
       }
     } catch {}
-    return p
+  }
+  const tap = W.__geocoachTap
+  if (tap && typeof tap === 'object' && Array.isArray(tap.queue)) {
+    tap.handler = onRequest
+    const backlog = tap.queue.splice(0)
+    tlog('tap attached — ' + backlog.length + ' buffered request(s)')
+    backlog.forEach(onRequest)
+  } else {
+    const pageFetch = W.fetch.bind(W)
+    W.fetch = function (input, opts) {
+      const p = pageFetch(input, opts)
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        const method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
+        onRequest({ url, method, promise: p })
+      } catch {}
+      return p
+    }
+    tlog('no tap — wrapped fetch directly')
   }
 
   // ---------------------------------------------------------------- deck

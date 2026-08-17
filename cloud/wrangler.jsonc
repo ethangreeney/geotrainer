@@ -16,9 +16,12 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
-  // The userscript is served from GET /geocoach.user.js with the caller's
-  // credentials baked in, so it has to be bundled as text.
-  "rules": [{ "type": "Text", "globs": ["**/*.user.js"] }],
+  // The userscript (and its loader) are served from GET /geocoach.user.js and
+  // /geocoach.body.js with the caller's credentials baked in, so both bundle
+  // as text.
+  "rules": [
+    { "type": "Text", "globs": ["**/*.user.js", "**/*.loader.js"], "fallthrough": true }
+  ],
   // Re-enable once R2 is switched on for the account (dashboard > R2, one-time
   // terms acceptance), then: wrangler r2 bucket create geocoach && wrangler deploy
   // "r2_buckets": [{ "binding": "STORE", "bucket_name": "geocoach" }]

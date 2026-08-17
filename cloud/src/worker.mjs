@@ -22,7 +22,10 @@ import {
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
 // The userscript source, bundled as text (see the "rules" entry in
 // wrangler.jsonc) so GET /geocoach.user.js can stamp a user's credentials in.
+// The loader is what Tampermonkey installs; it fetches the body fresh on every
+// page load, so body changes ship without a Tampermonkey reinstall.
 import USERSCRIPT_SRC from '../../coach/geocoach.user.js'
+import LOADER_SRC from '../../coach/geocoach.loader.js'
 // The four meta catalogs, bundled at deploy time (≈600KB gzipped, well under
 // the Worker limit) — deck building and meta resolution need no R2 at all.
 // Import order is tier order: Basics 0, Beginner 1, Intermediate 2, World 3.
@@ -113,7 +116,7 @@ async function countryOf(lat, lng) {
  * Cached in D1 forever and shared across users — a pano's clue note is a fact
  * about the world, not about the player, and these notes almost never change.
  * Only real payloads are cached; a miss or an outage stays retryable. */
-async function lmMeta(env, mapId, panoId) {
+async function lmMeta(env, mapId, panoId, ctx) {
   const key = `${mapId}:${panoId}`
   try {
     const row = await env.DB.prepare('SELECT json FROM cards WHERE cache_key = ?').bind(key).first()
@@ -138,35 +141,35 @@ async function lmMeta(env, mapId, panoId) {
   }
   if (!data || typeof data !== 'object') return null
 
-  try {
-    await env.DB.prepare(
-      'INSERT INTO cards (cache_key, json, fetched_at) VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at',
-    )
-      .bind(key, JSON.stringify(data), new Date().toISOString())
-      .run()
-  } catch {
-    // A cache write failure must never cost the caller its clue card.
-  }
+  // Cache write is fire-and-forget (waitUntil when we have a ctx): a write
+  // failure — or its latency — must never cost the caller its clue card.
+  const cacheWrite = env.DB.prepare(
+    'INSERT INTO cards (cache_key, json, fetched_at) VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at',
+  )
+    .bind(key, JSON.stringify(data), new Date().toISOString())
+    .run()
+    .catch(() => {})
+  if (ctx) ctx.waitUntil(cacheWrite)
+  else await cacheWrite
   return data
 }
 
-/** Our own trainer-map rounds carry no LM data — resolve the meta from the catalogs. */
-async function metaFromCatalogs(env, panoId) {
+/** Our own trainer-map rounds carry no LM data — resolve the meta from the
+ * bundled catalogs. Synchronous on purpose: knowing the catalog's mapId BEFORE
+ * calling LM lets handleRound skip the doomed lookup against the played
+ * trainer map (LM has never heard of it) and query the right map in one go.
+ * Index built once per isolate. */
+let panoIndex = null
+function catalogLocation(panoId) {
   if (!panoId) return null
-  for (const c of await loadCatalogs(env)) {
-    const hit = c.locations.find((l) => l.panoId === panoId)
-    if (hit && hit.metaName) {
-      const lm = await lmMeta(env, c.mapId, panoId)
-      return {
-        metaName: hit.metaName,
-        country: hit.country,
-        note: lm?.note ?? null,
-        images: lm?.images ?? [],
-        footer: lm?.footer ?? null,
-      }
-    }
+  if (!panoIndex) {
+    panoIndex = new Map()
+    for (const c of CATALOGS)
+      for (const l of c.locations)
+        if (l.panoId && l.metaName && !panoIndex.has(l.panoId))
+          panoIndex.set(l.panoId, { ...l, mapId: c.mapId })
   }
-  return null
+  return panoIndex.get(panoId) ?? null
 }
 
 /** The reverse of metaFromCatalogs: a meta key ("Brazil: Pole") back to some
@@ -208,23 +211,31 @@ async function loadUserState(env, userId) {
   return row ? JSON.parse(row.json) : structuredClone(EMPTY_STATE)
 }
 
-async function saveUserState(env, userId, state) {
-  await env.DB.prepare(
+const saveUserStateStmt = (env, userId, state) =>
+  env.DB.prepare(
     'INSERT INTO states (user_id, json) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET json = excluded.json',
-  )
-    .bind(userId, JSON.stringify(state))
-    .run()
+  ).bind(userId, JSON.stringify(state))
+
+async function saveUserState(env, userId, state) {
+  await saveUserStateStmt(env, userId, state).run()
 }
 
-/** Bearer token (or ?token= for browser GETs) → user row, or null. */
+/** Bearer token (or ?token= for browser GETs) → user row, or null.
+ * Warm-isolate cache: every D1 query is a round trip to the primary, and the
+ * token→user mapping barely changes, so a short TTL shaves a serial hop off
+ * every authed request. Config writes go through setConfig, which drops the
+ * entry. */
+const authCache = new Map() // token → { user, until }
 async function authUser(env, request, url) {
   const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '')
   const token = bearer || url.searchParams.get('token')
   if (!token) return null
+  const hit = authCache.get(token)
+  if (hit && hit.until > Date.now()) return hit.user
   const row = await env.DB.prepare('SELECT id, name, config, created_at FROM users WHERE token = ?')
     .bind(token)
     .first()
-  return row
+  const user = row
     ? {
         id: row.id,
         name: row.name,
@@ -233,6 +244,8 @@ async function authUser(env, request, url) {
         config: JSON.parse(row.config ?? '{}'),
       }
     : null
+  if (user) authCache.set(token, { user, until: Date.now() + 5 * 60 * 1000 })
+  return user
 }
 
 // ---------- accounts ----------
@@ -285,6 +298,7 @@ async function setConfig(env, user, patch) {
     .bind(JSON.stringify(config), user.id)
     .run()
   user.config = config
+  authCache.delete(user.token)
   return config
 }
 
@@ -394,17 +408,18 @@ async function buildDashboard(env, user) {
 
 // ---------- the round pipeline (mirrors coach/server.mjs handleRound) ----------
 
-async function handleRound(env, user, payload) {
+// dupKeys with an in-flight deferred write: the INSERT lands after the response
+// (ctx.waitUntil), so the D1 dup-check alone would miss a fast double-post.
+const pendingWrites = new Set()
+
+async function handleRound(env, user, payload, ctx) {
+  const t0 = Date.now()
+  const since = (from) => Date.now() - from
   const { location, mapId, roundNumber, score, source } = payload
   const dupKey = payload.token
     ? `t:${payload.token}:r${roundNumber ?? 0}`
     : `p:${location?.panoId ?? `${location?.lat},${location?.lng}`}:r${roundNumber ?? 0}`
-  const prior = await env.DB.prepare('SELECT id, ts FROM rounds WHERE user_id = ? AND dup_key = ?')
-    .bind(user.id, dupKey)
-    .first()
-  if (prior && (payload.token || Date.now() - new Date(prior.ts).getTime() < 30 * 60 * 1000)) {
-    return { ok: true, id: prior.id, duplicate: true, card: null }
-  }
+  if (pendingWrites.has(dupKey)) return { ok: true, id: null, duplicate: true, card: null }
 
   // A timed-out round records a (0,0) guess — that is "no guess", not the Atlantic.
   const guess =
@@ -413,14 +428,46 @@ async function handleRound(env, user, payload) {
       : null
   const id = `${Date.now()}_r${roundNumber ?? 0}`
 
-  const [answer, guessed, lmDirect] = await Promise.all([
-    countryOf(location.lat, location.lng),
-    guess ? countryOf(guess.lat, guess.lng) : null,
-    mapId && source !== 'duel' && location.panoId ? lmMeta(env, mapId, location.panoId) : null,
+  // Catalog hit tells us the real LM mapId up front — one LM call, never the
+  // doomed one against the played trainer map. Everything the response needs —
+  // dup-check, rate-limit, both geocodes, LM meta, user state — rides one
+  // parallel block, so the whole read side costs a single slowest-leg wait
+  // instead of a chain of serial D1 round trips.
+  const catalogHit = source !== 'duel' ? catalogLocation(location.panoId) : null
+  const lmMapId = catalogHit ? catalogHit.mapId : mapId
+  const timed = {}
+  const lap = (name, p) => {
+    const from = Date.now()
+    return Promise.resolve(p).then((v) => ((timed[name] = since(from)), v))
+  }
+  const [prior, overLimit, answer, guessed, lm, state] = await Promise.all([
+    lap(
+      'dup',
+      env.DB.prepare('SELECT id, ts FROM rounds WHERE user_id = ? AND dup_key = ?')
+        .bind(user.id, dupKey)
+        .first(),
+    ),
+    lap('limit', overRoundLimit(env, user.id)),
+    lap('geoAnswer', countryOf(location.lat, location.lng)),
+    guess ? lap('geoGuess', countryOf(guess.lat, guess.lng)) : null,
+    lmMapId && source !== 'duel' && location.panoId
+      ? lap('lm', lmMeta(env, lmMapId, location.panoId, ctx))
+      : null,
+    lap('state', loadUserState(env, user.id)),
   ])
-  const meta = lmDirect ?? (await metaFromCatalogs(env, location.panoId))
-
-  const state = await loadUserState(env, user.id)
+  if (prior && (payload.token || Date.now() - new Date(prior.ts).getTime() < 30 * 60 * 1000)) {
+    return { ok: true, id: prior.id, duplicate: true, card: null }
+  }
+  if (overLimit) return { ok: false, error: 'round limit reached, try again later', limited: true }
+  const meta = catalogHit
+    ? {
+        metaName: catalogHit.metaName,
+        country: catalogHit.country,
+        note: lm?.note ?? null,
+        images: lm?.images ?? [],
+        footer: lm?.footer ?? null,
+      }
+    : lm
   const metaName = metaKeyOf(meta?.country, meta?.metaName ?? meta?.name) ?? null
   const twins = metaName ? LOOKALIKE_METAS[metaName] : null
   const correctCountry = guessed
@@ -483,16 +530,23 @@ async function handleRound(env, user, payload) {
     }
   }
 
-  await env.DB.prepare(
-    'INSERT INTO rounds (user_id, id, dup_key, ts, answer_code, json, snapshot) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  )
-    .bind(user.id, id, dupKey, round.ts, cc, JSON.stringify(round), snapshot ? JSON.stringify(snapshot) : null)
-    .run()
-  await saveUserState(env, user.id, state)
+  // One D1 round trip for both writes, atomic (batch = transaction) — and off
+  // the response path: the card's content never depends on the write landing,
+  // so the client shouldn't wait out another hop to the D1 primary for it.
+  pendingWrites.add(dupKey)
+  const write = env.DB.batch([
+    env.DB.prepare(
+      'INSERT INTO rounds (user_id, id, dup_key, ts, answer_code, json, snapshot) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).bind(user.id, id, dupKey, round.ts, cc, JSON.stringify(round), snapshot ? JSON.stringify(snapshot) : null),
+    saveUserStateStmt(env, user.id, state),
+  ]).finally(() => pendingWrites.delete(dupKey))
+  if (ctx) ctx.waitUntil(write)
+  else await write
 
   return {
     ok: true,
     id,
+    timings: { ...timed, total: since(t0) },
     card:
       meta && source !== 'duel'
         ? {
@@ -570,6 +624,7 @@ const json = (obj, status = 200) =>
 const AUTHED_PATHS = new Set([
   '/round',
   '/rate',
+  '/prewarm',
   '/deck',
   '/status',
   '/plan',
@@ -577,6 +632,7 @@ const AUTHED_PATHS = new Set([
   '/trainer-map',
   '/api/dashboard',
   '/geocoach.user.js',
+  '/geocoach.body.js',
 ])
 const isApiPath = (path) =>
   AUTHED_PATHS.has(path) || path.startsWith('/plonkit/') || path.startsWith('/rounds/')
@@ -605,7 +661,7 @@ async function overRoundLimit(env, userId) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url)
     const path = url.pathname
 
@@ -660,9 +716,22 @@ export default {
 
     try {
       if (request.method === 'POST' && path === '/round') {
-        if (await overRoundLimit(env, user.id))
-          return json({ ok: false, error: 'round limit reached, try again later' }, 429)
-        return json(await handleRound(env, user, await request.json()))
+        const result = await handleRound(env, user, await request.json(), ctx)
+        return json(result, result.limited ? 429 : 200)
+      }
+
+      // Fired by the userscript the moment a round is served, a guess-time
+      // before the card is needed. The LM lookup is the one slow leg of /round
+      // (~900ms cold); doing it here means /round always hits warm cache. The
+      // response never waits on the fetch.
+      if (request.method === 'POST' && path === '/prewarm') {
+        const { mapId, panoId } = await request.json()
+        if (panoId) {
+          const hit = catalogLocation(panoId)
+          const lmMapId = hit ? hit.mapId : mapId
+          if (lmMapId) ctx.waitUntil(lmMeta(env, lmMapId, panoId, ctx).catch(() => {}))
+        }
+        return json({ ok: true })
       }
 
       if (request.method === 'POST' && path === '/rate') {
@@ -681,6 +750,7 @@ export default {
         const byMap = new Map(catalogs.map((c) => [c.mapId, c]))
         const usedPanos = new Set()
         const customCoordinates = []
+        const prewarm = []
         for (const m of deck.metas) {
           const pool = (byMap.get(m.mapId)?.locations ?? []).filter(
             (l) => metaKeyOf(l.country, l.metaName) === m.name && !usedPanos.has(l.panoId),
@@ -692,12 +762,28 @@ export default {
           for (const loc of pool.slice(0, 4)) {
             usedPanos.add(loc.panoId)
             customCoordinates.push(loc)
+            if (loc.panoId) prewarm.push({ mapId: m.mapId, panoId: loc.panoId })
           }
         }
 
         const paddingNames = deck.metas.slice(deck.metas.length - deck.stats.padding).map((m) => m.name)
         state.lastDeck = { ts: now.toISOString(), metas: deck.metas.map((m) => m.name), padding: paddingNames }
         await saveUserState(env, user.id, state)
+
+        // Pre-warm the LM clue cache for every pano this deck can serve, so
+        // the first play of a location never pays the ~900ms live LM fetch on
+        // its card. Small batches: fast enough to beat the player to round 1
+        // (~15s for a full deck), gentle enough on LM's API. lmMeta's D1 cache
+        // check makes re-warming a no-op.
+        ctx.waitUntil(
+          (async () => {
+            for (let i = 0; i < prewarm.length; i += 5) {
+              await Promise.all(
+                prewarm.slice(i, i + 5).map((p) => lmMeta(env, p.mapId, p.panoId).catch(() => {})),
+              )
+            }
+          })(),
+        )
 
         return json({
           trainerMapId: user.config.trainerMapId ?? null,
@@ -737,18 +823,28 @@ export default {
       if (request.method === 'GET' && path === '/api/dashboard')
         return json(await buildDashboard(env, user))
 
-      // Tampermonkey installs straight from this URL, so the copy it downloads
-      // is already wired to this Worker with the caller's own token. The
+      // Tampermonkey installs straight from /geocoach.user.js (the loader);
+      // the loader then pulls /geocoach.body.js fresh each page load. Both are
+      // stamped with this Worker's origin and the caller's own token — the
       // committed source never carries either (see coach/server.mjs).
-      if (request.method === 'GET' && path === '/geocoach.user.js') {
-        const src = USERSCRIPT_SRC.replace("'__CLOUD_URL__'", JSON.stringify(url.origin))
+      if (
+        request.method === 'GET' &&
+        (path === '/geocoach.user.js' || path === '/geocoach.body.js')
+      ) {
+        const raw = path === '/geocoach.user.js' ? LOADER_SRC : USERSCRIPT_SRC
+        const src = raw
+          .replace("'__CLOUD_URL__'", JSON.stringify(url.origin))
           .replace("'__CLOUD_TOKEN__'", JSON.stringify(user.token))
           .replace(
             '// @connect      127.0.0.1',
             `// @connect      127.0.0.1\n// @connect      ${url.hostname}`,
           )
         return new Response(src, {
-          headers: { 'Content-Type': 'application/javascript; charset=utf-8', ...CORS },
+          headers: {
+            'Content-Type': 'application/javascript; charset=utf-8',
+            'Cache-Control': 'no-store',
+            ...CORS,
+          },
         })
       }
 

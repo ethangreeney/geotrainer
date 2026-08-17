@@ -664,12 +664,17 @@ const server = createServer(async (req, res) => {
     return
   }
   // Serving the userscript from here lets Tampermonkey install and update it
-  // by URL instead of copy-paste. The script is templated to whatever host it
-  // was fetched from, so installing from another machine (e.g. the Windows PC
-  // hitting this MacBook over the LAN) points it back at the right server.
-  if (req.method === 'GET' && req.url === '/geocoach.user.js') {
+  // by URL instead of copy-paste. /geocoach.user.js is now a small loader that
+  // fetches /geocoach.body.js (the real script) on every page load, so script
+  // changes ship by editing the file — no Tampermonkey reinstall. Both are
+  // templated to whatever host they were fetched from, so installing from
+  // another machine (e.g. the Windows PC hitting this MacBook over the LAN)
+  // points them back at the right server.
+  const urlPath = req.url.split('?')[0]
+  if (req.method === 'GET' && (urlPath === '/geocoach.user.js' || urlPath === '/geocoach.body.js')) {
+    const file = urlPath === '/geocoach.user.js' ? 'geocoach.loader.js' : 'geocoach.user.js'
     try {
-      let src = (await readFile(join(ROOT, 'geocoach.user.js'), 'utf8'))
+      let src = (await readFile(join(ROOT, file), 'utf8'))
       const host = req.headers.host // e.g. "ethans-macbook-air-2.local:5177"
       if (host && host !== `127.0.0.1:${PORT}`) {
         const bare = host.replace(/:\d+$/, '')
@@ -687,7 +692,10 @@ const server = createServer(async (req, res) => {
           .replace("'__CLOUD_TOKEN__'", JSON.stringify(CONFIG.cloud.token))
           .replace('// @connect      127.0.0.1', `// @connect      127.0.0.1\n// @connect      ${cloudHost}`)
       }
-      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      })
       res.end(src)
     } catch {
       res.writeHead(404)
