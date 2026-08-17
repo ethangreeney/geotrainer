@@ -20,6 +20,9 @@ import {
   ratingNameFor,
 } from '../../coach/scheduler.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
+// The userscript source, bundled as text (see the "rules" entry in
+// wrangler.jsonc) so GET /geocoach.user.js can stamp a user's credentials in.
+import USERSCRIPT_SRC from '../../coach/geocoach.user.js'
 // The four meta catalogs, bundled at deploy time (≈600KB gzipped, well under
 // the Worker limit) — deck building and meta resolution need no R2 at all.
 // Import order is tier order: Basics 0, Beginner 1, Intermediate 2, World 3.
@@ -106,18 +109,45 @@ async function countryOf(lat, lng) {
   }
 }
 
-/** The intended meta for this location, when the map is a Learnable Meta map. */
-async function lmMeta(mapId, panoId) {
+/** The intended meta for this location, when the map is a Learnable Meta map.
+ * Cached in D1 forever and shared across users — a pano's clue note is a fact
+ * about the world, not about the player, and these notes almost never change.
+ * Only real payloads are cached; a miss or an outage stays retryable. */
+async function lmMeta(env, mapId, panoId) {
+  const key = `${mapId}:${panoId}`
+  try {
+    const row = await env.DB.prepare('SELECT json FROM cards WHERE cache_key = ?').bind(key).first()
+    if (row) {
+      const cached = JSON.parse(row.json)
+      if (cached) return cached
+    }
+  } catch {
+    // Cache table missing (pre-migration) — fall through to the live fetch.
+  }
+
+  let data = null
   try {
     const params = new URLSearchParams({ panoId, mapId, userscriptVersion: '1.0.0', source: 'map' })
     const res = await fetch(`https://learnablemeta.com/api/userscript/location?${params}`, {
       signal: AbortSignal.timeout(8000),
     })
     if (!res.ok) return null
-    return await res.json()
+    data = await res.json()
   } catch {
     return null
   }
+  if (!data || typeof data !== 'object') return null
+
+  try {
+    await env.DB.prepare(
+      'INSERT INTO cards (cache_key, json, fetched_at) VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at',
+    )
+      .bind(key, JSON.stringify(data), new Date().toISOString())
+      .run()
+  } catch {
+    // A cache write failure must never cost the caller its clue card.
+  }
+  return data
 }
 
 /** Our own trainer-map rounds carry no LM data — resolve the meta from the catalogs. */
@@ -126,7 +156,7 @@ async function metaFromCatalogs(env, panoId) {
   for (const c of await loadCatalogs(env)) {
     const hit = c.locations.find((l) => l.panoId === panoId)
     if (hit && hit.metaName) {
-      const lm = await lmMeta(c.mapId, panoId)
+      const lm = await lmMeta(env, c.mapId, panoId)
       return {
         metaName: hit.metaName,
         country: hit.country,
@@ -161,10 +191,171 @@ async function authUser(env, request, url) {
   const bearer = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '')
   const token = bearer || url.searchParams.get('token')
   if (!token) return null
-  const row = await env.DB.prepare('SELECT id, name, config FROM users WHERE token = ?')
+  const row = await env.DB.prepare('SELECT id, name, config, created_at FROM users WHERE token = ?')
     .bind(token)
     .first()
-  return row ? { id: row.id, name: row.name, config: JSON.parse(row.config ?? '{}') } : null
+  return row
+    ? {
+        id: row.id,
+        name: row.name,
+        token,
+        createdAt: row.created_at ?? null,
+        config: JSON.parse(row.config ?? '{}'),
+      }
+    : null
+}
+
+// ---------- accounts ----------
+
+const HOURS_24 = 24 * 60 * 60 * 1000
+
+const mintToken = () =>
+  [...crypto.getRandomValues(new Uint8Array(16))]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+
+/** Names are display-only, so the rules are just "short, printable, non-empty". */
+const cleanName = (raw) =>
+  typeof raw === 'string'
+    ? raw
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .trim()
+        .slice(0, 40)
+    : ''
+
+/** The token is the account — no email, no password, nothing to reset. The only
+ * gate is a global signup ceiling, so a bot can't mint tokens all night. */
+async function handleSignup(env, body) {
+  const name = cleanName(body?.name)
+  if (!name) return { status: 400, body: { ok: false, error: 'name must be 1-40 characters' } }
+
+  const since = new Date(Date.now() - HOURS_24).toISOString()
+  const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM users WHERE created_at > ?')
+    .bind(since)
+    .first()
+  if ((recent?.n ?? 0) >= 50)
+    return { status: 429, body: { ok: false, error: 'signups are rate-limited, try again tomorrow' } }
+
+  const token = mintToken()
+  const row = await env.DB.prepare(
+    "INSERT INTO users (token, name, config, created_at) VALUES (?, ?, '{}', ?) RETURNING id",
+  )
+    .bind(token, name, new Date().toISOString())
+    .first()
+  await env.DB.prepare('INSERT INTO states (user_id, json) VALUES (?, ?)')
+    .bind(row.id, JSON.stringify(EMPTY_STATE))
+    .run()
+
+  return { status: 200, body: { ok: true, token, name } }
+}
+
+async function setConfig(env, user, patch) {
+  const config = { ...user.config, ...patch }
+  await env.DB.prepare('UPDATE users SET config = ? WHERE id = ?')
+    .bind(JSON.stringify(config), user.id)
+    .run()
+  user.config = config
+  return config
+}
+
+// ---------- dashboard ----------
+
+const pct = (correct, seen) => (seen ? correct / seen : 0)
+
+let regionNames = null
+function countryName(code, fromRounds) {
+  if (fromRounds.has(code)) return fromRounds.get(code)
+  try {
+    regionNames ??= new Intl.DisplayNames(['en'], { type: 'region' })
+    return regionNames.of(code) ?? code
+  } catch {
+    return code
+  }
+}
+
+/** Everything the personal dashboard draws, in one round trip: deck health,
+ * meta mastery buckets, per-country accuracy and a recent-rounds feed. */
+async function buildDashboard(env, user) {
+  const now = new Date()
+  const state = await loadUserState(env, user.id)
+  const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs(env)), now)
+  const introduced = Object.keys(state.deckCards).length
+
+  const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
+    metaName,
+    seen: m.seen ?? 0,
+    correct: m.correct ?? 0,
+    lapses: state.deckCards[metaName]?.lapses ?? 0,
+  }))
+  const solid = metaRows.filter((m) => m.seen >= 3 && pct(m.correct, m.seen) >= 0.8)
+  const shaky = metaRows.filter((m) => pct(m.correct, m.seen) < 0.5)
+  const weakest = [...metaRows]
+    .sort((a, b) => pct(a.correct, a.seen) - pct(b.correct, b.seen) || b.seen - a.seen)
+    .slice(0, 12)
+
+  const [countRow, roundRows] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ?').bind(user.id).first(),
+    env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT 300')
+      .bind(user.id)
+      .all(),
+  ])
+
+  const nameByCode = new Map()
+  const rounds = (roundRows?.results ?? []).map((row) => {
+    const r = JSON.parse(row.json)
+    if (r.answer?.code && r.answer?.name) nameByCode.set(r.answer.code, r.answer.name)
+    return {
+      id: r.id,
+      ts: r.ts,
+      from: r.guess ? [r.guess.lat, r.guess.lng] : null,
+      to: [r.answer.lat, r.answer.lng],
+      correct: r.correctScope ?? r.correctCountry,
+      country: r.answer?.name ?? null,
+      guessCountry: r.guess?.name ?? null,
+      metaName: r.metaName ?? null,
+      score: r.score ?? null,
+      distanceKm: r.distanceKm ?? null,
+    }
+  })
+
+  let seenAll = 0
+  let correctAll = 0
+  const countries = Object.entries(state.countries ?? {})
+    .map(([code, c]) => {
+      seenAll += c.seen ?? 0
+      correctAll += c.correctCountry ?? 0
+      return {
+        code,
+        name: countryName(code, nameByCode),
+        rounds: c.seen ?? 0,
+        correct: c.correctCountry ?? 0,
+      }
+    })
+    .sort((a, b) => b.rounds - a.rounds)
+
+  return {
+    ok: true,
+    name: user.name,
+    generatedAt: now.toISOString(),
+    deck: {
+      due: summary.due,
+      learning: summary.learning,
+      unseen: summary.unseen,
+      introduced,
+      total: introduced + summary.unseen,
+      nextDue: summary.nextDue,
+    },
+    metas: {
+      solid: solid.length,
+      holding: metaRows.length - solid.length - shaky.length,
+      shaky: shaky.length,
+      total: metaRows.length,
+      weakest,
+    },
+    countries,
+    totals: { rounds: countRow?.n ?? 0, correctPct: Math.round(100 * pct(correctAll, seenAll)) },
+    rounds,
+  }
 }
 
 // ---------- the round pipeline (mirrors coach/server.mjs handleRound) ----------
@@ -191,7 +382,7 @@ async function handleRound(env, user, payload) {
   const [answer, guessed, lmDirect] = await Promise.all([
     countryOf(location.lat, location.lng),
     guess ? countryOf(guess.lat, guess.lng) : null,
-    mapId && source !== 'duel' && location.panoId ? lmMeta(mapId, location.panoId) : null,
+    mapId && source !== 'duel' && location.panoId ? lmMeta(env, mapId, location.panoId) : null,
   ])
   const meta = lmDirect ?? (await metaFromCatalogs(env, location.panoId))
 
@@ -328,33 +519,6 @@ async function handleRate(env, user, { id, rating }) {
 
 // ---------- HTTP ----------
 
-// The one public page. Everything else is a token-gated API; this stub is the
-// seed of the "FSRS for GeoGuessr" landing/setup tour planned for Stage 2.
-const LANDING = `<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GeoCoach — FSRS for GeoGuessr</title>
-<style>
-  :root { color-scheme: dark; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-    background: #0b0620; color: #efeaff;
-    font: 16px/1.6 system-ui, -apple-system, sans-serif; }
-  main { max-width: 34rem; padding: 3rem 1.5rem; text-align: center; }
-  h1 { font-size: 2rem; margin: 0 0 .3rem; letter-spacing: -.02em; }
-  h1 span { background: linear-gradient(100deg, #7fd0ff, #b2ef73);
-    -webkit-background-clip: text; background-clip: text; color: transparent; }
-  p { color: #a89fc9; margin: .8rem 0; }
-  code { background: rgba(255,255,255,.08); border-radius: 6px; padding: .1rem .45rem; }
-</style>
-<main>
-  <h1><span>GeoCoach</span></h1>
-  <p><strong>Spaced repetition (FSRS) for GeoGuessr metas.</strong>
-  Every round you play is captured, graded, and scheduled for review —
-  so the clues you forget come back until you don't.</p>
-  <p>This instance is a personal, token-gated API. Public setup guide coming later.</p>
-  <p><code>GET /health</code> is the only other public route.</p>
-</main>`
-
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -367,6 +531,45 @@ const json = (obj, status = 200) =>
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
 
+/** Token-gated routes. Everything else belongs to the static site, so /start
+ * and /app render as pages instead of 401s. */
+const AUTHED_PATHS = new Set([
+  '/round',
+  '/rate',
+  '/deck',
+  '/status',
+  '/plan',
+  '/me',
+  '/trainer-map',
+  '/api/dashboard',
+  '/geocoach.user.js',
+])
+const isApiPath = (path) =>
+  AUTHED_PATHS.has(path) || path.startsWith('/plonkit/') || path.startsWith('/rounds/')
+
+/** The public site (dist-site/), with an index.html fallback so client-routed
+ * pages survive a hard refresh. Absent binding = API-only deploy. */
+async function serveStatic(request, env, url) {
+  if (!env.ASSETS) return new Response('GeoCoach API', { headers: { 'Content-Type': 'text/plain' } })
+  const res = await env.ASSETS.fetch(request)
+  if (res.status !== 404) return res
+  const wantsHtml =
+    request.method === 'GET' && (request.headers.get('Accept') ?? '').includes('text/html')
+  if (!wantsHtml) return res
+  // Fetch "/" rather than "/index.html": the assets layer 308-redirects the
+  // latter back to "/", which would strip the client route from the URL.
+  return env.ASSETS.fetch(new Request(`${url.origin}/`, request))
+}
+
+/** A day's worth of rounds is ~50; 800 is a wall for runaway clients only. */
+async function overRoundLimit(env, userId) {
+  const since = new Date(Date.now() - HOURS_24).toISOString()
+  const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ? AND ts > ?')
+    .bind(userId, since)
+    .first()
+  return (row?.n ?? 0) > 800
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
@@ -374,16 +577,46 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS })
     if (path === '/health') return json({ ok: true })
-    if (request.method === 'GET' && path === '/') return new Response(LANDING, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    })
+
+    // ---------- public ----------
+    try {
+      if (request.method === 'POST' && path === '/signup') {
+        const { status, body } = await handleSignup(env, await request.json())
+        return json(body, status)
+      }
+
+      // Landing-page counters: cheap, real, and nothing personal in them.
+      if (request.method === 'GET' && path === '/api/stats') {
+        const [users, rounds, states] = await Promise.all([
+          env.DB.prepare('SELECT COUNT(*) AS n FROM users').first(),
+          env.DB.prepare('SELECT COUNT(*) AS n FROM rounds').first(),
+          env.DB.prepare('SELECT json FROM states').all(),
+        ])
+        let metasTracked = 0
+        for (const row of states?.results ?? []) {
+          try {
+            metasTracked += Object.keys(JSON.parse(row.json).metas ?? {}).length
+          } catch {
+            // A corrupt state row shouldn't take the counter down.
+          }
+        }
+        return json({ ok: true, users: users?.n ?? 0, rounds: rounds?.n ?? 0, metasTracked })
+      }
+    } catch (err) {
+      return json({ ok: false, error: String(err) }, 500)
+    }
+
+    if (!isApiPath(path)) return serveStatic(request, env, url)
 
     const user = await authUser(env, request, url)
     if (!user) return json({ ok: false, error: 'missing or unknown token' }, 401)
 
     try {
-      if (request.method === 'POST' && path === '/round')
+      if (request.method === 'POST' && path === '/round') {
+        if (await overRoundLimit(env, user.id))
+          return json({ ok: false, error: 'round limit reached, try again later' }, 429)
         return json(await handleRound(env, user, await request.json()))
+      }
 
       if (request.method === 'POST' && path === '/rate') {
         const { status, body } = await handleRate(env, user, await request.json())
@@ -431,6 +664,45 @@ export default {
         const state = await loadUserState(env, user.id)
         const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs(env)), new Date())
         return json({ ...summary, trainerMapId: user.config.trainerMapId ?? null })
+      }
+
+      if (request.method === 'GET' && path === '/me')
+        return json({
+          ok: true,
+          name: user.name,
+          createdAt: user.createdAt,
+          trainerMapId: user.config.trainerMapId ?? null,
+        })
+
+      // The userscript registers the draft map it auto-created for a new user.
+      // Idempotent and first-write-wins: a retry (or a second script instance)
+      // must never orphan the map already carrying someone's deck.
+      if (request.method === 'POST' && path === '/trainer-map') {
+        const existing = user.config.trainerMapId
+        if (existing) return json({ ok: true, trainerMapId: existing })
+        const { mapId } = await request.json()
+        if (typeof mapId !== 'string' || !/^[0-9a-f]{24}$/i.test(mapId))
+          return json({ ok: false, error: 'mapId must be a 24-character map id' }, 400)
+        await setConfig(env, user, { trainerMapId: mapId })
+        return json({ ok: true, trainerMapId: mapId })
+      }
+
+      if (request.method === 'GET' && path === '/api/dashboard')
+        return json(await buildDashboard(env, user))
+
+      // Tampermonkey installs straight from this URL, so the copy it downloads
+      // is already wired to this Worker with the caller's own token. The
+      // committed source never carries either (see coach/server.mjs).
+      if (request.method === 'GET' && path === '/geocoach.user.js') {
+        const src = USERSCRIPT_SRC.replace("'__CLOUD_URL__'", JSON.stringify(url.origin))
+          .replace("'__CLOUD_TOKEN__'", JSON.stringify(user.token))
+          .replace(
+            '// @connect      127.0.0.1',
+            `// @connect      127.0.0.1\n// @connect      ${url.hostname}`,
+          )
+        return new Response(src, {
+          headers: { 'Content-Type': 'application/javascript; charset=utf-8', ...CORS },
+        })
       }
 
       if (request.method === 'GET' && path === '/plan') {

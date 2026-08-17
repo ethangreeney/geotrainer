@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token TEXT UNIQUE NOT NULL,
   name TEXT,
-  config TEXT NOT NULL DEFAULT '{}' -- trainerMapId, sourceMaps, lmApiToken
+  config TEXT NOT NULL DEFAULT '{}', -- trainerMapId, sourceMaps, lmApiToken
+  created_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS states (
@@ -28,3 +29,11 @@ CREATE TABLE IF NOT EXISTS rounds (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rounds_dup ON rounds (user_id, dup_key);
 CREATE INDEX IF NOT EXISTS rounds_answer ON rounds (user_id, answer_code);
+
+-- Clue cards fetched from learnablemeta.com, cached forever (meta notes rarely
+-- change) and shared across users — one fetch per pano for the whole instance.
+CREATE TABLE IF NOT EXISTS cards (
+  cache_key TEXT PRIMARY KEY, -- "<mapId>:<panoId>"
+  json TEXT NOT NULL,
+  fetched_at TEXT NOT NULL
+);

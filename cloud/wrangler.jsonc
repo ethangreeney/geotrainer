@@ -9,6 +9,16 @@
       "database_id": "4a2ece03-b45c-4625-86cb-863a77ad7c19"
     }
   ],
+  // The public site (Vite build in dist-site/). run_worker_first so the Worker
+  // owns the API routes and gets to serve the SPA fallback itself.
+  "assets": {
+    "directory": "../dist-site",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  // The userscript is served from GET /geocoach.user.js with the caller's
+  // credentials baked in, so it has to be bundled as text.
+  "rules": [{ "type": "Text", "globs": ["**/*.user.js"] }],
   // Re-enable once R2 is switched on for the account (dashboard > R2, one-time
   // terms acceptance), then: wrangler r2 bucket create geocoach && wrangler deploy
   // "r2_buckets": [{ "binding": "STORE", "bucket_name": "geocoach" }]

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
-// @description  Sends each GeoGuessr round to the local coaching server so Claude can debrief it.
-// @version      1.9.0
+// @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
+// @version      2.0.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -624,7 +624,60 @@
     return res.status === 204 ? null : res.json()
   }
 
+  /** A brand-new user has no trainer map yet (/deck answers trainerMapId:null),
+   * so mint one with the browser's own session before the usual update+publish
+   * flow runs against it. Nothing is stored locally — the id goes to the
+   * server, and the next /deck comes back with it filled in. */
+  async function createTrainerMap() {
+    const draft = await gg('https://www.geoguessr.com/api/v4/user-maps/drafts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const id = draft && (draft.id ?? draft.mapId)
+    if (!id) throw new Error('draft create returned no id')
+    return id
+  }
+
+  /** Hand the freshly minted map id to the server, which owns it from then on.
+   * Fire-and-forget with one silent retry: losing this only costs a duplicate
+   * map next rebuild, so it never interrupts the user. */
+  function registerTrainerMap(mapId) {
+    const url = (CLOUD ? CLOUD.url : SERVER) + '/trainer-map'
+    const body = JSON.stringify({ mapId })
+    const attempt = (retriesLeft) => {
+      const failed = (message) => {
+        if (retriesLeft > 0) setTimeout(() => attempt(retriesLeft - 1), 2000)
+        else console.warn('[geocoach] trainer map ' + mapId + ' not registered with the server: ' + message)
+      }
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url,
+          headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
+          data: body,
+          timeout: 15000,
+          onload: (res) => {
+            if (res.status !== 200) failed('server ' + res.status)
+          },
+          onerror: () => failed('server unreachable'),
+          ontimeout: () => failed('timed out'),
+        })
+      } else {
+        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS }, body })
+          .then((res) => {
+            if (!res.ok) failed('server ' + res.status)
+          })
+          .catch(() => failed('server unreachable'))
+      }
+    }
+    attempt(1)
+  }
+
   let rebuilding = false
+  // Map creation needs a signed-in GeoGuessr session. If it fails once we stop
+  // trying for this page load: retrying every rebuild would toast on a loop.
+  let mapCreationBlocked = false
 
   /** All rebuilds are automatic: after a game finishes, and on arriving at the
    * site with reviews due (or a deck that has never been built). The throttle
@@ -637,7 +690,21 @@
     try {
       const deck = await serverGet('/deck')
       if (!deck.customCoordinates || deck.customCoordinates.length < 5) return
-      const draftUrl = `https://www.geoguessr.com/api/v4/user-maps/drafts/${deck.trainerMapId}`
+      let mapId = deck.trainerMapId
+      let created = false
+      if (!mapId) {
+        if (mapCreationBlocked) return
+        try {
+          mapId = await createTrainerMap()
+          created = true
+        } catch (err) {
+          mapCreationBlocked = true
+          console.warn('[geocoach] could not create your trainer map', err)
+          toast('GeoCoach could not create your trainer map — are you signed in to GeoGuessr?', false)
+          return
+        }
+      }
+      const draftUrl = `https://www.geoguessr.com/api/v4/user-maps/drafts/${mapId}`
       const draft = await gg(draftUrl)
       await gg(draftUrl, {
         method: 'PUT',
@@ -646,12 +713,19 @@
           avatar: draft.avatar,
           description: deck.description,
           highlighted: draft.highlighted,
-          name: draft.name,
+          // A fresh draft has no name of its own; an existing map keeps the one
+          // the user gave it.
+          name: draft.name || deck.name || 'GeoCoach Trainer',
           customCoordinates: deck.customCoordinates,
           version: draft.version + 1,
         }),
       })
       await gg(`${draftUrl}/publish`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      // Only once the map is live is it worth the server remembering it.
+      if (created) {
+        console.log('[geocoach] created trainer map ' + mapId)
+        registerTrainerMap(mapId)
+      }
       localStorage.setItem('gc-last-rebuild', String(Date.now()))
       // Silent by design: rebuilds are routine housekeeping. Only failures
       // (the catch below / server toasts) deserve attention.
