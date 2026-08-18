@@ -4,8 +4,21 @@
     {
       "name": "geotrainer",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 5173
+    },
+    {
+      "name": "geocoach-site",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--config",
+        "site/vite.config.ts"
+      ],
+      "port": 5174
     }
   ]
 }

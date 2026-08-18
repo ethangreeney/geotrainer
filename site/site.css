@@ -221,24 +221,21 @@ h3 { font: 600 14.5px/1.32 var(--sans); letter-spacing: -0.004em; }
 
 /* ============================================================= sections === */
 .sec { padding-top: var(--rhythm); }
-.secHead { display: flex; align-items: center; gap: 12px; }
-.secHead .ix {
-  flex: none;
-  font: 500 10px/1 var(--mono);
-  letter-spacing: 0.1em;
-  color: var(--ink-4);
-}
-.secHead h2 { flex: none; }
-.secHead .lead { flex: 1; min-width: 12px; height: 1px; background: var(--rule); }
-.secHead .meta {
-  flex: none;
-  font: 500 10px/1 var(--mono);
-  letter-spacing: 0.09em;
+.sec.last { padding-bottom: 10px; }
+/* One line and a hairline. The page has four headings in total, so they do
+   not need an index column and a right-hand caption to tell them apart. */
+.secTitle {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: 0.13em;
   text-transform: uppercase;
   color: var(--ink-4);
-  font-variant-numeric: tabular-nums;
 }
-.secNote { margin-top: 10px; max-width: 66ch; color: var(--ink-3); font-size: 13.5px; }
+.secTitle::after { content: ''; flex: 1; height: 1px; background: var(--rule); }
+.fine { margin-top: 16px; max-width: 60ch; color: var(--ink-3); font-size: 13px; }
+.fine.wide { max-width: 68ch; font-size: 13.5px; }
 
 /* =============================================================== panels === */
 .panel > header {
@@ -287,7 +284,6 @@ h3 { font: 600 14.5px/1.32 var(--sans); letter-spacing: -0.004em; }
 /* ================================================= the clue card, 1:1 ===== */
 /* A redraw of coach/geocoach.user.js showCard(). Same width, same bands, same
    light model — this is the product's face, so it is copied, not evoked. */
-.spec { width: 380px; max-width: 100%; flex: none; }
 .gcCard {
   width: 100%;
   box-shadow: var(--lift);
@@ -353,63 +349,213 @@ h3 { font: 600 14.5px/1.32 var(--sans); letter-spacing: -0.004em; }
   background: rgba(5, 0, 25, 0.25);
   border-top: 1px solid var(--edge-soft);
 }
-.figcap {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 11px;
-  font: 400 11px/1.5 var(--mono);
-  color: var(--ink-4);
-}
-.figcap b { font: 500 10px/1.5 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
 
 /* ============================================================== landing === */
-.hero {
-  display: flex;
-  align-items: flex-start;
-  gap: clamp(28px, 4vw, 64px);
-  padding: clamp(30px, 4vw, 52px) 0 0;
-}
-.heroCopy { flex: 1; min-width: 0; }
-.heroCopy h1 { max-width: 13.6em; }
-.heroCopy .lede { margin-top: 16px; max-width: 52ch; }
-.heroCta { display: flex; align-items: center; gap: 18px; margin-top: 22px; flex-wrap: wrap; }
+/* The fold is one photograph — the equirectangular capture the userscript
+   saved for round 1 of a game on Skye — wrapped on a sphere and draggable
+   (site/Pano.tsx). The card over it is that same round's card. Because the
+   picture is the argument, the copy on top of it is twelve words.
 
-/* live public counters, set as a data block */
-.counts { display: flex; margin-top: 30px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
-.counts > div { flex: 1; padding: 12px 16px 13px; border-left: 1px solid var(--rule-soft); min-width: 0; }
-.counts > div:first-child { border-left: 0; padding-left: 0; }
-.counts dt {
-  font: 600 9.5px/1.35 var(--sans);
-  letter-spacing: 0.13em;
+   Everything here is composed against the photograph: the veil exists so the
+   headline clears the road surface, and the stage is bounded in px as well as
+   svh so a tall monitor does not turn it into a field of grey sky. */
+#root > .stage { flex: none; }
+body.atTop .mast { background: transparent; backdrop-filter: none; border-bottom-color: transparent; }
+.mast { transition: background 0.25s var(--ease), border-color 0.25s var(--ease); }
+.stage {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  /* pulled up under the sticky masthead so the photograph is genuinely full
+     bleed; .stageIn pads the copy back clear of it */
+  margin-top: -54px;
+  min-height: min(820px, 100svh);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.pano {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  /* An overcast sky over wet tarmac, in four stops. It holds the frame for the
+     ~200 ms before the texture decodes, and is what a machine with no WebGL
+     keeps looking at behind the photograph. */
+  background: linear-gradient(180deg, #b7bac2 0%, #969ca7 40%, #55603c 51%, #333d27 100%) center / cover no-repeat;
+}
+.panoGl {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: pan-y; /* vertical drags still scroll the page on a phone */
+  opacity: 0;
+  filter: saturate(0.92) brightness(0.96);
+  transition: opacity 0.8s var(--ease);
+}
+.pano.is-live .panoGl { opacity: 1; }
+.panoGl.grabbing { cursor: grabbing; }
+.pano.is-flat { background-size: cover; background-position: center; }
+
+/* Three washes: sky down, plane up, and a pool under the headline. */
+.stageVeil {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(13, 7, 34, 0.76) 0%, rgba(13, 7, 34, 0.16) 14%, transparent 30%),
+    linear-gradient(0deg, var(--plane) 0%, rgba(13, 7, 34, 0.88) 11%, rgba(13, 7, 34, 0.42) 38%, transparent 64%),
+    radial-gradient(115% 85% at 16% 92%, rgba(13, 7, 34, 0.7), transparent 60%),
+    radial-gradient(100% 100% at 50% 50%, transparent 40%, rgba(13, 7, 34, 0.34) 100%);
+}
+
+.stageIn {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: clamp(24px, 4vw, 56px);
+  padding-top: 104px;
+  padding-bottom: 30px;
+}
+.stageCopy { max-width: 640px; min-width: 0; }
+.slug {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 7px 12px 7px 10px;
+  border-radius: 999px;
+  background: rgba(13, 7, 34, 0.5);
+  border: 1px solid var(--edge-soft);
+  backdrop-filter: blur(8px);
+}
+.slug .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 22%, transparent);
+}
+.stage h1 {
+  margin-top: 20px;
+  font-size: clamp(42px, 6.4vw, 78px);
+  line-height: 0.94;
+  letter-spacing: -0.038em;
+  font-stretch: 96%;
+  text-shadow: 0 2px 30px rgba(5, 0, 25, 0.7);
+}
+.stage .lede {
+  margin-top: 14px;
+  max-width: 34ch;
+  font-size: clamp(15px, 1.5vw, 18px);
+  color: var(--ink);
+  text-shadow: 0 1px 16px rgba(5, 0, 25, 0.75);
+}
+.stage .lede span { display: block; }
+.heroCta { display: flex; align-items: center; gap: 18px; margin-top: 26px; flex-wrap: wrap; }
+.btn.big { padding: 13px 20px; font-size: 13.5px; }
+.stage .hint { color: var(--ink-3); }
+.stageCard { width: 380px; flex: none; filter: drop-shadow(0 22px 44px rgba(5, 0, 25, 0.62)); }
+
+.stageFoot {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 0 var(--pad) 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font: 400 11px/1 var(--mono);
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+}
+/* The only animation on the page, and it is doing a job: nothing else says the
+   photograph moves. It stops for good the first time you drag it. */
+.grab { display: inline-flex; align-items: center; gap: 9px; color: var(--ink-3); transition: opacity 0.4s var(--ease); }
+.grab svg {
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  animation: nudge 3.4s var(--ease) infinite;
+}
+.grab.off { opacity: 0; }
+@keyframes nudge {
+  0%, 62%, 100% { transform: translateX(0); }
+  72% { transform: translateX(-3px); }
+  86% { transform: translateX(3px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grab svg { animation: none; }
+}
+
+/* one round, three moments — the middle column is the product, so it is wider */
+.beats {
+  list-style: none;
+  padding: 0;
+  margin: 22px 0 0;
+  display: grid;
+  grid-template-columns: 0.92fr 1.16fr 0.92fr;
+  border-top: 1px solid var(--rule);
+}
+.beats li { padding: 18px 26px 4px 0; border-left: 1px solid var(--rule-soft); }
+.beats li + li { padding-left: 26px; }
+.beats li:first-child { border-left: 0; }
+.beats .when {
+  font-size: 10.5px;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
   color: var(--ink-4);
 }
-.counts dd {
-  margin: 7px 0 0;
-  font: 500 clamp(20px, 2.3vw, 27px)/1 var(--mono);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-}
+.beats li:nth-child(2) .when { color: var(--lime); }
+.beats h3 { margin-top: 8px; font-size: 14.5px; }
+.beats p { margin-top: 6px; color: var(--ink-3); font-size: 13px; }
+.beats b { color: var(--ink-2); font-weight: 600; }
 
-/* the three-beat loop: a ruled sequence, not three floating cards */
-.loop { margin-top: 20px; border-top: 1px solid var(--rule); }
-.loop .beat {
+/* accuracy by how many times I had met the clue before */
+.recall { margin-top: 20px; border-top: 1px solid var(--rule); }
+.rr {
   display: grid;
-  grid-template-columns: 34px 148px minmax(0, 1fr);
-  gap: 4px 20px;
-  align-items: baseline;
-  padding: 14px 0;
+  grid-template-columns: 190px minmax(0, 1fr) 82px 74px;
+  align-items: center;
+  gap: 18px;
+  padding: 15px 0;
   border-bottom: 1px solid var(--rule-soft);
 }
-.loop .beat .ix { font: 500 10px/1.6 var(--mono); letter-spacing: 0.08em; color: var(--ink-4); }
-.loop .beat h3 { font-size: 13.5px; }
-.loop .beat p { color: var(--ink-3); font-size: 13.5px; max-width: 70ch; }
+.rk { font-size: 13.5px; color: var(--ink-2); }
+.rbar { height: 10px; border-radius: 999px; background: var(--well); box-shadow: var(--press); overflow: hidden; }
+.rbar i { display: block; height: 100%; border-radius: 999px;  }
+.rp { font-size: 25px; line-height: 1; letter-spacing: -0.02em; text-align: right; }
+.rn { font-size: 11px; color: var(--ink-4); text-align: right; }
+.sec.last .btn { margin-top: 22px; }
 
-/* a two-up figure row: chart beside the sentence that reads it */
-.duo { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 18px; align-items: stretch; }
-.duo > * { min-width: 0; }
+@media (max-width: 900px) {
+  .stage { min-height: 0; }
+  .stageIn { flex-direction: column; align-items: stretch; padding-top: 74px; padding-bottom: 24px; }
+  .stageCard { width: min(380px, 100%); margin-top: 30px; }
+  .stage .lede { max-width: 40ch; }
+  .beats { grid-template-columns: 1fr; }
+  .beats li, .beats li + li { border-left: 0; padding: 15px 0; border-bottom: 1px solid var(--rule-soft); }
+  .rr { grid-template-columns: minmax(0, 1fr) 74px 68px; gap: 12px; }
+  .rbar { display: none; }
+  .stageFoot .tally { display: none; }
+}
 
 /* dense example tables */
 .tbl { width: 100%; }
@@ -436,16 +582,6 @@ h3 { font: 600 14.5px/1.32 var(--sans); letter-spacing: -0.004em; }
 .tbl .num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-3); font-size: 11.5px; }
 .tbl .rt { text-align: right; }
 
-/* held vs slipping: name, hit rate rail, count, verdict */
-.hs .r { grid-template-columns: minmax(0, 1fr) 78px 62px 86px; }
-.hs .r .m { display: flex; align-items: center; gap: 8px; }
-
-/* the notes block: fine print, set as fine print */
-.notes { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 34px; border-top: 1px solid var(--rule); }
-.notes .n { padding: 13px 0; border-bottom: 1px solid var(--rule-soft); display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 3px 14px; }
-.notes .n .ix { font: 500 10px/1.7 var(--mono); color: var(--ink-4); }
-.notes .n h3 { font-size: 13px; }
-.notes .n p { grid-column: 2; color: var(--ink-3); font-size: 12.5px; }
 
 /* the closing rail: one line, one key */
 .cta {
