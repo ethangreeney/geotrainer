@@ -45,9 +45,10 @@ function detectBrowser(): string | null {
 
 type StepState = 'done' | 'current' | 'upcoming'
 
+/* Named .ck, not .tick — theme.css spends .tick on SVG chart tick labels. */
 function Tick() {
   return (
-    <svg className="tick" viewBox="0 0 20 20" aria-hidden>
+    <svg className="ck" viewBox="0 0 20 20" aria-hidden>
       <path d="M3 10.6 7.6 15 17 5" />
     </svg>
   )
@@ -75,7 +76,7 @@ function Step({
     <li className={`stepBlock is-${state}`} aria-current={state === 'current' ? 'step' : undefined}>
       <div className="stepHead">
         <span className="n" aria-hidden>
-          <span className="no">{state === 'done' ? <Tick /> : label}</span>
+          {state === 'done' ? <Tick /> : label}
         </span>
         {state === 'done' && onToggle ? (
           <button className="stepTitle" onClick={onToggle} aria-expanded={!!open}>
@@ -216,7 +217,9 @@ export default function Start() {
 
         <div className="start">
           <div className="gauge">
-            <span className="tag b">{complete ? 'Setup complete' : `Step ${current + 1} of 4`}</span>
+            <span className={'tag' + (complete ? ' on' : '')}>
+              {complete ? 'Setup complete' : `Step ${current + 1} of 4`}
+            </span>
             <span className="bars" aria-hidden>
               {done.map((d, i) => (
                 <i key={i} className={d ? 'on' : ''} />
@@ -230,7 +233,7 @@ export default function Start() {
               <p className="lede">
                 Your first round is in. GeoCoach reads every round from here and builds your deck as you play.
               </p>
-              <button className="btn" style={{ marginTop: 26 }} onClick={() => navigate('/app')}>
+              <button className="btn" style={{ marginTop: 24 }} onClick={() => navigate('/app')}>
                 See your dashboard <span className="arr">→</span>
               </button>
             </>
@@ -240,6 +243,9 @@ export default function Start() {
               <p className="lede">
                 There is no password and no email. Your account is a private link, so the link is the one thing worth
                 keeping safe.
+              </p>
+              <p className="hint" style={{ marginTop: 10 }}>
+                Four steps. The last one is playing a game.
               </p>
             </>
           )}

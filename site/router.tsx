@@ -37,21 +37,23 @@ export function Link({
   )
 }
 
-/** The mark is a trig-station symbol: a ringed benchmark with its cross ticks. */
+/** The mark is the card in miniature: a raised chip with a lit benchmark on it. */
 export function Wordmark() {
   return (
     <Link to="/" className="mark" aria-label="GeoCoach home">
-      <svg className="pin" viewBox="0 0 24 24" aria-hidden>
-        <circle cx="12" cy="12" r="6.6" />
-        <path d="M12 0.6v3.4M12 20v3.4M0.6 12h3.4M20 12h3.4" />
-        <circle className="c" cx="12" cy="12" r="2.2" />
-      </svg>
+      <span className="chip" aria-hidden>
+        <svg className="pin" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="6.6" />
+          <path d="M12 0.6v3.4M12 20v3.4M0.6 12h3.4M20 12h3.4" />
+          <circle className="c" cx="12" cy="12" r="2.2" />
+        </svg>
+      </span>
       GeoCoach
     </Link>
   )
 }
 
-/** Every view opens with the same ruled masthead. */
+/** Every view opens with the same hairline masthead, stuck to the top. */
 export function Mast({ children }: { children?: React.ReactNode }) {
   return (
     <header className="mast">
@@ -63,10 +65,10 @@ export function Mast({ children }: { children?: React.ReactNode }) {
   )
 }
 
-/** …and closes with the same double rule. */
+/** ...and closes with the same rule. */
 export function Foot({ children }: { children?: React.ReactNode }) {
   return (
-    <footer className="sheet">
+    <footer className="foot">
       <div className="shell footIn">{children}</div>
     </footer>
   )

@@ -13,6 +13,7 @@
  * Run:  node coach/server.mjs     (listens on 127.0.0.1:5177)
  */
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -28,6 +29,21 @@ import {
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const ROUNDS_DIR = join(ROOT, 'rounds')
+
+/* Old captures only kept the pano_0_* row; newer ones hold the full tile grid.
+   Resolve a tile that is actually on disk so the round log never asks for a
+   404, and memoise it — a round's files never change once it is captured.
+   Returns null when nothing was captured, which the client draws as a gap. */
+const THUMB_CANDIDATES = ['pano_3_6.jpg', 'pano_0_3.jpg', 'pano.jpg']
+const thumbCache = new Map()
+function thumbFor(id) {
+  if (!id) return null
+  if (thumbCache.has(id)) return thumbCache.get(id)
+  const hit = THUMB_CANDIDATES.find((f) => existsSync(join(ROUNDS_DIR, id, f))) ?? null
+  const url = hit && `/rounds/${id}/${hit}`
+  thumbCache.set(id, url)
+  return url
+}
 const STATE_PATH = join(ROOT, 'state.json')
 const PORT = 5177
 
@@ -632,7 +648,11 @@ const server = createServer(async (req, res) => {
       return { name: t.name, tier: t.tier, metas: t.metas.length, seen, learned }
     })
 
+    /* Old captures only have the pano_0_* row; newer ones have the full grid.
+       Resolve a tile that is actually on disk so the log never requests a 404,
+       and cache it — a round's files never change once it has been captured. */
     const rounds = state.rounds.map((r) => ({
+
       id: r.id,
       ts: r.ts,
       answer: { code: r.answer.code, name: r.answer.name, region: r.answer.region, lat: r.answer.lat, lng: r.answer.lng },
@@ -642,7 +662,7 @@ const server = createServer(async (req, res) => {
       metaName: r.metaName,
       score: r.score,
       demo: r.demo ?? false,
-      thumb: r.thumb,
+      thumb: thumbFor(r.demo ? r.thumb : r.id),
     }))
 
     res.writeHead(200, { 'Content-Type': 'application/json' })

@@ -1,0 +1,329 @@
+/* ==========================================================================
+   GEOCOACH — one visual system, two surfaces.
+   --------------------------------------------------------------------------
+   The identity is not invented here. It is lifted from the only piece of this
+   product a player actually looks at while playing: the clue card the
+   userscript paints over GeoGuessr at the end of a round (coach/geocoach.user.js,
+   showCard). That card is a deep indigo→violet panel with paper-white text,
+   a lime "got it" badge, an amber "missed clue" badge, and a light model —
+   hairline highlight on top, layered shadow underneath — that makes it read as
+   a physical thing lying on the game. Everything below is that card, scaled up
+   into a marketing page and an analytics console.
+
+   Rules that hold on both surfaces:
+     · one plane colour, panels raised off it with light-from-above depth
+     · Archivo carries every word; IBM Plex Mono carries every measurement
+     · lime = held / correct / go, amber = slipping / due / missed. Never decor.
+     · corners are 16px on panels, 10px on controls, 999px on pills
+     · numbers are tabular, always
+
+   The chart palettes below were produced by the data-viz palette validator
+   against the panel surface #1e1340 in dark mode. Do not hand-edit a swatch
+   without re-running scripts/validate_palette.js:
+
+     categorical (adjacent order)  #68a51f,#987be2,#c67f00,#4495e2
+         ALL PASS — worst adjacent CVD dE 25.4 · normal-vision dE 27.1 · all >= 3:1
+     ordinal, single-hue lime      #425c2b,#557e2d,#69a22b,#86c547
+         ALL PASS — monotone L, adjacent dL >= 0.06, dim end 2.29:1
+     diverging amber <-> blue      warm and cool poles, neutral #535158 midpoint
+         lime/amber is the product's semantic pair but fails CVD as a
+         *categorical* pair (dE 1.9 deutan), so it is confined to status marks
+         which always ship with a glyph and a word beside them.
+   ========================================================================== */
+
+@import '@fontsource-variable/archivo/wdth.css';
+@import '@fontsource-variable/archivo/index.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/ibm-plex-mono/600.css';
+
+:root {
+  color-scheme: dark;
+
+  /* --- the plane and the panels that sit on it -------------------------- */
+  --plane: #0d0722;
+  --plane-2: #130c2e;
+  --panel: linear-gradient(165deg, #2b1b58 0%, #1a1038 100%);
+  --panel-flat: #1e1340;
+  --panel-2: #251a4b;
+  --well: #150c33;
+  --edge: rgba(255, 255, 255, 0.14);
+  --edge-soft: rgba(255, 255, 255, 0.07);
+  --rule: rgba(232, 228, 246, 0.1);
+  --rule-soft: rgba(232, 228, 246, 0.055);
+
+  /* Light comes from above: a hairline on the top face, a tight contact
+     shadow, then two soft falloffs. Copied from the in-game card verbatim. */
+  --lift: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 2px 6px rgba(5, 0, 25, 0.4),
+    0 14px 28px -6px rgba(5, 0, 25, 0.55), 0 32px 64px -12px rgba(5, 0, 25, 0.65);
+  --lift-sm: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 3px rgba(5, 0, 25, 0.4),
+    0 6px 16px -6px rgba(5, 0, 25, 0.5);
+  --lift-key: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 3px 8px rgba(5, 0, 25, 0.5),
+    0 1px 2px rgba(5, 0, 25, 0.4);
+  --press: inset 0 2px 4px rgba(5, 0, 25, 0.35), inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+
+  /* --- inks ------------------------------------------------------------- */
+  --ink: #e8e4f6;
+  --ink-2: #d6d0ea;
+  --ink-3: #a99fce;
+  --ink-4: rgba(232, 228, 246, 0.42);
+
+  /* --- status: reserved. Always shipped with a glyph and a word. --------- */
+  --lime: #a3e961;
+  --lime-2: #c9f75d;
+  --lime-grad: linear-gradient(180deg, #c9f75d, #97e851);
+  --lime-ink: #17300d;
+  --amber: #f5a838;
+  --amber-2: #ffcf7c;
+  --amber-grad: linear-gradient(180deg, #ffcf7c, #f5a838);
+  --amber-ink: #33230a;
+  --red: #ff8d7d;
+  --red-grad: linear-gradient(180deg, #ff8d7d, #e2544a);
+  --blue: #7dc4ff;
+  --blue-grad: linear-gradient(180deg, #7dc4ff, #3f8fdf);
+
+  /* --- chart marks (validated; see the header) --------------------------- */
+  --k1: #68a51f;
+  --k2: #987be2;
+  --k3: #c67f00;
+  --k4: #4495e2;
+  --o1: #425c2b;
+  --o2: #557e2d;
+  --o3: #69a22b;
+  --o4: #86c547;
+  --d1: #d78c00;
+  --d2: #af7100;
+  --d3: #865812;
+  --d4: #535158;
+  --d5: #3e6596;
+  --d6: #4683c5;
+  --d7: #60aaf3;
+  --nodata: #241a45;
+  --grid: rgba(232, 228, 246, 0.07);
+  --axis: rgba(232, 228, 246, 0.18);
+
+  /* --- type ------------------------------------------------------------- */
+  --sans: 'Archivo Variable', Archivo, 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* --- geometry --------------------------------------------------------- */
+  --r-lg: 16px;
+  --r-md: 10px;
+  --r-sm: 6px;
+  --gap: 12px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+* {
+  margin: 0;
+}
+html {
+  background: var(--plane);
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  background: var(--plane);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+input {
+  font: inherit;
+  color: inherit;
+}
+::selection {
+  background: rgba(163, 233, 97, 0.26);
+}
+:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+
+/* The plane is not flat: a wide violet bloom behind everything, the same
+   colour the card's shadow is cast in, so panels sit *in* something. */
+.bloom {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 70% at 12% -10%, rgba(112, 74, 214, 0.3), transparent 62%),
+    radial-gradient(90% 60% at 92% 4%, rgba(64, 44, 140, 0.26), transparent 58%);
+}
+
+/* ===================================================== shared primitives === */
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'zero' 1;
+}
+.dim { color: var(--ink-3); }
+.faint { color: var(--ink-4); }
+
+/* the small mono all-caps label that names a part */
+.tag {
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+.tag.on { color: var(--lime); }
+
+/* a raised panel — the card, at any size */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--lift-sm);
+  min-width: 0;
+}
+
+/* the primary key: a lit button, pressed into the same light model */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: var(--r-md);
+  background: var(--lime-grad);
+  color: var(--lime-ink);
+  font: 700 12.5px/1 var(--sans);
+  letter-spacing: 0.02em;
+  box-shadow: var(--lift-key);
+  transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 5px 14px rgba(5, 0, 25, 0.55), 0 1px 2px rgba(5, 0, 25, 0.4);
+}
+.btn:active { transform: translateY(0); box-shadow: var(--press); }
+.btn.ghost {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-2);
+  box-shadow: var(--press);
+  font-weight: 600;
+}
+.btn.ghost:hover { color: var(--ink); background: rgba(255, 255, 255, 0.09); transform: none; box-shadow: var(--press); }
+
+/* status pill — colour never travels alone; the glyph and the word go with it */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font: 700 10.5px/1.4 var(--sans);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 2px 5px rgba(5, 0, 25, 0.4);
+}
+.pill.hold { background: var(--lime-grad); color: var(--lime-ink); }
+.pill.slip { background: var(--amber-grad); color: var(--amber-ink); }
+.pill.flat {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink-3);
+  box-shadow: var(--press);
+}
+
+/* a progress rail — pressed into the panel, filled with a lit bar */
+.meter {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(5, 0, 25, 0.45);
+  box-shadow: inset 0 1px 2px rgba(5, 0, 25, 0.6);
+  overflow: hidden;
+  min-width: 30px;
+}
+.meter i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--lime-grad);
+}
+.meter.warm i { background: var(--amber-grad); }
+
+/* ------------------------------------------------------------- scrollbars */
+.scroll { overflow-y: auto; overscroll-behavior: contain; }
+.scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+.scroll::-webkit-scrollbar-thumb {
+  background: rgba(232, 228, 246, 0.16);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+.scroll::-webkit-scrollbar-thumb:hover { background: rgba(232, 228, 246, 0.3); background-clip: content-box; }
+
+/* ----------------------------------------------------------------- charts */
+svg.chart { display: block; }
+svg text { font-family: var(--mono); }
+.tick {
+  font: 400 9.5px var(--mono);
+  fill: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+.axis { stroke: var(--axis); stroke-width: 1; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.lbl { font: 600 10px var(--sans); fill: var(--ink-2); letter-spacing: 0.02em; }
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 9px; }
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 500 10px/1.4 var(--sans);
+  color: var(--ink-4);
+  letter-spacing: 0.03em;
+}
+.legend span i { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+.legend span i.line { width: 13px; height: 2px; border-radius: 1px; }
+
+/* ---------------------------------------------------------------- tooltip */
+.tip {
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
+  background: linear-gradient(165deg, #33205f 0%, #1c1140 100%);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-md);
+  padding: 9px 11px;
+  max-width: 280px;
+  font: 500 11.5px/1.5 var(--sans);
+  color: var(--ink);
+  box-shadow: var(--lift);
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.tip.on { opacity: 1; }
+.tip .h {
+  font: 700 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--lime);
+  margin-bottom: 6px;
+}
+.tip .r {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.tip .r span { color: var(--ink-4); font-family: var(--sans); }
