@@ -631,6 +631,7 @@ const AUTHED_PATHS = new Set([
   '/me',
   '/trainer-map',
   '/api/dashboard',
+  '/api/rounds',
   '/geocoach.user.js',
   '/geocoach.body.js',
 ])
@@ -822,6 +823,21 @@ export default {
 
       if (request.method === 'GET' && path === '/api/dashboard')
         return json(await buildDashboard(env, user))
+
+      // The stored dossier, verbatim. The dashboard's round list is a trimmed
+      // projection for charts; coaching needs the whole thing — panoId above
+      // all, which is what lets a round played on another machine have its
+      // panorama rebuilt locally (see coach/brief.mjs).
+      if (request.method === 'GET' && path === '/api/rounds') {
+        const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 1))
+        const rows = await env.DB.prepare(
+          'SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT ?',
+        )
+          .bind(user.id, limit)
+          .all()
+        const rounds = (rows?.results ?? []).map((r) => JSON.parse(r.json))
+        return json({ ok: true, rounds })
+      }
 
       // Tampermonkey installs straight from /geocoach.user.js (the loader);
       // the loader then pulls /geocoach.body.js fresh each page load. Both are

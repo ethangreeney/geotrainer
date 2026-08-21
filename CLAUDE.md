@@ -6,16 +6,24 @@ round into `coach/rounds/<id>/` and drive spaced repetition over `coach/state.js
 
 ## Discussing a round
 
-Dossier rounds are discussed **only when asked** — never auto-coach after games.
-When asked about a round, read `coach/rounds/<id>/dossier.json` and `pano.jpg`,
-then pull the offline Plonk It guides for both the **actual** and the **guessed**
-country: `coach/plonkit/<slug>.md` (slug lookup in `coach/plonkit/INDEX.md`).
-Read the markdown first; open individual images from `coach/plonkit/img/<slug>/`
-only when a specific clue needs visual confirmation. Everything is offline — no
-web fetches needed.
+Rounds are discussed **only when asked** — never auto-coach after games.
 
-If `coach/plonkit/` is empty, regenerate it: `node coach/plonkit/scrape.mjs`
-(~10 min, ~500MB; snapshot is gitignored).
+When asked, run `node coach/brief.mjs` (no argument = the round just played; or
+an index like `3`, or a round id; `--list` to see recent rounds). One call pulls
+the dossier from the cloud, rebuilds the panorama from Google's tile CDN into
+`coach/rounds/<id>/`, samples the terrain at both ends of the guess, and prints
+the Plonk It clues that separate the true country from the guessed one. Then
+read the `pano.jpg` it names — that is the whole loop. Open a `pano_<row>_<col>.jpg`
+tile to read detail the overview loses, or a `coach/plonkit/img/...` reference
+image when a clue needs visual confirmation.
+
+For the wider question — "what else could this have been?" — `node coach/clues.mjs`
+slices all 140 guides by clue type across countries: `bollard`, `pole white top`,
+`--find cyrillic`, `--country HR`.
+
+Everything is offline; the brief's only network calls are the round fetch and an
+elevation lookup. If `coach/plonkit/` is empty, regenerate it:
+`node coach/plonkit/scrape.mjs` (~10 min, ~500MB; snapshot is gitignored).
 
 ## Constraints
 
