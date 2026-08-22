@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.5.0
+// @version      2.6.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -34,10 +34,12 @@
   // data-geocoach-log> because Tampermonkey sandbox console output is not
   // always visible to page-context tooling.
   const tlogLines = []
+  const tlogQueue = []
   const tlog = (msg) => {
     const line = '[' + new Date().toISOString().slice(11, 23) + '] ' + msg
     console.log('[geocoach ⏱]' + line)
     tlogLines.push(line)
+    tlogQueue.push({ t: Date.now(), line: line.slice(0, 500) })
     try {
       document.documentElement.setAttribute('data-geocoach-log', tlogLines.slice(-20).join('\n'))
     } catch {}
@@ -49,7 +51,55 @@
     tlogged.add(key)
     tlog(line)
   }
-  tlog('body 2.5.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
+  /** The on-page log is visible only on the machine that made it and dies on
+   * navigation, so every line also goes home: the LAN server for the dossier
+   * machine, and the cloud when configured — that copy is the only one
+   * readable from the Mac while the gaming PC is the one playing.
+   * Never call tlog from in here: shipping a line would queue another. */
+  function shipTlog() {
+    if (!tlogQueue.length) return
+    const lines = tlogQueue.splice(0)
+    const body = JSON.stringify({ lines })
+    // Same transport split as post(): GM for the http LAN server (an https
+    // page can't reach it with fetch), page-context fetch for the https cloud.
+    if (typeof GM_xmlhttpRequest === 'function') {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: LOCAL + '/tlog',
+        headers: { 'Content-Type': 'application/json' },
+        data: body,
+        timeout: 15000,
+      })
+    } else {
+      fetch(LOCAL + '/tlog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {})
+    }
+    if (!CLOUD) return
+    // Only the cloud leg is worth retrying — it is the copy we read remotely.
+    // A long outage caps at the newest 200 lines rather than growing forever.
+    const requeue = () => {
+      tlogQueue.unshift(...lines)
+      if (tlogQueue.length > 200) tlogQueue.splice(0, tlogQueue.length - 200)
+    }
+    const viaGM = () => {
+      if (typeof GM_xmlhttpRequest !== 'function') return requeue()
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: CLOUD.url + '/api/tlog',
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
+        data: body,
+        timeout: 15000,
+        onerror: requeue,
+        ontimeout: requeue,
+      })
+    }
+    W.fetch(CLOUD.url + '/api/tlog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
+      body,
+    }).catch(viaGM)
+  }
+
+  tlog('body 2.6.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
    * server still gets every round so pano dossiers keep building at home.
@@ -568,6 +618,14 @@
   // Ranked duels are captured for after-match review only: rounds become
   // dossiers, but no lesson card and no toasts — ranked play gets no help.
   let myId = null
+  // GeoGuessr moved live ranked off /duels/<id>, so the URL no longer names the
+  // game. The page still calls game-server about it (guesses, chat, state), and
+  // the id in that traffic is what keeps capture working wherever it now lives.
+  let lastDuelId = null
+  let lastDuelSeen = 0
+  // pollDuel's own request goes through the fetch tap too; ignoring it keeps
+  // the freshness window measured from the page's traffic, not our own polling.
+  let selfDuelFetch = ''
   function resolveMyId() {
     // The account id ships in every page's Next.js payload — synchronous, no
     // fetch to fail at startup. The API call stays as a markup-change fallback.
@@ -635,16 +693,26 @@
   // (rounds advance on the server's own clock, unlike singleplayer games).
   function pollDuel() {
     const m = location.pathname.match(/^\/(?:duels|team-duels)\/([\w-]+)/)
-    if (!m) return
-    tlogOnce('duel-page:' + m[1], 'duel page ' + m[1])
+    let id = m ? m[1] : null
+    if (id) {
+      tlogOnce('duel-page:' + id, 'duel page ' + id)
+    } else if (lastDuelId && Date.now() - lastDuelSeen < 30 * 60 * 1000) {
+      // The pathname is logged so the real live-ranked URL comes home with the
+      // first game played; the 30min window stops a finished duel polling on.
+      id = lastDuelId
+      tlogOnce('duel-traffic-poll:' + id, 'polling duel ' + id + ' via traffic-learned id at ' + location.pathname)
+    }
+    if (!id) return
     if (!myId) resolveMyId() // self-heal: without it every duel round is silently skipped
-    fetch(`https://game-server.geoguessr.com/api/duels/${m[1]}`, { credentials: 'include' })
+    const url = `https://game-server.geoguessr.com/api/duels/${id}`
+    selfDuelFetch = url
+    fetch(url, { credentials: 'include' })
       .then((r) => {
-        if (!r.ok) { tlogOnce('duel-fetch:' + m[1] + ':' + r.status, 'duel fetch → ' + r.status); return null }
+        if (!r.ok) { tlogOnce('duel-fetch:' + id + ':' + r.status, 'duel fetch → ' + r.status); return null }
         return r.json()
       })
       .then(handleDuelState)
-      .catch(() => tlogOnce('duel-fetch-err:' + m[1], 'duel fetch failed (network/CORS)'))
+      .catch(() => tlogOnce('duel-fetch-err:' + id, 'duel fetch failed (network/CORS)'))
   }
 
   // ------------------------------------------------------------- capture
@@ -671,8 +739,18 @@
             handleGameState(g)
           }).catch(() => {}),
         ).catch(() => {})
-      } else if (/\/api\/duels\/[\w-]+(\?|$)/.test(url)) {
-        rec.promise.then((res) => res.clone().json().then(handleDuelState).catch(() => {})).catch(() => {})
+      } else if (/\/api\/duels\/([\w-]+)/.test(url)) {
+        // Live duel state moves over websockets, so a guess POST is often the
+        // only HTTP trace of the game — but it still names the id, which is all
+        // pollDuel needs. Only the bare state endpoint answers with a state.
+        const id = url.match(/\/api\/duels\/([\w-]+)/)[1]
+        if (url !== selfDuelFetch) {
+          lastDuelId = id
+          lastDuelSeen = Date.now()
+          tlogOnce('duel-traffic:' + id, 'duel id ' + id + ' learned from traffic')
+        }
+        if (/\/api\/duels\/[\w-]+(\?|$)/.test(url))
+          rec.promise.then((res) => res.clone().json().then(handleDuelState).catch(() => {})).catch(() => {})
       }
     } catch {}
   }
@@ -849,6 +927,9 @@
   // game-finished trigger is the only one that fires. Runs once per return to
   // a non-game page, not on the 3s poll, so an offline server can't spam.
   let arrivalChecked = false
+  // Breadcrumbs for the shipped log. Revisits matter (leaving a duel and coming
+  // back), so only consecutive duplicates are suppressed — not tlogOnce.
+  let lastPath = ''
   function checkArrival() {
     if (arrivalChecked) return
     arrivalChecked = true
@@ -859,6 +940,7 @@
   function init() {
     resolveMyId()
     setInterval(pollDuel, 10000)
+    setInterval(shipTlog, 10000)
     // The last round's card outlives both removal triggers: "Show results"
     // keeps the /game/<token> path and serves no new round, so the card sat
     // on top of the final breakdown. Catch the advance click itself — the
@@ -878,6 +960,10 @@
       true
     )
     const watchPage = () => {
+      if (location.pathname !== lastPath) {
+        lastPath = location.pathname
+        tlog('page ' + lastPath)
+      }
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
       if (inGame) {
         arrivalChecked = false

@@ -14,7 +14,7 @@
  */
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { saveRoundTiles } from './pano.mjs'
@@ -46,6 +46,35 @@ function thumbFor(id) {
 }
 const STATE_PATH = join(ROOT, 'state.json')
 const PORT = 5177
+
+/* The userscript's own debug lines, shipped home every ~10s so a silent
+   capture failure on the gaming PC is diagnosable here rather than invisible.
+   Bounded at every end: one request can't flood the file, one line can't be a
+   novel, and the file is trimmed back to a tail once it passes ~1MB. */
+const TLOG_PATH = join(ROOT, 'tlog.log')
+const TLOG_MAX_LINES = 200
+const TLOG_MAX_BYTES = 1_000_000
+const TLOG_KEEP_LINES = 2000
+
+async function appendTlog(lines) {
+  const chunk = lines
+    .map((e) => {
+      const t = Number(e?.t)
+      const ts = new Date(Number.isFinite(t) ? t : Date.now()).toISOString()
+      // Newlines would break the one-entry-per-line contract this file exists for.
+      const line = String(e?.line ?? '')
+        .replace(/[\r\n]+/g, ' ')
+        .slice(0, 500)
+      return `${ts} ${line}\n`
+    })
+    .join('')
+  await appendFile(TLOG_PATH, chunk)
+  const { size } = await stat(TLOG_PATH)
+  if (size > TLOG_MAX_BYTES) {
+    const kept = (await readFile(TLOG_PATH, 'utf8')).split('\n').slice(-TLOG_KEEP_LINES)
+    await writeFile(TLOG_PATH, kept.join('\n'))
+  }
+}
 
 // The full Plonk It scrape lives in the app; the dossier embeds the relevant
 // slice so a coaching session needs no repo lookups to cite real clues.
@@ -821,6 +850,28 @@ const server = createServer(async (req, res) => {
       } catch (err) {
         console.error('[coach] rate failed:', err)
         respond(500, { ok: false, error: String(err) })
+      }
+    })
+    return
+  }
+  // The userscript's debug tail, posted every ~10s. No token: this server is
+  // LAN-only and the payload is the client's own console output.
+  if (req.method === 'POST' && req.url === '/tlog') {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', async () => {
+      const respond = (code, obj) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(obj))
+      }
+      try {
+        const { lines } = JSON.parse(body)
+        if (!Array.isArray(lines)) return respond(400, { ok: false, error: 'lines must be an array' })
+        // An oversized batch is a client bug; drop it rather than write it down.
+        if (lines.length > 0 && lines.length <= TLOG_MAX_LINES) await appendTlog(lines)
+        respond(200, { ok: true })
+      } catch (err) {
+        respond(400, { ok: false, error: String(err) })
       }
     })
     return

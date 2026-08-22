@@ -605,6 +605,43 @@ async function handleRate(env, user, { id, rating }) {
   return { status: 200, body: { ok: true, metaName: snap.metaName, rating } }
 }
 
+// ---------- userscript debug log ----------
+
+/** The userscript posts its own console lines here every ~10s, so a silent
+ * capture failure on the gaming PC is diagnosable instead of invisible.
+ * Bounded at both ends: one request can't flood the table, and each user keeps
+ * only a tail — this is a live console, not an archive. */
+const TLOG_MAX_LINES = 200
+const TLOG_KEEP_ROWS = 500
+
+async function handleTlog(env, user, body) {
+  const lines = body?.lines
+  if (!Array.isArray(lines))
+    return { status: 400, body: { ok: false, error: 'lines must be an array' } }
+  // An oversized batch is a client bug; drop it rather than write it down.
+  if (!lines.length || lines.length > TLOG_MAX_LINES)
+    return { status: 200, body: { ok: true, stored: 0 } }
+
+  const rows = lines.map((e) => {
+    const t = Number(e?.t)
+    return { ts: Number.isFinite(t) ? t : Date.now(), line: String(e?.line ?? '').slice(0, 500) }
+  })
+  // One D1 round trip for the inserts and the prune, atomic (batch = transaction).
+  await env.DB.batch([
+    ...rows.map((r) =>
+      env.DB.prepare('INSERT INTO tlog (user_id, ts, line) VALUES (?, ?, ?)').bind(
+        user.id,
+        r.ts,
+        r.line,
+      ),
+    ),
+    env.DB.prepare(
+      'DELETE FROM tlog WHERE user_id = ? AND id NOT IN (SELECT id FROM tlog WHERE user_id = ? ORDER BY ts DESC, id DESC LIMIT ?)',
+    ).bind(user.id, user.id, TLOG_KEEP_ROWS),
+  ])
+  return { status: 200, body: { ok: true, stored: rows.length } }
+}
+
 // ---------- HTTP ----------
 
 const CORS = {
@@ -632,6 +669,7 @@ const AUTHED_PATHS = new Set([
   '/trainer-map',
   '/api/dashboard',
   '/api/rounds',
+  '/api/tlog',
   '/geocoach.user.js',
   '/geocoach.body.js',
 ])
@@ -841,6 +879,24 @@ export default {
               .all()
         const rounds = (rows?.results ?? []).map((r) => JSON.parse(r.json))
         return json({ ok: true, rounds })
+      }
+
+      if (request.method === 'POST' && path === '/api/tlog') {
+        const { status, body } = await handleTlog(env, user, await request.json())
+        return json(body, status)
+      }
+
+      // The newest ?limit= lines, handed back oldest-first so they read as a
+      // console rather than in reverse.
+      if (request.method === 'GET' && path === '/api/tlog') {
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+        const rows = await env.DB.prepare(
+          'SELECT ts, line FROM tlog WHERE user_id = ? ORDER BY ts DESC, id DESC LIMIT ?',
+        )
+          .bind(user.id, limit)
+          .all()
+        const lines = (rows?.results ?? []).reverse().map((r) => ({ ts: r.ts, line: r.line }))
+        return json({ ok: true, lines })
       }
 
       // Tampermonkey installs straight from /geocoach.user.js (the loader);
