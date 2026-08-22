@@ -17,7 +17,7 @@ import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { saveTiles } from './pano.mjs'
+import { saveRoundTiles } from './pano.mjs'
 import {
   buildDeck,
   deckSummary,
@@ -369,7 +369,7 @@ async function handleRound(payload) {
 
   // Tiles are ~128 fetches + a stitch: they run in the background so the
   // response (and the in-game lesson card) is never held up by them.
-  const tilesPromise = location.panoId ? saveTiles(location.panoId, dir) : Promise.resolve([])
+  const tilesPromise = saveRoundTiles(location.panoId, dir, location)
   const [answer, guessed, lmDirect] = await Promise.all([
     countryOf(location.lat, location.lng),
     guess ? countryOf(guess.lat, guess.lng) : null,

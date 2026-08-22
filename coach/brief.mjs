@@ -22,8 +22,8 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { compass16, panoHeading } from './meta.mjs'
-import { saveTiles } from './pano.mjs'
+import { compass16, panoHeading, readRoundMeta, writeRoundMeta } from './meta.mjs'
+import { saveRoundTiles } from './pano.mjs'
 import { flat, guide } from './plonkit.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -177,13 +177,12 @@ async function makeViews(dir) {
 }
 
 /** The pano's compass heading, cached in the round dir so a second brief on the
- *  same round costs no round trip. Null when Google won't say. */
-async function heading(dir, panoId) {
-  const file = join(dir, 'meta.json')
-  if (existsSync(file))
-    return readFile(file, 'utf8').then((s) => JSON.parse(s).heading ?? null).catch(() => null)
-  const deg = await panoHeading(panoId)
-  if (deg != null) await writeFile(file, JSON.stringify({ heading: deg }))
+ *  same round costs no round trip. Null when Google won't say. A substituted
+ *  round asks about the substitute — that is the pano the views were cut from. */
+async function heading(dir, m, panoId) {
+  if (m.heading != null) return m.heading
+  const deg = await panoHeading(m.panoId ?? panoId)
+  if (deg != null) await writeRoundMeta(dir, { heading: deg })
   return deg
 }
 
@@ -192,7 +191,13 @@ async function heading(dir, panoId) {
  *  in game has it too and it names no place. */
 async function imagery(dir, id, panoId) {
   const out = []
-  const deg = await heading(dir, panoId)
+  const m = await readRoundMeta(dir)
+  if (m.substituted)
+    out.push(
+      `imagery: nearest live pano, ${m.offsetM} m from the true spot — Google retired the pano\n` +
+        '  this round was played on (may differ in season/generation)',
+    )
+  const deg = await heading(dir, m, panoId)
   const views = VIEWS.map((v, i) => [
     join(dir, `view_${v}.jpg`),
     deg == null ? '' : `  (faces ${compass16(deg + i * 90)})`,
@@ -327,7 +332,7 @@ if (args[0] === '--quiz') {
   await mkdir(qdir, { recursive: true })
   await writeFile(join(qdir, 'dossier.json'), JSON.stringify(q, null, 1))
   await writeFile(quizzedPath, JSON.stringify([...quizzed, q.id], null, 1))
-  if (!existsSync(join(qdir, 'pano.jpg')) && q.panoId) await saveTiles(q.panoId, qdir)
+  if (!existsSync(join(qdir, 'pano.jpg'))) await saveRoundTiles(q.panoId, qdir, q.answer)
   await makeViews(qdir)
 
   /* Nothing below may name the place: no country, no coordinates, no meta.
@@ -365,7 +370,7 @@ const missed = Boolean(r.guess?.code) && r.guess.code !== r.answer?.code
 
 /* Tiles, terrain and guides in parallel — the tiles are the slow part. */
 const [, hiGround, loGround, aG, gG] = await Promise.all([
-  existsSync(pano) || !r.panoId ? Promise.resolve([]) : saveTiles(r.panoId, dir),
+  existsSync(pano) ? Promise.resolve([]) : saveRoundTiles(r.panoId, dir, r.answer),
   terrain(r.answer),
   terrain(r.guess),
   guide(r.answer?.code, r.answer?.name),
@@ -486,7 +491,10 @@ for (const [g, side] of [
 
 rule('IMAGERY')
 if (!existsSync(pano))
-  L.push(`no tiles for panoId ${r.panoId ?? '(none recorded)'} — imagery unavailable`)
+  L.push(
+    `no tiles for panoId ${r.panoId ?? '(none recorded)'} — imagery unavailable` +
+      (r.panoId ? ': Google retired that pano and has no live coverage within 500 m either' : ''),
+  )
 else L.push(...(await imagery(dir, r.id, r.panoId)))
 
 L.push('', 'Wider question ("what else could this have been?"): node coach/clues.mjs')

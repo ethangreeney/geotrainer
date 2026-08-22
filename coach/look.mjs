@@ -19,7 +19,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { compass16, compassDeg, panoHeading } from './meta.mjs'
+import { compass16, compassDeg, panoHeading, readRoundMeta, writeRoundMeta } from './meta.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const TILE = 512
@@ -127,20 +127,23 @@ if (!existsSync(join(dir, 'dossier.json')) || !existsSync(join(dir, 'pano_full.j
 const files = await readdir(dir)
 const c4 = files.reduce((n, f) => Math.max(n, Number(f.match(/^pano_\d+_(\d+)\.jpg$/)?.[1] ?? -1) + 1), 0)
 const grid = { cols: c4 * 2, rows: c4 }
-const { panoId } = JSON.parse(await readFile(join(dir, 'dossier.json'), 'utf8'))
+
+// Whichever pano the stitch on disk was actually built from: meta.json names a
+// substitute when the round's own pano had been retired by the time the brief
+// ran, and zoom 5 has to come off the same pano as the zoom 4 under it.
+const meta = await readRoundMeta(dir)
+const panoId =
+  meta.panoId ?? JSON.parse(await readFile(join(dir, 'dossier.json'), 'utf8')).panoId
 
 // The pano's compass heading, if the brief already wrote it down. A numeric aim
 // only wants it to name the direction afterwards, so it is never worth a fetch;
 // a compass aim cannot be turned into yaw without it, so that one pays for it.
-const metaFile = join(dir, 'meta.json')
 const wind = compassDeg(yawArg)
-let north = existsSync(metaFile)
-  ? await readFile(metaFile, 'utf8').then((s) => JSON.parse(s).heading ?? null).catch(() => null)
-  : null
+let north = meta.heading ?? null
 if (wind != null && north == null) {
   north = await panoHeading(panoId)
   if (north == null) die(`no compass heading for this pano — aim in degrees, not "${yawArg}"`)
-  await writeFile(metaFile, JSON.stringify({ heading: north }))
+  await writeRoundMeta(dir, { heading: north })
 }
 const yaw = wind == null ? Number(yawArg) : mod(wind - north, 360)
 if (!Number.isFinite(yaw)) die(USAGE)

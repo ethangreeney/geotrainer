@@ -1,10 +1,13 @@
 /**
  * Which way a panorama faces, from Google's public photometa endpoint (no key,
- * no auth). The heading is the compass bearing of the pano centre — the way the
- * camera car was pointed, which is yaw 0 everywhere in this project — so it
- * turns "water on the left" into "water to the north-west". A nicety: anything
- * that goes wrong returns null rather than costing the brief its imagery.
+ * no auth), plus the round dir's meta.json that caches it. The heading is the
+ * compass bearing of the pano centre — the way the camera car was pointed,
+ * which is yaw 0 everywhere in this project — so it turns "water on the left"
+ * into "water to the north-west". A nicety: anything that goes wrong returns
+ * null rather than costing the brief its imagery.
  */
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 // The endpoint speaks protobuf-in-a-URL. This is the tile-viewer's own request
 // with the pano id spliced into the middle; nothing in it is ours to tune.
@@ -28,6 +31,20 @@ export const compass16 = (deg) => WINDS[Math.round(mod(deg, 360) / 22.5) % 16]
 export const compassDeg = (name) => {
   const i = WINDS.indexOf(String(name ?? '').toUpperCase())
   return i < 0 ? null : i * 22.5
+}
+
+/** A round dir's meta.json: {heading}, and for a round whose own pano Google
+ *  retired, the {panoId, substituted, offsetM} its imagery really came from.
+ *  {} when there is no file yet, or it is unreadable. */
+export const readRoundMeta = (dir) =>
+  readFile(join(dir, 'meta.json'), 'utf8').then(JSON.parse).catch(() => ({}))
+
+/** Merge fields into meta.json — a merge, not a write: the heading and the
+ *  substitution are learned at different moments, and neither may drop the other. */
+export async function writeRoundMeta(dir, patch) {
+  const next = { ...(await readRoundMeta(dir)), ...patch }
+  await writeFile(join(dir, 'meta.json'), JSON.stringify(next))
+  return next
 }
 
 /** Degrees clockwise from north that the pano centre faces, or null. */
