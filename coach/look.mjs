@@ -2,10 +2,13 @@
  * An aimed close-up of one round's panorama — the telephoto to the four wide
  * views brief.mjs renders.
  *
- *   node coach/look.mjs <roundId> <yaw> [pitch] [fov]
+ *   node coach/look.mjs <roundId> <yaw|N|NE|SSW…> [pitch] [fov]
  *
  * Yaw 0 is the way the camera car faced and grows clockwise; pitch up is
- * positive; defaults are pitch -5, fov 60. Under 45° of field the stitched
+ * positive; defaults are pitch -5, fov 60. A 16-wind name in place of the yaw
+ * aims by compass instead — "look north" rather than "look 287° round from the
+ * car" — which needs the pano's heading, so it is fetched and cached the first
+ * time it is asked for. Under 45° of field the stitched
  * pano_full.jpg runs out of pixels, so the sector the view actually covers is
  * pulled at zoom 5 — twice the resolution the round was saved at — from
  * Google's public tile CDN and cached in the round's z5/. Google only keeps that
@@ -16,6 +19,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { compass16, compassDeg, panoHeading } from './meta.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const TILE = 512
@@ -23,7 +27,7 @@ const ASPECT = 1008 / 1344 // render.py's view, so the vertical field follows th
 const MARGIN = 2 // degrees of slack, so tile rounding can never clip the frame
 const WIDE = 45 // at or above this field of view pano_full.jpg already has the detail
 const BUDGET = 64 // tiles: past this the view is nearly straight down, not worth the fetch
-const USAGE = 'usage: node coach/look.mjs <roundId> <yaw> [pitch] [fov]'
+const USAGE = 'usage: node coach/look.mjs <roundId> <yaw|N|NE|SSW…> [pitch] [fov]'
 
 const die = (msg) => {
   console.error(msg)
@@ -110,8 +114,8 @@ async function fetchSector(panoId, z5, grid, s) {
 /* ------------------------------------------------------------------- main */
 
 const [id, yawArg, pitchArg, fovArg] = process.argv.slice(2)
-const [yaw, pitch, fov] = [Number(yawArg), Number(pitchArg ?? -5), Number(fovArg ?? 60)]
-if (!id || yawArg === undefined || ![yaw, pitch, fov].every(Number.isFinite) || fov <= 0) die(USAGE)
+const [pitch, fov] = [Number(pitchArg ?? -5), Number(fovArg ?? 60)]
+if (!id || yawArg === undefined || ![pitch, fov].every(Number.isFinite) || fov <= 0) die(USAGE)
 
 const dir = join(ROOT, 'rounds', id)
 if (!existsSync(join(dir, 'dossier.json')) || !existsSync(join(dir, 'pano_full.jpg')))
@@ -124,6 +128,22 @@ const files = await readdir(dir)
 const c4 = files.reduce((n, f) => Math.max(n, Number(f.match(/^pano_\d+_(\d+)\.jpg$/)?.[1] ?? -1) + 1), 0)
 const grid = { cols: c4 * 2, rows: c4 }
 const { panoId } = JSON.parse(await readFile(join(dir, 'dossier.json'), 'utf8'))
+
+// The pano's compass heading, if the brief already wrote it down. A numeric aim
+// only wants it to name the direction afterwards, so it is never worth a fetch;
+// a compass aim cannot be turned into yaw without it, so that one pays for it.
+const metaFile = join(dir, 'meta.json')
+const wind = compassDeg(yawArg)
+let north = existsSync(metaFile)
+  ? await readFile(metaFile, 'utf8').then((s) => JSON.parse(s).heading ?? null).catch(() => null)
+  : null
+if (wind != null && north == null) {
+  north = await panoHeading(panoId)
+  if (north == null) die(`no compass heading for this pano — aim in degrees, not "${yawArg}"`)
+  await writeFile(metaFile, JSON.stringify({ heading: north }))
+}
+const yaw = wind == null ? Number(yawArg) : mod(wind - north, 360)
+if (!Number.isFinite(yaw)) die(USAGE)
 
 let sector = null
 const sphere = c4 ? ` (${c4 * TILE}x${(c4 * TILE) / 2})` : ''
@@ -165,3 +185,4 @@ await new Promise((done, fail) => {
 
 console.log(out)
 console.log(source)
+if (north != null) console.log(`aim: yaw ${Math.round(yaw)} = ${compass16(north + yaw)} compass`)

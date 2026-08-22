@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { compass16, panoHeading } from './meta.mjs'
 import { saveTiles } from './pano.mjs'
 import { flat, guide } from './plonkit.mjs'
 
@@ -175,18 +176,39 @@ async function makeViews(dir) {
   )
 }
 
+/** The pano's compass heading, cached in the round dir so a second brief on the
+ *  same round costs no round trip. Null when Google won't say. */
+async function heading(dir, panoId) {
+  const file = join(dir, 'meta.json')
+  if (existsSync(file))
+    return readFile(file, 'utf8').then((s) => JSON.parse(s).heading ?? null).catch(() => null)
+  const deg = await panoHeading(panoId)
+  if (deg != null) await writeFile(file, JSON.stringify({ heading: deg }))
+  return deg
+}
+
 /** Where the pictures are and what each one is for. Shared with the quiz,
- *  which prints imagery and nothing else. */
-async function imagery(dir, id) {
+ *  which prints imagery and nothing else — the compass included, since a player
+ *  in game has it too and it names no place. */
+async function imagery(dir, id, panoId) {
   const out = []
-  const views = VIEWS.map((v) => join(dir, `view_${v}.jpg`)).filter((p) => existsSync(p))
+  const deg = await heading(dir, panoId)
+  const views = VIEWS.map((v, i) => [
+    join(dir, `view_${v}.jpg`),
+    deg == null ? '' : `  (faces ${compass16(deg + i * 90)})`,
+  ]).filter(([p]) => existsSync(p))
   if (views.length) {
-    out.push(...views)
+    out.push(...views.map(([p, faces]) => p + faces))
     out.push(
       '  the round in photograph geometry — 100° each, front = the way the camera car\n' +
         '  faced. Start here: these are what a player actually sees.',
     )
   }
+  if (deg != null)
+    out.push(
+      `compass: front = ${compass16(deg)} (${Math.round(deg)}°) — ` +
+        `north is ${Math.round((360 - deg) % 360)}° of yaw`,
+    )
   out.push(join(dir, 'pano.jpg'))
   out.push('  360° equirectangular overview — the whole round in one image.')
   const grid = (await readdir(dir)).map((f) => f.match(/^pano_(\d+)_(\d+)\.jpg$/)).filter(Boolean)
@@ -312,7 +334,7 @@ if (args[0] === '--quiz') {
    * The answer sits in dossier.json for the coach, not for the player. */
   L.push(`QUIZ ROUND ${q.id}   ${q.ts.slice(0, 10)}   ${q.mode ?? '?'}`)
   L.push('')
-  if (existsSync(join(qdir, 'pano.jpg'))) L.push(...(await imagery(qdir, q.id)))
+  if (existsSync(join(qdir, 'pano.jpg'))) L.push(...(await imagery(qdir, q.id, q.panoId)))
   else L.push('no imagery survives for this round — run --quiz again for another')
   L.push(
     '',
@@ -465,7 +487,7 @@ for (const [g, side] of [
 rule('IMAGERY')
 if (!existsSync(pano))
   L.push(`no tiles for panoId ${r.panoId ?? '(none recorded)'} — imagery unavailable`)
-else L.push(...(await imagery(dir, r.id)))
+else L.push(...(await imagery(dir, r.id, r.panoId)))
 
 L.push('', 'Wider question ("what else could this have been?"): node coach/clues.mjs')
 console.log(L.join('\n'))
