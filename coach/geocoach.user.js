@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.4.0
+// @version      2.5.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -42,7 +42,14 @@
       document.documentElement.setAttribute('data-geocoach-log', tlogLines.slice(-20).join('\n'))
     } catch {}
   }
-  tlog('body 2.4.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
+  // One line per key: the 10s duel poll would otherwise flood the 20-line window.
+  const tlogged = new Set()
+  function tlogOnce(key, line) {
+    if (tlogged.has(key)) return
+    tlogged.add(key)
+    tlog(line)
+  }
+  tlog('body 2.5.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
    * server still gets every round so pano dossiers keep building at home.
@@ -566,23 +573,38 @@
     // fetch to fail at startup. The API call stays as a markup-change fallback.
     try {
       const id = W.__NEXT_DATA__?.props?.accountProps?.account?.user?.userId
-      if (id) { myId = id; return }
+      if (id) { myId = id; tlogOnce('myid', 'myId via next-data'); return }
     } catch {}
     fetch('https://www.geoguessr.com/api/v3/profiles/me', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((m) => { if (m && m.id) myId = m.id })
-      .catch(() => {})
+      .then((r) => {
+        if (!r.ok) { tlogOnce('myid-fail', 'profiles/me → ' + r.status); return null }
+        return r.json()
+      })
+      // GeoGuessr has shipped both the flat and the nested shape — take either.
+      .then((m) => {
+        const id = m && (m.id ?? m.user?.id ?? m.userId)
+        if (id) { myId = id; tlogOnce('myid', 'myId via profiles/me') }
+      })
+      .catch(() => tlogOnce('myid-err', 'profiles/me unreachable'))
   }
 
   function handleDuelState(d) {
-    if (!d || !d.gameId || !Array.isArray(d.rounds) || !Array.isArray(d.teams)) return
-    if (!myId) {
-      console.warn('[geocoach] duel state seen but profile id unresolved — rounds not captured yet')
+    if (!d) return // a failed fetch, already logged where it happened
+    if (!d.gameId || !Array.isArray(d.rounds) || !Array.isArray(d.teams)) {
+      tlogOnce('duel-shape:' + (d.gameId || '?'), 'duel state shape unexpected — keys: ' + Object.keys(d).slice(0, 12).join(','))
       return
     }
+    if (!myId) {
+      console.warn('[geocoach] duel state seen but profile id unresolved — rounds not captured yet')
+      tlogOnce('duel-nomyid:' + d.gameId, 'duel seen but myId unresolved — will retry')
+      return
+    }
+    const ids = []
     for (const team of d.teams) {
       for (const pl of team.players || []) {
+        ids.push(pl.playerId)
         if (pl.playerId !== myId) continue
+        tlogOnce('duel-hit:' + d.gameId, 'duel ' + d.gameId + ': me found, ' + (pl.guesses || []).length + ' guess(es)')
         for (const guess of pl.guesses || []) {
           const round = d.rounds.find((r) => r.roundNumber === guess.roundNumber)
           if (!round || !round.panorama) continue
@@ -605,6 +627,7 @@
         }
       }
     }
+    if (!ids.includes(myId)) tlogOnce('duel-nomatch:' + d.gameId, 'no player == myId (' + myId + ') among: ' + ids.join(','))
   }
 
   // Duel state lives on game-server and mostly moves over websockets, so the
@@ -613,11 +636,15 @@
   function pollDuel() {
     const m = location.pathname.match(/^\/(?:duels|team-duels)\/([\w-]+)/)
     if (!m) return
+    tlogOnce('duel-page:' + m[1], 'duel page ' + m[1])
     if (!myId) resolveMyId() // self-heal: without it every duel round is silently skipped
     fetch(`https://game-server.geoguessr.com/api/duels/${m[1]}`, { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        if (!r.ok) { tlogOnce('duel-fetch:' + m[1] + ':' + r.status, 'duel fetch → ' + r.status); return null }
+        return r.json()
+      })
       .then(handleDuelState)
-      .catch(() => {})
+      .catch(() => tlogOnce('duel-fetch-err:' + m[1], 'duel fetch failed (network/CORS)'))
   }
 
   // ------------------------------------------------------------- capture
@@ -829,45 +856,8 @@
     if (Date.now() - last > 60 * 60 * 1000) rebuildSilently('arrival')
   }
 
-  /** The website signs in with ?token= in the URL, so any machine running
-   * this script can open the dashboard already signed in. Styled as a native
-   * GeoGuessr button — exact gradient, shadows, and italic ggFont lifted from
-   * the variantPurple "Edit avatar" button on the signed-in home (green
-   * variantPrimary clashed there) — and hidden mid-round so it never sits
-   * over gameplay. */
-  function mountDashboardLink() {
-    if (!CLOUD) return null
-    const a = document.createElement('a')
-    a.id = 'geocoach-dash'
-    a.textContent = 'GeoCoach'
-    a.href = CLOUD.url + '/app?token=' + encodeURIComponent(CLOUD.token)
-    a.target = '_blank'
-    a.rel = 'noreferrer'
-    a.style.cssText =
-      'position:fixed;bottom:18px;left:18px;z-index:999997;' +
-      'display:inline-flex;align-items:center;height:38px;padding:0 24px 2px;' +
-      'border-radius:60px;font:italic 700 14px ggFont,sans-serif;' +
-      'text-transform:uppercase;color:#fff;text-decoration:none;' +
-      'text-shadow:oklch(0.2115 0.066 285.82) 0 1px 2px;' +
-      'background:linear-gradient(oklch(0.7005 0.1745 293.89),oklch(0.3879 0.1768 290.8));' +
-      'box-shadow:rgba(0,0,0,.25) 0 4.4px 18px,' +
-      'oklch(1 0 0/.2) 0 1px 0 inset,rgba(0,0,0,.3) 0 -2px 0 inset;' +
-      'transition:filter .15s,transform .15s'
-    a.addEventListener('mouseenter', () => {
-      a.style.filter = 'brightness(1.1)'
-      a.style.transform = 'translateY(-1px)'
-    })
-    a.addEventListener('mouseleave', () => {
-      a.style.filter = ''
-      a.style.transform = ''
-    })
-    document.body.appendChild(a)
-    return a
-  }
-
   function init() {
     resolveMyId()
-    const dash = mountDashboardLink()
     setInterval(pollDuel, 10000)
     // The last round's card outlives both removal triggers: "Show results"
     // keeps the /game/<token> path and serves no new round, so the card sat
@@ -889,9 +879,6 @@
     )
     const watchPage = () => {
       const inGame = /^\/(game|challenge|live-challenge|duels|team-duels)\//.test(location.pathname)
-      // '' would delete the display property and drop the pill back to inline
-      // layout, which un-centers the ggFont text — restore the real value.
-      if (dash) dash.style.display = inGame ? 'none' : 'inline-flex'
       if (inGame) {
         arrivalChecked = false
       } else {
