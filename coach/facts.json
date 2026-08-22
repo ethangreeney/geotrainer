@@ -1,0 +1,954 @@
+{
+  "AD": {
+    "name": "Andorra",
+    "drives": "right",
+    "lines": "white centre + white outer, Spanish-style markings",
+    "script": "Latin (Catalan); i for \"and\", many words end in consonants",
+    "tell": "orange dot on left of plate, yellow guardrail reflectors, CG/CS kilometre markers"
+  },
+  "AE": {
+    "name": "United Arab Emirates",
+    "drives": "right",
+    "lines": "yellow outer, centre white or yellow",
+    "script": "Arabic, English co-signed almost everywhere",
+    "tell": "Gen3 white car with black roof racks, black-white striped signposts and curbs"
+  },
+  "AL": {
+    "name": "Albania",
+    "drives": "right",
+    "lines": "all white, often faded; rare double outer lines with a wide gap",
+    "script": "Latin (Albanian), Ë ë very common, occasional Ç ç",
+    "tell": "red strip on left of plate, unique in Europe; black-top bollards; roof water cylinders"
+  },
+  "AQ": {
+    "name": "Antarctica",
+    "drives": "n/a",
+    "lines": "no roads, snow and ice",
+    "script": "none on coverage",
+    "tell": "trekkers on ice, penguins, no vehicles or roads"
+  },
+  "AR": {
+    "name": "Argentina",
+    "drives": "right",
+    "lines": "dashed white or double yellow centre + white outer, mixes of the two common",
+    "script": "Latin, Spanish",
+    "tell": "black plate with black dot, white chevrons with red arrows, RN/RP km markers"
+  },
+  "AS": {
+    "name": "American Samoa",
+    "drives": "right",
+    "lines": "yellow centre + white outer, US convention; small concrete roads often unmarked",
+    "script": "Latin, English and Samoan",
+    "tell": "counted as US, green tropical mountains, one-storey box houses, plain metal sheet roofs"
+  },
+  "AT": {
+    "name": "Austria",
+    "drives": "right",
+    "lines": "all white, centre and outer",
+    "script": "Latin (German); Ä Ö Ü ß",
+    "tell": "white bollard, black nipple top, dark red reflector; blue km markers with comma decimal; EINBAHN"
+  },
+  "AU": {
+    "name": "Australia",
+    "drives": "left",
+    "lines": "almost all white centre + white outer, yellow only in alpine areas",
+    "script": "Latin (English)",
+    "tell": "white bollard, red front reflector stopping mid-side, black-text GIVE WAY, gum trees"
+  },
+  "BD": {
+    "name": "Bangladesh",
+    "drives": "left",
+    "lines": "white centre + white outer where marked, many roads unmarked",
+    "script": "Bengali, headline across top of words, many triangular letters",
+    "tell": "turquoise plates unique, red-and-white concrete bollards, smoky Gen 4, shitcam"
+  },
+  "BE": {
+    "name": "Belgium",
+    "drives": "right",
+    "lines": "all white, continuous or broken; short dashed outer lines on bike paths",
+    "script": "Latin (Dutch in north, French in south, German in east)",
+    "tell": "red licence plate text, yellow guardrail reflectors, orange signposts, holed concrete poles"
+  },
+  "BG": {
+    "name": "Bulgaria",
+    "drives": "right",
+    "lines": "all white, noticeably thin, thinner than Romania's",
+    "script": "Cyrillic (Bulgarian) plus Latin on signs; Ъ present; улица/ул for street",
+    "tell": "poletop with 3 big alternating hook insulators, dead March Gen 3, mortar-patched roof tiles"
+  },
+  "BM": {
+    "name": "Bermuda",
+    "drives": "left",
+    "lines": "single solid yellow centre, no outer lines; white zig-zags occasionally",
+    "script": "Latin, English",
+    "tell": "black car with front visible, long all-white plates, pastel stone houses with white roofs"
+  },
+  "BO": {
+    "name": "Bolivia",
+    "drives": "right",
+    "lines": "centre yellow, white, or a mix of both; outer always white",
+    "script": "Latin, Spanish; Aymara/Quechua names, Wiphala flag",
+    "tell": "white Gen 3 car no antenna, very curvy wooden poles, red brick buildings, MAS graffiti"
+  },
+  "BR": {
+    "name": "Brazil",
+    "drives": "right",
+    "lines": "double yellow centre + white outer; single dashed yellow occasionally",
+    "script": "Latin, Portuguese: -ão, -nh, -lh",
+    "tell": "ladder poles, black-painted sign backs, yellow-on-black chevrons, red soil, .br"
+  },
+  "BT": {
+    "name": "Bhutan",
+    "drives": "left",
+    "lines": "white where present, mountain roads often unmarked, double white outers near Thimphu",
+    "script": "Dzongkha in Tibetan script, unique on Street View, English alongside",
+    "tell": "all-red licence plates, grey Google car with no antenna, yellow-topped white road markers"
+  },
+  "BW": {
+    "name": "Botswana",
+    "drives": "left",
+    "lines": "white centre + yellow outer, triple white centre on main roads",
+    "script": "Latin, English signage, Tswana place names, Afrikaans virtually absent",
+    "tell": "black-yellow striped signposts, yellow rear plates, A-roads, random small blurs"
+  },
+  "BY": {
+    "name": "Belarus",
+    "drives": "right",
+    "lines": "no road markings, the only coverage is a Minsk walking trekker on pedestrian streets",
+    "script": "Cyrillic (Belarusian/Russian); ў and і absent from Russian; вул for street",
+    "tell": "single Minsk trekker, sea-green street signs, Holy Spirit Cathedral twin towers"
+  },
+  "CA": {
+    "name": "Canada",
+    "drives": "right",
+    "lines": "yellow centre, usually single + white outer",
+    "script": "Latin, English with British spelling; French in Quebec",
+    "tell": "MAXIMUM speed signs, diamond T-intersection signs, km/h, Gen 2 and Gen 3 common"
+  },
+  "CC": {
+    "name": "Cocos Islands",
+    "drives": "left",
+    "lines": "Australian-style white markings, very few marked roads",
+    "script": "Latin (English)",
+    "tell": "two flat coral atolls, bright white sand, palms, mowed grass, counts as Australia"
+  },
+  "CH": {
+    "name": "Switzerland",
+    "drives": "right",
+    "lines": "white centre + white outer; long dashed yellow lines, yellow pedestrian crossings",
+    "script": "Latin (German, French, Italian, Romansh)",
+    "tell": "low-cam huge car blur, plain white plates with no EU strip, tall blue 7-stripe pedestrian sign"
+  },
+  "CL": {
+    "name": "Chile",
+    "drives": "right",
+    "lines": "all white, or all yellow in parks and snow areas; the two are never mixed",
+    "script": "Latin, Spanish",
+    "tell": "white Gen 3 car with black section, yellow chevrons with black arrows, orange taxi plates"
+  },
+  "CN": {
+    "name": "China",
+    "drives": "right",
+    "lines": "yellow centre divides opposing traffic, white lane dividers and white outers",
+    "script": "Simplified Chinese",
+    "tell": "tripod coverage, motion blur, no car at all, blue plates with white text"
+  },
+  "CO": {
+    "name": "Colombia",
+    "drives": "right",
+    "lines": "yellow centre, often dashed + white outer",
+    "script": "Latin, Spanish",
+    "tell": "yellow plates, white cross-braced signposts, green Pr km markers, pastel yellow taxis"
+  },
+  "CR": {
+    "name": "Costa Rica",
+    "drives": "right",
+    "lines": "yellow centre + white outer",
+    "script": "Latin, Spanish",
+    "tell": "unblurred white pickup with front antenna, ALTO signs, red taxis, orange 3-dot bollards"
+  },
+  "CW": {
+    "name": "Curaçao",
+    "drives": "right",
+    "lines": "white centre + white outer, Dutch convention",
+    "script": "Latin, Dutch and Papiamento",
+    "tell": "black car with roof rack, square white plates, cacti, blue street signs on yellow posts"
+  },
+  "CX": {
+    "name": "Christmas Island",
+    "drives": "left",
+    "lines": "white centre + white outer, Australian conventions throughout",
+    "script": "Latin (English), some Chinese and Malay",
+    "tell": "silver pickup Google car with truck bed visible, yellow plates, dense tropical forest"
+  },
+  "CY": {
+    "name": "Cyprus",
+    "drives": "left",
+    "lines": "UK-style white centre and outer; double yellow kerb lines for no-parking",
+    "script": "Greek alphabet plus English; Greek all-caps on direction signs",
+    "tell": "drives left, yellow UK-style rear plates, triangular slant-top bollards, smallcam with antenna"
+  },
+  "CZ": {
+    "name": "Czechia",
+    "drives": "right",
+    "lines": "all white; solid outer lines with no centre line very common",
+    "script": "Latin (Czech); Ř Ě Ů unique vs Slovak; street is ulice not ulica",
+    "tell": "orange double front reflector bollards, extra-wide B guardrail, red street signs on walls"
+  },
+  "DE": {
+    "name": "Germany",
+    "drives": "right",
+    "lines": "all white, centre and outer",
+    "script": "Latin (German); Ä Ö Ü ß",
+    "tell": "Gen 4 only, black-white bollards every 50 m, yellow town signs, Einbahnstraße one-way signs"
+  },
+  "DK": {
+    "name": "Denmark",
+    "drives": "right",
+    "lines": "all white; double centre lines common, outer lines made of small white squares",
+    "script": "Latin (Danish); Æ Ø Å",
+    "tell": "white bollard with orange stripe, pipe-framed red/blue direction signs, streets end -vej"
+  },
+  "DO": {
+    "name": "Dominican Republic",
+    "drives": "right",
+    "lines": "yellow centre + white outer, on notably dark smooth asphalt",
+    "script": "Latin, Spanish",
+    "tell": "car with two black-striped metal bars, PARE on yellow posts, yellow-and-white plates"
+  },
+  "EC": {
+    "name": "Ecuador",
+    "drives": "right",
+    "lines": "yellow centre + white outer",
+    "script": "Latin, Spanish",
+    "tell": "shitcam, white pickup with no antenna, ladder poles, teal sign backs, red-striped bollards"
+  },
+  "EE": {
+    "name": "Estonia",
+    "drives": "right",
+    "lines": "all white; outer lines often short dashes",
+    "script": "Latin (Estonian); Ä Ö Ü and Õ; tänav/tee for street",
+    "tell": "round baton bollards, red chevrons with white arrows, Gen 3 green blur, km marker perpendicular"
+  },
+  "EG": {
+    "name": "Egypt",
+    "drives": "right",
+    "lines": "trekkers only, no road lines",
+    "script": "Arabic, occasional signs in trekker coverage",
+    "tell": "seven Gen3 trekkers, Cairo and Alexandria monuments, sandstone, no car shadow"
+  },
+  "ES": {
+    "name": "Spain",
+    "drives": "right",
+    "lines": "all white; rural outer lines sometimes dashed, unlike Portugal and Italy",
+    "script": "Latin (Spanish); ñ, plus Catalan, Basque, Galician regionally",
+    "tell": "orange bollard reflector, two white dots behind; yellow guardrail reflectors; 8-stripe ped sign"
+  },
+  "FI": {
+    "name": "Finland",
+    "drives": "right",
+    "lines": "outer lines always solid white; centre white dashes or yellow, yellow being phased out",
+    "script": "Latin (Finnish, some Swedish); ä ö, long double-vowel words",
+    "tell": "yellow road signs with thin yellow edge stroke, orange snow poles banded at top, K-Market"
+  },
+  "FK": {
+    "name": "Falkland Islands",
+    "drives": "left",
+    "lines": "no marked roads, all coverage is off-road Gen 3 trekker",
+    "script": "Latin, English",
+    "tell": "counted as UK, trekkers only on Carcass, West Point and New Island"
+  },
+  "FO": {
+    "name": "Faroe Islands",
+    "drives": "right",
+    "lines": "all white; many narrow rural roads unmarked",
+    "script": "Latin (Faroese); Ø and Ð, no Þ unlike Icelandic",
+    "tell": "yellow wooden stick bollards, black pickup or roof-rack car, treeless green fjord walls"
+  },
+  "FR": {
+    "name": "France",
+    "drives": "right",
+    "lines": "all white; long spaced outer dashes, unique offset double-block centre dashes",
+    "script": "Latin (French); é à ç, -ux endings",
+    "tell": "pointed white bollard with reflector band, blue plates on utility poles, yellow D-road numbers"
+  },
+  "GB": {
+    "name": "United Kingdom",
+    "drives": "left",
+    "lines": "all white; long centre dashes with cat's eyes between, double yellow kerb lines",
+    "script": "Latin (English); bilingual Welsh in Wales, Gaelic in Scotland",
+    "tell": "white front plate yellow rear, GIVE WAY signs, wooden poles with rod steps and zapped-man sticker"
+  },
+  "GH": {
+    "name": "Ghana",
+    "drives": "right",
+    "lines": "all white, many paved roads unmarked",
+    "script": "Latin, English",
+    "tell": "roof rack with black tape on front-right bar, flag-coloured paint, orange-yellow taxi fenders"
+  },
+  "GI": {
+    "name": "Gibraltar",
+    "drives": "right",
+    "lines": "all white, UK-style; double yellow kerb lines",
+    "script": "Latin (English)",
+    "tell": "Rock of Gibraltar limestone, Gen 3 long antenna with silver tip, UK plates but drives on right"
+  },
+  "GL": {
+    "name": "Greenland",
+    "drives": "right",
+    "lines": "all white where marked; most roads unmarked",
+    "script": "Latin (Greenlandic and Danish)",
+    "tell": "Gen 3 trekker only, odd vehicles and boats, small colourful wooden houses, treeless fjords"
+  },
+  "GR": {
+    "name": "Greece",
+    "drives": "right",
+    "lines": "faded solid white double centre lines; yellow lines commoner than rest of southern Europe",
+    "script": "Greek alphabet; direction signs yellow Greek over white English",
+    "tell": "harp poletops on tall dark wooden poles, yellow warning signs, roadside miniature churches"
+  },
+  "GS": {
+    "name": "South Georgia & Sandwich Islands",
+    "drives": "left",
+    "lines": "no roads, coverage is Gen 3 trekkers only",
+    "script": "Latin, English",
+    "tell": "counted as UK, trekker in abandoned Grytviken plus three fjord trekkers"
+  },
+  "GT": {
+    "name": "Guatemala",
+    "drives": "right",
+    "lines": "single yellow centre + white outer, lines noticeably thinner than Mexico",
+    "script": "Latin, Spanish",
+    "tell": "grey car with roof rack and visible mirrors, ALTO signs, pink or green painted poles"
+  },
+  "GU": {
+    "name": "Guam",
+    "drives": "right",
+    "lines": "yellow centre + white outer, US convention; very many road reflectors",
+    "script": "Latin, English and Chamorro; Japanese, Korean, Chinese signage",
+    "tell": "blurred car, front-right antenna plus roof rack sliver, thick concrete poles, green street signs"
+  },
+  "HK": {
+    "name": "Hong Kong",
+    "drives": "left",
+    "lines": "white centre + white or yellow outer, yellow outers mark no-stopping on small roads",
+    "script": "Traditional Chinese with English, bilingual signs",
+    "tell": "white front / yellow rear plates, double-decker buses, very tall apartment blocks"
+  },
+  "HR": {
+    "name": "Croatia",
+    "drives": "right",
+    "lines": "all white centre and outer",
+    "script": "Latin only (Croatian); Č Ć Đ Š Ž; IJE where Serbian has E",
+    "tell": "B-type square guardrails, white wedge bollard with black rectangle, HR stickers, autumn Gen 3"
+  },
+  "HU": {
+    "name": "Hungary",
+    "drives": "right",
+    "lines": "all white, but bicycle-lane markings are yellow",
+    "script": "Latin (Hungarian); Ő and Ű unique; utca/út for street",
+    "tell": "concrete holey poles, very tall sign posts bolted with 4 bolts, green km markers"
+  },
+  "ID": {
+    "name": "Indonesia",
+    "drives": "left",
+    "lines": "white or yellow centre, outer lines always white",
+    "script": "Latin (Indonesian), Dutch-influenced spelling: televisi vs Malay televisyen",
+    "tell": "black plates in three white sections, yellow angled waystones, red-and-white banner rows"
+  },
+  "IE": {
+    "name": "Ireland",
+    "drives": "left",
+    "lines": "white centre; yellow dashed outer lines, double yellow kerb lines",
+    "script": "Latin (English plus Irish in italics on signs)",
+    "tell": "yellow diamond warning signs, YIELD not GIVE WAY, white front and rear plates"
+  },
+  "IL": {
+    "name": "Israel & the West Bank",
+    "drives": "right",
+    "lines": "white centre + yellow outer",
+    "script": "Hebrew + Arabic, English third line on signs",
+    "tell": "yellow plates with blue strip, hand-symbol stop signs, black-white striped pole bottoms"
+  },
+  "IM": {
+    "name": "Isle of Man",
+    "drives": "left",
+    "lines": "all white, UK-style",
+    "script": "Latin (English); Manx on some signs",
+    "tell": "Gen 2 only, white front and yellow rear plate with red strip, blue urban bollards, gorse"
+  },
+  "IN": {
+    "name": "India",
+    "drives": "left",
+    "lines": "mostly white centre + white outer, yellow centre on some highways, yellow outers rare",
+    "script": "Devanagari plus many regional scripts, English on most signage",
+    "tell": "shitcam brown tint and circular blur, black-white striped signposts, trident-top concrete poles"
+  },
+  "IO": {
+    "name": "British Indian Ocean Territory",
+    "drives": "left",
+    "lines": "no road markings, coverage is Gen 3 trekker only",
+    "script": "Latin (English)",
+    "tell": "trekker on atoll beaches, coconut palms, mangroves, walks offshore, counts as UK"
+  },
+  "IQ": {
+    "name": "Iraq",
+    "drives": "right",
+    "lines": "single indoor trekker, no roads",
+    "script": "Arabic, English museum labels",
+    "tell": "Gen1.5 overexposed trekker in Baghdad museum, pointed blur, date-palm patio"
+  },
+  "IS": {
+    "name": "Iceland",
+    "drives": "right",
+    "lines": "all white, never yellow; outer lines solid or rarely dashed",
+    "script": "Latin (Icelandic); ð þ æ",
+    "tell": "yellow bollard with white reflector, yellow direction signs, treeless black volcanic soil"
+  },
+  "IT": {
+    "name": "Italy",
+    "drives": "right",
+    "lines": "all white; solid outer lines with no centre line very common",
+    "script": "Latin (Italian); double consonants, via on street signs",
+    "tell": "short front plate with blue strips both sides, triangular white bollard black top, black sign backs"
+  },
+  "JE": {
+    "name": "Jersey",
+    "drives": "left",
+    "lines": "all white; yellow give-way lines at junctions instead of dotted white",
+    "script": "Latin (English; French and Jèrriais place names)",
+    "tell": "Gen 2 only, white/yellow plates with red crest and J prefix, yellow phone boxes, red granite walls"
+  },
+  "JO": {
+    "name": "Jordan",
+    "drives": "right",
+    "lines": "white centre + yellow outer",
+    "script": "Arabic, little English on commercial signs",
+    "tell": "black car with no antenna or brake light, white plates with green taxi strip, white-red chevrons"
+  },
+  "JP": {
+    "name": "Japan",
+    "drives": "left",
+    "lines": "white centre + white outer, yellow centre means no overtaking, never yellow outers",
+    "script": "Kanji with hiragana and katakana",
+    "tell": "low-cam black or white car, screw-ridge concrete poles, hexagonal prefecture shields"
+  },
+  "KE": {
+    "name": "Kenya",
+    "drives": "left",
+    "lines": "yellow centre + solid white outer (reversed vs southern Africa)",
+    "script": "Latin, English and Swahili",
+    "tell": "Gen4 snorkel truck, grey Toyota follow SUV, Safaricom shops, yellow rear plates"
+  },
+  "KG": {
+    "name": "Kyrgyzstan",
+    "drives": "right",
+    "lines": "all white, often faded or absent; wide-gap double centre on some main roads",
+    "script": "Cyrillic (Kyrgyz); Ө Ү Ң absent from Russian",
+    "tell": "silver car with four bars, all Gen 3 winter, red-and-white triangle km markers"
+  },
+  "KH": {
+    "name": "Cambodia",
+    "drives": "right",
+    "lines": "yellow centre solid or dashed, white outers rare",
+    "script": "Khmer, intricate curvy letters",
+    "tell": "black chevrons with yellow arrows, reversed vs all SEA, striped white car, ladder poles"
+  },
+  "KR": {
+    "name": "South Korea",
+    "drives": "right",
+    "lines": "yellow centre + white outer, red block markings on road",
+    "script": "Hangul, circles in many letters",
+    "tell": "black-yellow pole stripes stopping short of ground, house-shaped blue address plates"
+  },
+  "KZ": {
+    "name": "Kazakhstan",
+    "drives": "right",
+    "lines": "white; yellow outer lines on many steppe highways; yellow-and-white zebra crossings",
+    "script": "Cyrillic (Kazakh) plus Latin; Ә Ғ Қ Ң Ө Ұ Ү Һ І absent from Russian",
+    "tell": "white pickup camera car, yellow-black chevrons, urban gas pipes, ornate town entry arcs"
+  },
+  "LA": {
+    "name": "Laos",
+    "drives": "right",
+    "lines": "white centre + white outer typical, yellow centres uncommon",
+    "script": "Lao, curvy with fewer straight lines than Thai",
+    "tell": "yellow private plates, silver car with two-bar roof rack, only five cities covered"
+  },
+  "LB": {
+    "name": "Lebanon",
+    "drives": "right",
+    "lines": "white, often faded or absent",
+    "script": "Arabic with French and English common",
+    "tell": "only Middle East shitcam, otherwise Gen3 trekker, deep red taxi plates, yellow mesh poles"
+  },
+  "LI": {
+    "name": "Liechtenstein",
+    "drives": "right",
+    "lines": "white centre + white outer; long dashed yellow lines and yellow crossings as in Switzerland",
+    "script": "Latin (German)",
+    "tell": "black plate, white text, red-yellow crest; low-cam blur; LIEMOBIL green bus stop signs"
+  },
+  "LK": {
+    "name": "Sri Lanka",
+    "drives": "left",
+    "lines": "white centre + white outer, rural roads often outer lines only with no centre",
+    "script": "Sinhala rounded, Tamil straighter, English alongside",
+    "tell": "blue-white-red car front through blur, holey concrete poles, long white / short yellow plates"
+  },
+  "LS": {
+    "name": "Lesotho",
+    "drives": "left",
+    "lines": "white centre + yellow outer, triple white centre lines",
+    "script": "Latin, English and Sesotho",
+    "tell": "white car no antenna, bare tabletop mountains, Basotho blankets, roaming livestock"
+  },
+  "LT": {
+    "name": "Lithuania",
+    "drives": "right",
+    "lines": "all white; outer lines sometimes short dashes",
+    "script": "Latin (Lithuanian); hooks Ą Ę Į Ų, Ė with one dot; gatvė/g for street",
+    "tell": "square concrete poles with diagonal brace, orange-front wedge bollards, km marker at 45°"
+  },
+  "LU": {
+    "name": "Luxembourg",
+    "drives": "right",
+    "lines": "all white, centre and outer",
+    "script": "Latin (French on signs, Luxembourgish, German)",
+    "tell": "long yellow plates, framed yellow direction signs, white signposts, 3-bolt German-style bollard"
+  },
+  "LV": {
+    "name": "Latvia",
+    "drives": "right",
+    "lines": "all white centre and outer",
+    "script": "Latin (Latvian); macrons Ā Ē Ī, hooks Ģ Ķ Ļ Ņ; iela for street",
+    "tell": "alternating left-right hook poletops, thin curved bollards, km marker parallel to road"
+  },
+  "MC": {
+    "name": "Monaco",
+    "drives": "right",
+    "lines": "all white, French-style markings",
+    "script": "Latin (French)",
+    "tell": "short plates with no blue strip, Gen 2 only, dense luxury apartments, tunnels, parked mopeds"
+  },
+  "ME": {
+    "name": "Montenegro",
+    "drives": "right",
+    "lines": "all white centre and outer",
+    "script": "Latin and Cyrillic (Montenegrin); Č Ć Đ Š Ž, rare Ś Ź",
+    "tell": "red circle coat of arms on plate, both A- and B-type guardrails often rusted, smallcam"
+  },
+  "MG": {
+    "name": "Madagascar",
+    "drives": "right",
+    "lines": "usually unmarked, white when present",
+    "script": "Latin, Malagasy long words plus French",
+    "tell": "Gen3 trekker with people walking alongside, boat trekkers, tropical to arid swing"
+  },
+  "MK": {
+    "name": "North Macedonia",
+    "drives": "right",
+    "lines": "all white centre and outer",
+    "script": "Cyrillic (Macedonian), Latin on road signs; Ѓ and Ќ unique; Љ Њ Џ",
+    "tell": "never an antenna on the Gen 3 car, yellow-filled warning signs, red block on white plate"
+  },
+  "ML": {
+    "name": "Mali",
+    "drives": "right",
+    "lines": "tripod trekkers only, no road markings",
+    "script": "Latin, French; Arabic at mosques",
+    "tell": "tripod trekkers at mud-brick mosques, motion blur, saturated colour, arid sand"
+  },
+  "MN": {
+    "name": "Mongolia",
+    "drives": "right",
+    "lines": "white where present; many rural roads unmarked",
+    "script": "Cyrillic (Mongolian); Ө Ү, double vowels аа ЭЭ; ЗОГС stop sign",
+    "tell": "pickup with snorkel, roof rack, tent and red mirrors; white bowling-pin bollards, 2 red bands"
+  },
+  "MO": {
+    "name": "Macau",
+    "drives": "left",
+    "lines": "white centre + white outer, yellow kerbside lines for no-stopping",
+    "script": "Traditional Chinese with Portuguese",
+    "tell": "washed-out Generation 2 only, black plates with white text, blue-bordered bilingual street signs"
+  },
+  "MP": {
+    "name": "Northern Mariana Islands",
+    "drives": "right",
+    "lines": "yellow centre + white outer, US convention; very many road reflectors",
+    "script": "Latin, English and Chamorro; East Asian signage",
+    "tell": "blurred car, antenna close to camera, wooden poles, blue street signs, flame trees"
+  },
+  "MQ": {
+    "name": "Martinique",
+    "drives": "right",
+    "lines": "white centre + white outer, French convention",
+    "script": "Latin, French",
+    "tell": "counted as France, only three Gen 3 trekkers, memorise them rather than metas"
+  },
+  "MT": {
+    "name": "Malta",
+    "drives": "left",
+    "lines": "all white; double yellow kerb lines as in UK and Ireland",
+    "script": "Latin (English and Maltese); Ċ Ġ Ħ Ż",
+    "tell": "limestone rubble walls everywhere, triq on street signs, short EU plates, covered balconies"
+  },
+  "MX": {
+    "name": "Mexico",
+    "drives": "right",
+    "lines": "single solid yellow centre + white outer; broken or double yellow also common",
+    "script": "Latin, Spanish; Nahuatl names with x, tl, -tlan, -ec",
+    "tell": "octagonal concrete poles, ALTO signs, small white bollards on black base, OXXO and Pemex"
+  },
+  "MY": {
+    "name": "Malaysia",
+    "drives": "left",
+    "lines": "white centre + white outer, double white centre common, only SEA country to use it",
+    "script": "Latin (Malay), Chinese characters common, some Tamil",
+    "tell": "BERHENTI stop signs, hexagonal yellow highway shields, white-and-blue kilometre markers"
+  },
+  "NA": {
+    "name": "Namibia",
+    "drives": "left",
+    "lines": "white centre + single yellow outer",
+    "script": "Latin, English signage, German and Afrikaans place names",
+    "tell": "white truck with short antenna leaning left, yellow front and rear plates, stone bollards"
+  },
+  "NG": {
+    "name": "Nigeria",
+    "drives": "right",
+    "lines": "often missing or faded, white when present",
+    "script": "Latin, English",
+    "tell": "pickup with cab and bed visible, police follow car, greenish short plates, shitcam"
+  },
+  "NL": {
+    "name": "Netherlands",
+    "drives": "right",
+    "lines": "all white; dashed outer lines common, rare green centre lines",
+    "script": "Latin (Dutch); ij, ieuw, oe clusters",
+    "tell": "yellow plates front and rear, no street-level utility poles, red-pink bike lanes, dead flat"
+  },
+  "NO": {
+    "name": "Norway",
+    "drives": "right",
+    "lines": "orange-tinted yellow centre on larger roads; white outer, long dashes on smaller roads",
+    "script": "Latin (Norwegian); Æ Ø Å",
+    "tell": "yellow direction signs, white-background road signs, orange snow poles with mid reflector"
+  },
+  "NP": {
+    "name": "Nepal",
+    "drives": "left",
+    "lines": "yellow outer lines solid or dashed, dashed white centre on bigger roads",
+    "script": "Devanagari, native Devanagari numerals common on signs",
+    "tell": "all coverage shitcam, trident poletop with triangle supports, white stupas with painted eyes"
+  },
+  "NZ": {
+    "name": "New Zealand",
+    "drives": "left",
+    "lines": "white outers, yellow dashed outers in towns, centre dashed white or double solid yellow",
+    "script": "Latin (English, Maori)",
+    "tell": "bollard red strip wrapping the back, red-crest state highway shields, red-text GIVE WAY"
+  },
+  "OM": {
+    "name": "Oman",
+    "drives": "right",
+    "lines": "white centre + yellow outer",
+    "script": "Arabic with English alongside",
+    "tell": "blurred white truck, yellow private and red commercial plates, be'ah bins, triangle pole tops"
+  },
+  "PA": {
+    "name": "Panama",
+    "drives": "right",
+    "lines": "yellow centre + white outer; solid white outer with no centre line near-unique",
+    "script": "Latin, Spanish",
+    "tell": "fully blurred white pickup, thick-font ALTO, turquoise-topped plates, yellow chequer taxis"
+  },
+  "PE": {
+    "name": "Peru",
+    "drives": "right",
+    "lines": "white outer always; dashed or double yellow centre, mountain roads have no centre",
+    "script": "Latin, Spanish; Quechua place names",
+    "tell": "black-white zebra signposts on concrete blocks, black-outer striped guardrails, S/ prices"
+  },
+  "PH": {
+    "name": "Philippines",
+    "drives": "right",
+    "lines": "yellow or white centre, combined yellow+white centre common, white outers",
+    "script": "Latin (Filipino), English very common on signs",
+    "tell": "concrete roads, tricycle tuk-tuks everywhere, tall square yellow waystones"
+  },
+  "PK": {
+    "name": "Pakistan",
+    "drives": "left",
+    "lines": "few marked roads in coverage, white markings where present",
+    "script": "Urdu in Nastaliq, curvier than Arabic, English common",
+    "tell": "Gen 3 trekker only, Mughal gardens and stone walls, Punjab plates with green left strip"
+  },
+  "PL": {
+    "name": "Poland",
+    "drives": "right",
+    "lines": "all white; double centre lines very common and a strong Poland clue",
+    "script": "Latin (Polish); Ł Ń Ż unique, Ą Ę Ś Ź Ć; W not V, heavy consonant clusters",
+    "tell": "thin holey poles, yellow warning triangles with thin red border, one-line pedestrian sign"
+  },
+  "PM": {
+    "name": "Saint Pierre and Miquelon",
+    "drives": "right",
+    "lines": "white centre + white outer, French convention",
+    "script": "Latin, French",
+    "tell": "counted as France, EU blue-strip plates, Gen 3 trekker only, colourful wooden houses"
+  },
+  "PN": {
+    "name": "Pitcairn Islands",
+    "drives": "left",
+    "lines": "no road markings, dirt tracks only",
+    "script": "Latin (English)",
+    "tell": "Gen 3 trekker on forested dirt tracks, semi-tropical, tiny island, counts as UK"
+  },
+  "PR": {
+    "name": "Puerto Rico",
+    "drives": "right",
+    "lines": "yellow centre + white outer, US convention",
+    "script": "Latin, Spanish on US-shaped signs",
+    "tell": "smallcam, PARE signs, (787) phone code, green km markers, no front plates, Walmart"
+  },
+  "PT": {
+    "name": "Portugal",
+    "drives": "right",
+    "lines": "all white; outer lines solid, dashed outer lines essentially absent",
+    "script": "Latin (Portuguese); Ç Ã Õ, no Ñ",
+    "tell": "yellow strip on right of plate, tall-step ladder poles, black chevrons with yellow arrows"
+  },
+  "PT-AZ": {
+    "name": "Azores",
+    "drives": "right",
+    "lines": "all white, Portuguese markings",
+    "script": "Latin (Portuguese)",
+    "tell": "volcanic dry-stone walls, hydrangeas, Japanese cedars, tiled street signs, black-white cows"
+  },
+  "PT-MA": {
+    "name": "Madeira",
+    "drives": "right",
+    "lines": "all white, Portuguese markings",
+    "script": "Latin (Portuguese)",
+    "tell": "steep terraces and tunnels, agapanthus, white concrete block barriers, brown-white cows"
+  },
+  "QA": {
+    "name": "Qatar",
+    "drives": "right",
+    "lines": "solid white outer, centre white or yellow",
+    "script": "Arabic with English alongside",
+    "tell": "white truck with antenna on the left, white plates with maroon strip, thobe crossing signs"
+  },
+  "RE": {
+    "name": "Reunion",
+    "drives": "right",
+    "lines": "all white, French style",
+    "script": "Latin, French only",
+    "tell": "roof rack with tape on rear-right bar, French bollards, volcanic peaks, counts as France"
+  },
+  "RO": {
+    "name": "Romania",
+    "drives": "right",
+    "lines": "all white; centre lines unusually thick, outer lines short dashes with narrow gaps",
+    "script": "Latin (Romanian); Ă Ș Ț plus Â Î",
+    "tell": "huge yellow pole stickers with town name, wide-hole holey poles, Dacia everywhere, waystones"
+  },
+  "RS": {
+    "name": "Serbia",
+    "drives": "right",
+    "lines": "all white centre and outer",
+    "script": "Cyrillic and Latin (Serbian); Ђ Ћ unique, Љ Њ Џ; Latin Č Ć Đ Š Ž",
+    "tell": "B-profile guardrails only, black-on-white chevrons, biscriptal yellow direction signs"
+  },
+  "RU": {
+    "name": "Russia",
+    "drives": "right",
+    "lines": "all white; outer lines often dashed; zebra crossings alternate white and yellow stripes",
+    "script": "Cyrillic (Russian); Ы Э Ё Ъ; улица/ул for street, город/г for city",
+    "tell": "fully white plate, no blue strip; bollard spam at very wide intersections; square concrete poles"
+  },
+  "RW": {
+    "name": "Rwanda",
+    "drives": "right",
+    "lines": "all white centre and outer, many roads unmarked",
+    "script": "Latin, English and Kinyarwanda, some French",
+    "tell": "hazy Gen4 blurred truck, ventilation bricks, red-vest motorcyclists, red soil"
+  },
+  "SE": {
+    "name": "Sweden",
+    "drives": "right",
+    "lines": "all white, never yellow; short dashed outer lines, segmented outer lines on highways",
+    "script": "Latin (Swedish); Å Ä Ö",
+    "tell": "yellow road signs with red border, blue chevrons with yellow arrows, red-yellow striped signposts"
+  },
+  "SG": {
+    "name": "Singapore",
+    "drives": "left",
+    "lines": "white centre, double yellow outers on main roads, black-and-white kerbs",
+    "script": "Latin (English), Chinese, Tamil and Malay also official",
+    "tell": "green rounded street signs, all road signs on square white backing, lime-green buses"
+  },
+  "SI": {
+    "name": "Slovenia",
+    "drives": "right",
+    "lines": "all white; long dashed outer lines, unlike neighbours",
+    "script": "Latin (Slovene); Č Š Ž only, no Ć or Đ; ulica for street",
+    "tell": "yellow direction signs with black border, white bollard with black top, kozolec hay racks"
+  },
+  "SJ": {
+    "name": "Svalbard",
+    "drives": "right",
+    "lines": "few marked roads; all white where present",
+    "script": "Latin (Norwegian)",
+    "tell": "black plates with yellow text, barren treeless arctic mountains, overcast gloom"
+  },
+  "SK": {
+    "name": "Slovakia",
+    "drives": "right",
+    "lines": "all white centre and outer",
+    "script": "Latin (Slovak); Ľ Ô Ä Ŕ Ĺ unique vs Czech; ulica for street",
+    "tell": "orange double front reflector bollards, bold sign font, white street signs with red border"
+  },
+  "SM": {
+    "name": "San Marino",
+    "drives": "right",
+    "lines": "all white, Italian markings",
+    "script": "Latin (Italian)",
+    "tell": "Monte Titano and its three towers, short white plates, yellow chevrons with burgundy arrows"
+  },
+  "SN": {
+    "name": "Senegal",
+    "drives": "right",
+    "lines": "white, French style, often absent on rural roads",
+    "script": "Latin, French, the only Francophone sub-Saharan coverage",
+    "tell": "fully blue plates, Gen3 car with right mirror visible, pink-outlined town signs, rifts"
+  },
+  "ST": {
+    "name": "São Tomé and Príncipe",
+    "drives": "right",
+    "lines": "white where present, mostly unmarked",
+    "script": "Latin, Portuguese",
+    "tell": "dim hazy shitcam, slanted side antenna, CST on blue-based poles, Portuguese ladder poles"
+  },
+  "SZ": {
+    "name": "Eswatini",
+    "drives": "left",
+    "lines": "white centre + yellow outer, occasional triple white centre",
+    "script": "Latin, English and siSwati",
+    "tell": "MR road numbers, tall golden grass, green-bottom plates, white car no antenna"
+  },
+  "TH": {
+    "name": "Thailand",
+    "drives": "left",
+    "lines": "yellow centre solid or dashed + white outers",
+    "script": "Thai, compact with tiny circles inside letters",
+    "tell": "square pinhole concrete poles, Garuda road markers, bulky white black-footed signposts"
+  },
+  "TN": {
+    "name": "Tunisia",
+    "drives": "right",
+    "lines": "all white, outer dashed or solid; rare yellow centre in Sfax",
+    "script": "Arabic and French bilingual signs",
+    "tell": "black plates, follow car escorting black Google car, raked olive plantations"
+  },
+  "TR": {
+    "name": "Turkey",
+    "drives": "right",
+    "lines": "white on most roads, but fully yellow or mixed yellow-and-white is not uncommon",
+    "script": "Latin (Turkish); dotless ı and dotted İ, plus Ç Ş Ğ Ö Ü",
+    "tell": "DUR stop signs, ladder or mesh metal utility poles, minarets, salt-and-pepper asphalt"
+  },
+  "TW": {
+    "name": "Taiwan",
+    "drives": "right",
+    "lines": "double yellow centre + white outer, red outers mean no parking, white outers with no centre common",
+    "script": "Traditional Chinese",
+    "tell": "black-yellow pole stripes running to the ground, orange-hooded mirrors, green transformer boxes"
+  },
+  "TZ": {
+    "name": "Tanzania",
+    "drives": "left",
+    "lines": "trekkers only; Kenya-border spills use yellow centre + white outer",
+    "script": "Latin, Swahili and English",
+    "tell": "Gombe and Kilimanjaro trekkers and tripods, off-road, plus Kenya-border car spills"
+  },
+  "UA": {
+    "name": "Ukraine",
+    "drives": "right",
+    "lines": "all white; frequently worn away on very poor, potholed rural pavement",
+    "script": "Cyrillic (Ukrainian); Є Ґ І Ї; вулиця/вул for street, місто/м for city",
+    "tell": "blue-and-yellow strip on plate, red Gen 3 car, all coverage Gen 3, worst roads in Europe"
+  },
+  "UG": {
+    "name": "Uganda",
+    "drives": "left",
+    "lines": "yellow centre + solid white outer",
+    "script": "Latin, English",
+    "tell": "Kampala and Entebbe plus national parks only, white front and yellow rear plates, red-tinged roads"
+  },
+  "UM-MQ": {
+    "name": "US Minor Outlying Islands",
+    "drives": "right",
+    "lines": "no marked public roads, much of Midway coverage runs along two runways",
+    "script": "Latin, English",
+    "tell": "counted as US, Gen 2 on Midway, albatrosses in nearly every shot, trekkers elsewhere"
+  },
+  "US": {
+    "name": "United States of America",
+    "drives": "right",
+    "lines": "yellow centre, most often double + white outer; median-side outer line is yellow",
+    "script": "Latin, English with American spelling, miles",
+    "tell": "SPEED LIMIT signs, No Passing Zone triangles, orange white-striped barrels, wooden poles"
+  },
+  "US-AK": {
+    "name": "Alaska",
+    "drives": "right",
+    "lines": "yellow centre + white outer, US convention",
+    "script": "Latin, English",
+    "tell": "all-yellow plates, Big Dipper highway shield, shitcam and Gen 2 common, snowy peaks"
+  },
+  "US-HI": {
+    "name": "Hawaii",
+    "drives": "right",
+    "lines": "yellow centre + white outer, US convention; reflectors in a 1-4-1 pattern",
+    "script": "Latin, English and Hawaiian: vowel-heavy names, okina",
+    "tell": "guitar-pick highway shields on yellow posts, yellow pole bands, volcanic rock walls"
+  },
+  "UY": {
+    "name": "Uruguay",
+    "drives": "right",
+    "lines": "unique double yellow with white dashes between; also yellow-white, or all white",
+    "script": "Latin, Spanish",
+    "tell": "black Gen 3 car, smudgy camera, trident poles, white wooden signposts, green km stones"
+  },
+  "VI": {
+    "name": "US Virgin Islands",
+    "drives": "left",
+    "lines": "yellow centre + white outer, US convention",
+    "script": "Latin, English; Danish street names ending in gade",
+    "tell": "drives left despite US territory, big red or white Google car, short blue plates"
+  },
+  "VN": {
+    "name": "Vietnam",
+    "drives": "right",
+    "lines": "both white and yellow used, unusually short yellow centre dashes are distinctive",
+    "script": "Latin with heavy diacritics, short single-syllable words",
+    "tell": "yellow-orange road signs, bone-shaped motorbike blur, A-type guardrails red/yellow reflectors"
+  },
+  "VU": {
+    "name": "Vanuatu",
+    "drives": "right",
+    "lines": "no road markings in coverage, Gen 3 trekker on volcanic island tracks",
+    "script": "Latin (Bislama, English, French)",
+    "tell": "Gen 3 trekker only, dark volcanic soil, dense tropical forest"
+  },
+  "ZA": {
+    "name": "South Africa",
+    "drives": "left",
+    "lines": "white centre + single yellow outer, unique white triple centre",
+    "script": "Latin, English and Afrikaans (-fontein, -kop, -berg)",
+    "tell": "Gen2 halo blur or blue Gen4 car, bird poles, N and R roads, Afrikaans place names"
+  }
+}

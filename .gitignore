@@ -37,3 +37,4 @@ coach/seen.json
 coach/rounds/
 coach/catalog/
 coach/.last-coached
+coach/.quizzed.json

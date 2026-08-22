@@ -10,16 +10,33 @@ Rounds are discussed **only when asked** — never auto-coach after games.
 
 When asked, run `node coach/brief.mjs` (no argument = the round just played; or
 an index like `3`, or a round id; `--list` to see recent rounds). One call pulls
-the dossier from the cloud, rebuilds the panorama from Google's tile CDN into
+the dossier from the cloud, rebuilds the imagery from Google's tile CDN into
 `coach/rounds/<id>/`, samples the terrain at both ends of the guess, and prints
-the Plonk It clues that separate the true country from the guessed one. Then
-read the `pano.jpg` it names — that is the whole loop. Open a `pano_<row>_<col>.jpg`
-tile to read detail the overview loses, or a `coach/plonkit/img/...` reference
-image when a clue needs visual confirmation.
+the user's standing patterns, a country-facts differential, and the Plonk It
+clues that separate the true country from the guessed one.
+
+Read the `view_front/right/back/left.jpg` it names — rectilinear views, the
+round as the player saw it (front = the way the camera car faced). `pano.jpg`
+is the 360° overview; `pano_<row>_<col>.jpg` tiles carry native detail. For a
+close-up of one thing (a sign, a plate, road lines):
+`node coach/look.mjs <id> <yaw> [pitch] [fov]` — fov below 45 fetches sharper
+zoom-5 imagery for just that sector.
 
 For the wider question — "what else could this have been?" — `node coach/clues.mjs`
 slices all 140 guides by clue type across countries: `bollard`, `pole white top`,
-`--find cyrillic`, `--country HR`.
+`--find cyrillic`, `--country HR`. `--facts` is the structured layer: driving
+side, road-line colours, script and killer tells for every covered country
+(`--facts MY KH`, `--facts drives=left lines=yellow`).
+
+## Tutoring
+
+The goal is a closed loop: miss → coached discussion → drilled → ranked → re-measured.
+`node coach/brief.mjs --profile` prints standing form (hit rates, direction-specific
+confusions, worst countries) — read it before choosing what to work on.
+`node coach/brief.mjs --quiz` replays a past miss cold, imagery only: the user must
+state a country AND their reasoning before any reveal; only then run the full brief
+and coach the gap. Never reveal early. Occasionally audit a round the user got
+*right* — right-for-wrong-reasons is an error flashcards cannot catch.
 
 Everything is offline; the brief's only network calls are the round fetch and an
 elevation lookup. If `coach/plonkit/` is empty, regenerate it:

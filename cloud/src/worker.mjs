@@ -829,12 +829,16 @@ export default {
       // all, which is what lets a round played on another machine have its
       // panorama rebuilt locally (see coach/brief.mjs).
       if (request.method === 'GET' && path === '/api/rounds') {
-        const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 1))
-        const rows = await env.DB.prepare(
-          'SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT ?',
-        )
-          .bind(user.id, limit)
-          .all()
+        // ?id= fetches one specific round (the quiz replays old misses);
+        // otherwise the newest ?limit= rounds.
+        const id = url.searchParams.get('id')
+        const rows = id
+          ? await env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? AND id = ?')
+              .bind(user.id, id)
+              .all()
+          : await env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT ?')
+              .bind(user.id, Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 1)))
+              .all()
         const rounds = (rows?.results ?? []).map((r) => JSON.parse(r.json))
         return json({ ok: true, rounds })
       }
