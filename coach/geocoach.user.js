@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.13.0
+// @version      2.13.1
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.13.0'
+  const BODY_VERSION = '2.13.1'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -2293,8 +2293,17 @@
   // is never called. The loader installs a synchronous tap at document-start
   // and buffers requests until we attach; the direct wrap below only serves
   // legacy direct installs.
+  // Two wraps can see the same request — see below — and a guess counted
+  // twice is a round posted twice. The promise is the request's identity, and
+  // a WeakSet of them costs nothing and holds nothing open.
+  const seenRequests = new WeakSet()
+
   function onRequest(rec) {
     try {
+      if (rec && rec.promise && typeof rec.promise === 'object') {
+        if (seenRequests.has(rec.promise)) return
+        seenRequests.add(rec.promise)
+      }
       const url = rec.url || ''
       if (/\/api\/v3\/games\/[A-Za-z0-9]+/.test(url)) {
         const tFetch = Date.now()
@@ -2331,18 +2340,39 @@
     const backlog = tap.queue.splice(0)
     tlog('tap attached — ' + backlog.length + ' buffered request(s)')
     backlog.forEach(onRequest)
-  } else {
-    const pageFetch = W.fetch.bind(W)
+  }
+  // And a second wrap on top of whatever fetch is *now*, tap or no tap.
+  //
+  // The loader's tap is installed at document-start and is normally the only
+  // one needed, but it holds the fetch that existed at that instant — and
+  // anything the page installs afterwards (a polyfill, an instrumentation
+  // shim, a re-assignment during hydration) replaces it without replacing the
+  // tap object the body checks for. The result is a tap that looks attached,
+  // reports zero buffered requests, and never fires again: the guess POST goes
+  // unseen and the round has no card. That is the shape of "it worked, then it
+  // didn't, on the same machine and the same script".
+  //
+  // Wrapping again here cannot fix a fetch the page has yet to replace, but it
+  // covers every replacement that happened before the body loaded — which is
+  // the whole window the tap was blind to. Both wraps firing is expected and
+  // harmless; onRequest ignores a promise it has already been given.
+  // The handler goes on the window rather than into the closure for the same
+  // reason the loader's tap has a settable one: the body hot-reloads, and a
+  // wrapper holding the previous body's onRequest is a wrapper feeding a dead
+  // script. There is only ever one wrap, and it always calls the current body.
+  W.__geocoachOnRequest = onRequest
+  if (!W.__geocoachWrapped) {
+    W.__geocoachWrapped = true
+    const pageFetch = W.fetch
     W.fetch = function (input, opts) {
-      const p = pageFetch(input, opts)
+      const p = pageFetch.apply(this, arguments)
       try {
         const url = typeof input === 'string' ? input : (input && input.url) || ''
         const method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
-        onRequest({ url, method, promise: p })
+        W.__geocoachOnRequest({ url, method, promise: p })
       } catch {}
       return p
     }
-    tlog('no tap — wrapped fetch directly')
   }
 
   // ---------------------------------------------------------------- deck
