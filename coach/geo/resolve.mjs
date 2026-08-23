@@ -1,8 +1,12 @@
 /**
  * Looks up the boundary a round should highlight. Two entry points: a country
  * by ISO code, and a set of subdivisions by the names `scope-regions.json`
- * uses. Everything comes from the slices `build.mjs` wrote, cached after first
- * read — the deck touches a few dozen countries, so the cache stays small.
+ * uses. Both take an LOD: the slices are built once per rung of shape.mjs's
+ * ladder, coarse to fine, and the caller says which zoom band it is drawing
+ * for. Everything comes from the files `build.mjs` wrote, cached after first
+ * read — and since each rung lives in its own directory, the path is already
+ * the cache key: LOD 0 for Canada and LOD 2 for Canada are two entries, and
+ * asking for one never parses the other.
  *
  * Matching is by name, not code, because the names in scope-regions.json were
  * written from whatever the geocoder returned: sometimes English, sometimes
@@ -17,6 +21,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { LODS } from './shape.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const cache = new Map()
@@ -28,6 +33,22 @@ const read = (p) => {
 
 export const geoReady = () => existsSync(join(HERE, 'index.json'))
 const index = () => read(join(HERE, 'index.json'))
+
+/** The ladder as built, straight from the index, so the server and the client
+ * discover it rather than restating shape.mjs's constants. Falls back to the
+ * module's own ladder for a build old enough not to record one. */
+export const geoLods = () => index()?.lods ?? LODS
+
+/** The rung a caller asking for `id` actually gets. Clamped to what was built
+ * rather than refused: an LOD is a rendering hint, and a client that asks for a
+ * rung this build does not have still wants its shape drawn. */
+export function lodFor(id) {
+  const ladder = geoLods()
+  return ladder[Math.min(ladder.length - 1, Math.max(0, Math.trunc(Number(id)) || 0))]
+}
+
+/** Where a rung's slices live. */
+const dirFor = (dir, lod) => join(HERE, dir, 'l' + lodFor(lod).id)
 
 /** Words that name a kind of place rather than the place. Dropping them lets
  * "Nusa Tenggara Timur", "East Nusa Tenggara Province" and "NUSA-TENGGARA
@@ -123,8 +144,8 @@ export function countryCode(name) {
   return null
 }
 
-export function countryShape(code) {
-  return read(join(HERE, 'admin0', String(code).toUpperCase() + '.json'))
+export function countryShape(code, lod = 0) {
+  return read(join(dirFor('admin0', lod), String(code).toUpperCase() + '.json'))
 }
 
 /**
@@ -208,13 +229,15 @@ export const signature = (features) =>
  * they show a stroke along every shared border — a line through the middle of
  * the highlight, which reads as a rendering fault rather than as information.
  * The merge cannot happen here: it needs raw geometry, and by now each feature
- * has been thinned on its own.
+ * has been thinned on its own — at whichever rung of the ladder was asked for.
+ * Names are identical at every rung, so which rung is in hand changes only the
+ * geometry that comes back, never which features matched.
  */
-export function regionShapes(code, names) {
+export function regionShapes(code, names, lod = 0) {
   const cc = String(code).toUpperCase()
-  const list = read(join(HERE, 'admin1', cc + '.json')) ?? []
+  const list = read(join(dirFor('admin1', lod), cc + '.json')) ?? []
   const { matched, missing } = matchFeatures(list, names)
   if (matched.length < 2) return { matched, missing }
-  const merged = read(join(HERE, 'merged', cc + '.json'))?.[signature(matched)]
+  const merged = read(join(dirFor('merged', lod), cc + '.json'))?.[signature(matched)]
   return { matched: merged ? [merged] : matched, missing }
 }

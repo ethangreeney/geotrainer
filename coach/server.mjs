@@ -19,7 +19,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { saveRoundTiles } from './pano.mjs'
-import { countryShape, geoReady, regionShapes } from './geo/resolve.mjs'
+import { countryCode, countryShape, geoReady, lodFor, regionShapes } from './geo/resolve.mjs'
+import { clipGeometry } from './geo/shape.mjs'
 import {
   buildDeck,
   deckSummary,
@@ -364,22 +365,58 @@ async function inMetaScope(metaName, guessRegion) {
  * from pinning every country's coastline in memory at once. "We have no shape
  * for this" is cached the same way — a country that is missing today is
  * missing for the whole session, and re-deciding that per round is waste.
+ *
+ * The LOD is part of the key: the same meta at two zoom bands is two different
+ * payloads, and Canada's finest rung is a megabyte that must not be handed out
+ * in place of the coarse one the client asked for.
  */
 const scopeGeoCache = new Map()
 const SCOPE_GEO_LIMIT = 50
 const SCOPE_GEO_MAX_REGIONS = 40
+/**
+ * The most coordinates worth putting on the screen at once.
+ *
+ * The boundary source went from Natural Earth to OpenStreetMap, and the finest
+ * rung stopped being small: Japan is a comfortable twelve thousand points, but
+ * Canada's coast at the same tolerance is two and a half million, which no
+ * browser draws and no map needs — the whole of it is on screen only when the
+ * map is zoomed out far enough that the coarse rung is indistinguishable.
+ *
+ * So a rung that overshoots is answered with the next one down, and the reply
+ * says which rung it actually is. The client already handles being given less
+ * detail than it asked for: it notices the point count did not go up, keeps
+ * what it has, and stops asking for that rung this round.
+ */
+const SCOPE_GEO_MAX_POINTS = 120_000
+/** And a ceiling on the cache itself, since these are now sometimes megabytes
+ * rather than always kilobytes: fifty of Canada would be the whole process. */
+const SCOPE_GEO_CACHE_BYTES = 64 * 1024 * 1024
 const scopeGeoMissing = new Set()
 const scopeGeoUnmerged = new Set()
 
-/** One scope query, resolved to the exact bytes to send back (both encodings,
- * since which one goes out depends on the request). */
-function buildScopeGeo(cc, regions) {
+/** `w,s,e,n` in degrees, or null for anything that is not four sane numbers
+ * describing a rectangle with area. Rounded to five decimals — about a metre,
+ * far finer than any window matters to, and enough to make the cache key stable
+ * across the sub-pixel jitter of a map settling. */
+function parseBox(raw) {
+  const n = String(raw ?? '')
+    .split(',')
+    .map(Number)
+  if (n.length !== 4 || n.some((v) => !Number.isFinite(v))) return null
+  const [w, s, e, no] = n.map((v) => Math.round(v * 1e5) / 1e5)
+  if (e <= w || no <= s || s < -90 || no > 90 || w < -180 || e > 180) return null
+  return { w, s, e, n: no }
+}
+
+/** One scope query at one LOD, resolved to the exact bytes to send back (both
+ * encodings, since which one goes out depends on the request). */
+function buildScopeGeo(cc, regions, lod, clip) {
   const bytes = (status, obj) => {
     const json = Buffer.from(JSON.stringify(obj))
     return { status, json, gzip: gzipSync(json) }
   }
 
-  const shape = countryShape(cc)
+  const shape = countryShape(cc, lod)
   // Natural Earth carries no admin0 for some of the small territories the
   // geocoder still names — Christmas Island, Réunion — and a failed geocode
   // asks for shapes like ZZ. Nothing is broken and a retry will not help, so
@@ -391,7 +428,7 @@ function buildScopeGeo(cc, regions) {
       scopeGeoMissing.add(cc)
       console.log(`[coach] scope-geo: no boundary on file for ${cc} — no overlay for rounds there`)
     }
-    return bytes(404, { ok: false, kind: 'none', country: cc, error: `no boundary on file for ${cc}` })
+    return bytes(404, { ok: false, kind: 'none', country: cc, lod, error: `no boundary on file for ${cc}` })
   }
 
   const feature = (name, geometry) => ({ type: 'Feature', properties: { name }, geometry })
@@ -399,7 +436,7 @@ function buildScopeGeo(cc, regions) {
   let names = [shape.name]
   let features = [feature(shape.name, shape.geometry)]
   if (regions.length) {
-    const { matched, missing } = regionShapes(cc, regions)
+    const { matched, missing } = regionShapes(cc, regions, lod)
     // Only a scope that resolves to *nothing* is worth a line here. Entries
     // deliberately list several spellings of the same subdivision — the
     // geocoder's English name beside the local one — so individual names going
@@ -429,13 +466,115 @@ function buildScopeGeo(cc, regions) {
       }
     }
   }
+  // The camera is framed on the whole scope even when only a window of it is
+  // sent, so the extents are taken before anything is cut away.
+  const whole = features
+  // A window on the shape rather than the shape. What a zoomed-in map can show
+  // is a few kilometres of coast; sending Canada to draw it is the reason the
+  // finest rung had to be refused to exactly the countries that needed it most.
+  if (clip) {
+    features = features
+      .map((f) => ({ ...f, geometry: clipGeometry(f.geometry, [clip.w, clip.s, clip.e, clip.n]) }))
+      .filter((f) => f.geometry)
+    // The window fell entirely outside the scope — which is a real thing for a
+    // guess placed on the wrong continent. Nothing to draw here, but the shape
+    // itself is fine, so answer with the whole of it and let the client frame.
+    if (!features.length) return buildScopeGeo(cc, regions, lod, null)
+  }
+  // Too much to draw at this rung — answer with the next one down. Only the
+  // whole-country shapes ever trip this; a region scope is a fraction of a
+  // country and lands well inside the budget even in the largest of them, and
+  // a clipped window never comes close.
+  let points = 0
+  for (const f of features)
+    for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates)
+      for (const ring of poly) points += ring.length
+  if (points > SCOPE_GEO_MAX_POINTS && lod > 0) return buildScopeGeo(cc, regions, lod - 1, clip)
+
   const shown = names.slice(0, 3).join(', ')
   const label =
     kind === 'country'
       ? shape.name
       : `${shown}${names.length > 3 ? ` +${names.length - 3} more` : ''}, ${shape.name}`
 
-  return bytes(200, { ok: true, kind, country: cc, label, names, geojson: { type: 'FeatureCollection', features } })
+  // The extent of what was actually served, so the client can frame the map
+  // without walking the coordinates itself — and, at a coarse rung, without
+  // framing islands this rung dropped. Raw degrees, like everything else here,
+  // so a country straddling the antimeridian reports the full -180..180 span
+  // rather than the narrow box the eye sees.
+  let n = -Infinity
+  let s = Infinity
+  let e = -Infinity
+  let w = Infinity
+  for (const f of whole)
+    for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates)
+      for (const [x, y] of poly[0]) {
+        if (y > n) n = y
+        if (y < s) s = y
+        if (x > e) e = x
+        if (x < w) w = x
+      }
+
+  return bytes(200, {
+    ok: true,
+    kind,
+    country: cc,
+    lod,
+    label,
+    names,
+    bbox: { n, s, e, w },
+    frame: framingBox(whole) || { n, s, e, w },
+    // The window this answer covers, so the client knows when panning has
+    // taken the map past the edge of what it was given. Absent means whole.
+    clip: clip ?? null,
+    geojson: { type: 'FeatureCollection', features },
+  })
+}
+
+// Chile's outline reaches Easter Island, 3,500km out in the Pacific, and
+// France's reaches Guyane. Framing the map on the full extent of either puts
+// the country the round is actually about in one corner of an ocean. So the
+// camera gets a second box: the main mass, grown outwards from the largest
+// ring by absorbing whatever lies close to it, which keeps a coastal
+// archipelago (all of Patagonia) and drops a mid-ocean territory.
+const FRAME_GAP = 4 // degrees of open water an outlier may sit across
+function framingBox(features) {
+  const rings = []
+  for (const f of features)
+    for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates) {
+      let n = -Infinity
+      let s = Infinity
+      let e = -Infinity
+      let w = Infinity
+      for (const [x, y] of poly[0]) {
+        if (y > n) n = y
+        if (y < s) s = y
+        if (x > e) e = x
+        if (x < w) w = x
+      }
+      if (n > s && e > w) rings.push({ n, s, e, w, a: (n - s) * (e - w) })
+    }
+  if (!rings.length) return null
+  rings.sort((a, b) => b.a - a.a)
+  const box = { n: rings[0].n, s: rings[0].s, e: rings[0].e, w: rings[0].w }
+  const taken = new Set([0])
+  for (let grew = true; grew; ) {
+    grew = false
+    for (let i = 1; i < rings.length; i++) {
+      if (taken.has(i)) continue
+      const r = rings[i]
+      const dy = Math.max(0, r.s - box.n, box.s - r.n)
+      const dx = Math.max(0, r.w - box.e, box.w - r.e)
+      if (dy > FRAME_GAP || dx > FRAME_GAP) continue
+      taken.add(i)
+      grew = true
+      if (r.n > box.n) box.n = r.n
+      if (r.s < box.s) box.s = r.s
+      if (r.e > box.e) box.e = r.e
+      if (r.w < box.w) box.w = r.w
+    }
+  }
+  return box
 }
 
 /**
@@ -814,7 +953,10 @@ const server = createServer(async (req, res) => {
   // The shape behind the card's `scope`. The Worker names the area; the
   // boundary is served from here because a country outline runs to hundreds of
   // kilobytes and this machine is on the same LAN as the browser that draws it.
-  //   /api/scope-geo?country=ES[&regions=Cataluña|Aragón]
+  //   /api/scope-geo?country=ES[&regions=Cataluña|Aragón][&lod=0]
+  // lod picks a rung of the detail ladder (coarse 0 → fine 2, see
+  // coach/geo/shape.mjs); absent means 0, the rung a zoomed-out map wants and
+  // the cheapest to send.
   if (req.method === 'GET' && urlPath === '/api/scope-geo') {
     const params = new URL(req.url, 'http://localhost').searchParams
     const country = (params.get('country') ?? '').trim()
@@ -836,15 +978,31 @@ const server = createServer(async (req, res) => {
     if (!geoReady()) return fail(503, 'boundary slices not built — run: node coach/geo/build.mjs')
 
     const cc = country.toUpperCase()
+    // A rung this build does not have is clamped, not refused: the LOD is a
+    // rendering hint and the client still wants its shape drawn.
+    const lod = lodFor(params.get('lod') ?? 0).id
+    // &box=w,s,e,n asks for only the part of the shape inside that rectangle.
+    // The client sends the window it is looking at, grown well past the screen
+    // edge, and gets the finest rung for it however large the country is.
+    const clip = parseBox(params.get('box'))
     // Cached as finished bytes, not objects: the same meta comes round again
     // within a session, and re-serialising a megabyte of coordinates is the
-    // whole cost of this endpoint.
-    const key = `${cc}|${regions.join('|')}`
+    // whole cost of this endpoint. A window is part of the identity of the
+    // answer, so it is part of the key — rounded, so that a map nudged by a
+    // pixel does not miss.
+    const boxKey = clip ? `${clip.w},${clip.s},${clip.e},${clip.n}` : ''
+    const key = `${cc}|${lod}|${boxKey}|${regions.join('|')}`
     let hit = scopeGeoCache.get(key)
     if (!hit) {
-      hit = buildScopeGeo(cc, regions)
+      hit = buildScopeGeo(cc, regions, lod, clip)
       scopeGeoCache.set(key, hit)
-      while (scopeGeoCache.size > SCOPE_GEO_LIMIT) scopeGeoCache.delete(scopeGeoCache.keys().next().value)
+      let held = 0
+      for (const v of scopeGeoCache.values()) held += v.json.length + v.gzip.length
+      while (scopeGeoCache.size > SCOPE_GEO_LIMIT || (held > SCOPE_GEO_CACHE_BYTES && scopeGeoCache.size > 1)) {
+        const oldest = scopeGeoCache.keys().next().value
+        held -= scopeGeoCache.get(oldest).json.length + scopeGeoCache.get(oldest).gzip.length
+        scopeGeoCache.delete(oldest)
+      }
     }
 
     // Coastlines gzip to roughly a third of their size, and the client is a
@@ -854,14 +1012,49 @@ const server = createServer(async (req, res) => {
     res.writeHead(hit.status, {
       'Content-Type': 'application/json',
       'Content-Length': body.length,
-      // Borders do not move, so a shape is good for the day. A miss is not
-      // cached in the browser at all: the slices are rebuilt from this repo,
-      // and a country that gains a boundary today should draw today.
-      'Cache-Control': hit.status === 200 ? 'max-age=86400' : 'no-store',
+      // Borders do not move and the slices only change on a rebuild, so a
+      // shape is good for the day. A miss is not cached in the browser at all:
+      // the slices are rebuilt from this repo, and a country that gains a
+      // boundary today should draw today.
+      'Cache-Control': hit.status === 200 ? 'public, max-age=86400' : 'no-store',
       ...(wantsGzip ? { 'Content-Encoding': 'gzip' } : {}),
     })
     res.end(body)
     return
+  }
+  // The same scope the card will eventually carry, named a whole guess early.
+  // The round's pano id is on screen the moment the round is served, so the
+  // userscript asks for this then and has the boundary in its store long before
+  // the card needs it — the difference between an outline that appears with the
+  // card and one that arrives a second later, moving the camera a second time.
+  //   /api/scope-for-pano?pano=<panoId>
+  // Read-only and deliberately mute about *why* there is no answer: a pano from
+  // a map we never indexed and a country name Natural Earth has no code for are
+  // both simply "nothing to warm", and the client treats them identically.
+  if (req.method === 'GET' && urlPath === '/api/scope-for-pano') {
+    const pano = (new URL(req.url, 'http://localhost').searchParams.get('pano') ?? '').trim()
+    const answer = (scope) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify(scope ? { ok: true, scope } : { ok: false }))
+    }
+    if (!pano) return answer(null)
+    let loc = null
+    for (const c of await loadCatalogs()) {
+      const hit = c.locations.find((l) => l.panoId === pano)
+      if (hit) {
+        loc = hit
+        break
+      }
+    }
+    if (!loc) return answer(null)
+    // handleRound builds the card's scope from the geocoder's ISO code, and the
+    // client keys its store on exactly that. The catalog knows the country only
+    // by name, so the code has to be reached the other way round here or the
+    // warmed shape would sit under a key the card never asks for.
+    const cc = loc.country ? countryCode(loc.country) : null
+    if (!cc) return answer(null)
+    const regions = (await loadScopeRegions())[metaKeyOf(loc.country, loc.metaName)] ?? null
+    return answer({ country: cc.toUpperCase(), regions })
   }
   // The just-in-time deck: what to test right now, as GeoGuessr locations.
   if (req.method === 'GET' && req.url === '/deck') {

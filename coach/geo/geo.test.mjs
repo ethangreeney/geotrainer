@@ -4,7 +4,8 @@
  *  - The pure half exercises the name matcher and the geometry directly, and
  *    runs anywhere. It imports shape.mjs rather than re-deriving the maths, so
  *    the error bound it measures is the bound the build actually produced.
- *  - The built half reads the slices in admin0/, admin1/ and merged/. Those are
+ *  - The built half reads the slices in admin0/l<n>/, admin1/l<n>/ and
+ *    merged/l<n>/, one directory per rung of the LOD ladder. Those are
  *    gitignored — a fresh clone has no Natural Earth data — so it skips rather
  *    than fails when they are absent. `npm test` staying green on a clone is
  *    worth more than a red mark nobody can act on; `node coach/geo/audit.mjs`
@@ -15,37 +16,49 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
+  DROP_TOLS,
+  LODS,
   area,
   bbox,
+  clipGeometry,
+  clipRing,
+  countVertices,
   dissolve,
-  featureTol,
+  extent,
   precisionFor,
   ring,
   ringsOf,
   segDistSq,
   signedArea,
-  simplify,
+  simplifyAt,
   simplifyRing,
 } from './shape.mjs'
 import {
   bare,
   countryCode,
   countryShape,
+  geoLods,
   geoReady,
   loose,
+  lodFor,
   matchFeatures,
   norm,
   regionShapes,
   signature,
 } from './resolve.mjs'
+import { decodeTopology, thinTopology } from './topo.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const COACH = join(HERE, '..')
 const built = geoReady()
 const SRC = join(HERE, 'src', 'ne_10m_admin_0_countries.geojson')
 const read = (p) => JSON.parse(readFileSync(p, 'utf8'))
-const codesIn = (dir) =>
-  existsSync(join(HERE, dir)) ? readdirSync(join(HERE, dir)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)) : []
+const lodDir = (dir, lod = 0) => join(HERE, dir, 'l' + lod)
+const codesIn = (dir, lod = 0) =>
+  existsSync(lodDir(dir, lod))
+    ? readdirSync(lodDir(dir, lod)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5))
+    : []
+const sliceOf = (dir, code, lod = 0) => read(join(lodDir(dir, lod), code + '.json'))
 
 /** Furthest any point of `pts` strays from the polyline `line`. */
 const maxDeviation = (pts, line) => {
@@ -118,23 +131,212 @@ describe('geometry', () => {
     }
   })
 
-  it('replaces a ring too small to survive with its bounding box', () => {
-    const islet = [[0, 0], [0.00001, 0], [0.00001, 0.00001], [0, 0.00001], [0, 0]]
-    const r = ring(islet, 0.01)
-    expect(r.length).toBe(5)
-    expect(bbox(r)).toEqual(bbox(islet))
+  it('refines a sliver rather than handing back its bounding box', () => {
+    // The old build boxed anything that simplified below four points, which is
+    // where the rectangular islands came from. A ring is now drawn finer than
+    // the budget instead of squarer than the truth.
+    const sliver = [[0, 0], [1, 0.001], [2, 0], [1, -0.001], [0, 0]]
+    const r = ring(sliver, 0.5)
+    expect(r.length).toBeGreaterThanOrEqual(4)
+    const [x0, y0, x1, y1] = bbox(r)
+    expect(x1 - x0).toBeCloseTo(2, 3)
+    expect(y1 - y0).toBeLessThanOrEqual(0.002)
+    // The apexes are what makes it a sliver rather than a rectangle: a bounding
+    // box has its corners at the ends and nothing in between.
+    expect(r.some(([x, y]) => Math.abs(x - 1) < 0.01 && y > 0.0005)).toBe(true)
+    expect(r.some(([x, y]) => Math.abs(x - 1) < 0.01 && y < -0.0005)).toBe(true)
   })
 
-  it('scales the tolerance to the feature, and the precision to the tolerance', () => {
-    const big = { type: 'Polygon', coordinates: [square(0, 0, 40)] }
-    const small = { type: 'Polygon', coordinates: [square(0, 0, 0.2)] }
-    expect(featureTol(big)).toBeGreaterThan(featureTol(small))
-    expect(precisionFor(featureTol(small))).toBeGreaterThanOrEqual(precisionFor(featureTol(big)))
+  it('finer rungs cost more precision, because they are worth more decimals', () => {
+    expect(precisionFor(LODS[2].tol)).toBeGreaterThan(precisionFor(LODS[0].tol))
   })
 
   it('measures area with the holes taken out', () => {
     const donut = { type: 'Polygon', coordinates: [square(0, 0, 10), square(4, 4, 2)] }
     expect(area(donut)).toBeCloseTo(96, 6)
+  })
+})
+
+describe('the LOD ladder', () => {
+  /** Half a screen pixel at zoom z, the error nothing at that zoom can show:
+   * a 256 px tile spans 360° at z=0, so a pixel is 360/(256·2^z) degrees. */
+  const halfPixel = (z) => 180 / (256 * 2 ** z)
+
+  it('sizes each rung for the top of the band it serves', () => {
+    expect(LODS.map((l) => l.id)).toEqual([0, 1, 2])
+    expect(LODS.map((l) => l.maxZoom)).toEqual([5, 8, 24])
+    // The last rung has no band above it, so it is sized for z≈11 — about as
+    // close as the result map is ever pushed.
+    for (const [lod, top] of [[LODS[0], 5], [LODS[1], 8], [LODS[2], 11]]) {
+      expect(lod.tol, `LOD ${lod.id}`).toBeGreaterThan(halfPixel(top) * 0.7)
+      expect(lod.tol, `LOD ${lod.id}`).toBeLessThanOrEqual(halfPixel(top) * 1.1)
+    }
+    // Coarse to fine, with no rung repeating the one before it.
+    for (let i = 1; i < LODS.length; i++) expect(LODS[i].tol).toBeLessThan(LODS[i - 1].tol)
+  })
+
+  it('holds every rung to its own tolerance, not to the feature\'s size', () => {
+    // The same coastline at three rungs. The old build gave a feature one
+    // tolerance derived from its own extent, so a big country was drawn as
+    // coarsely close up as far away; the bound now belongs to the zoom.
+    const coast = []
+    for (let i = 0; i <= 3000; i++) coast.push([i / 100, Math.sin(i / 11) * 0.05 + Math.sin(i / 3) * 0.004])
+    let finer = 0
+    for (const lod of LODS) {
+      const s = simplifyRing(coast, lod.tol)
+      expect(maxDeviation(coast, s), `LOD ${lod.id}`).toBeLessThanOrEqual(lod.tol)
+      expect(s.length).toBeGreaterThan(finer)
+      finer = s.length
+    }
+  })
+
+  it('drops a ring too small to draw, and takes its holes with it', () => {
+    const big = square(0, 0, 2)
+    const hole = square(0.5, 0.5, 1)
+    const islet = square(10, 10, 0.05)
+    const isletHole = square(10.01, 10.01, 0.02)
+    const geom = { type: 'MultiPolygon', coordinates: [[big, hole], [islet, isletHole]] }
+
+    // 0.02 keeps everything but the islet: 0.07° across, under the 0.2°
+    // threshold, and its hole leaves with it rather than punching open water.
+    const fine = simplifyAt(geom, 0.02)
+    expect(fine.coordinates).toHaveLength(1)
+    expect(fine.coordinates[0]).toHaveLength(2)
+
+    // At a coarser rung the hole itself falls under the threshold, and a
+    // sub-pixel hole is noise the same way a sub-pixel island is.
+    const coarse = simplifyAt(geom, 0.2)
+    expect(coarse.coordinates).toHaveLength(1)
+    expect(coarse.coordinates[0]).toHaveLength(1)
+    expect(area(coarse)).toBeCloseTo(4, 1)
+  })
+
+  it('never empties a feature, however small every one of its islands is', () => {
+    // An atoll nation is nothing but sub-pixel rings. Invisible is not an
+    // available answer for the country the round was played in, so the largest
+    // ring stays whatever the rule says.
+    const atolls = { type: 'MultiPolygon', coordinates: [[square(0, 0, 0.02)], [square(1, 1, 0.05)], [square(2, 2, 0.01)]] }
+    const out = simplifyAt(atolls, 0.02)
+    expect(out.coordinates).toHaveLength(1)
+    expect(ringsOf(out)).toHaveLength(1)
+    // The largest, not the first: 0.05° at (1,1).
+    expect(bbox(ringsOf(out)[0])[0]).toBeCloseTo(1, 3)
+  })
+
+  it('judges a ring by its bounding diagonal against the rung it is drawn at', () => {
+    const at = (w, tol) => simplifyAt({ type: 'MultiPolygon', coordinates: [[square(0, 0, 5)], [square(20, 20, w)]] }, tol)
+    const threshold = DROP_TOLS * 0.02
+    // Just under and just over, measured on the diagonal the rule uses.
+    expect(at((threshold / Math.SQRT2) * 0.9, 0.02).coordinates).toHaveLength(1)
+    expect(at((threshold / Math.SQRT2) * 1.1, 0.02).coordinates).toHaveLength(2)
+  })
+})
+
+describe('TopoJSON', () => {
+  // Two squares sharing their middle edge, written the way geoBoundaries writes
+  // them: coordinates on a quantisation grid, each point a delta from the last,
+  // and the shared edge stored once as an arc the right-hand square walks
+  // backwards. Arc 0 is the shared border, 1 is the left square's outside, 2 is
+  // the right's.
+  const shared = {
+    transform: { scale: [0.01, 0.01], translate: [10, 20] },
+    arcs: [
+      [
+        [100, 0],
+        [0, 20],
+        [0, 20],
+        [0, 20],
+        [0, 20],
+        [0, 20],
+      ],
+      [
+        [100, 100],
+        [-100, 0],
+        [0, -100],
+        [100, 0],
+      ],
+      [
+        [100, 0],
+        [100, 0],
+        [0, 100],
+        [-100, 0],
+      ],
+    ],
+    objects: {
+      units: {
+        type: 'GeometryCollection',
+        geometries: [
+          { type: 'Polygon', arcs: [[0, 1]], properties: { shapeName: 'Left' } },
+          { type: 'Polygon', arcs: [[2, ~0]], properties: { shapeName: 'Right' } },
+        ],
+      },
+    },
+  }
+
+  it('undoes the delta encoding and the quantisation grid', () => {
+    const [left, right] = decodeTopology(shared)
+    expect(left.properties.shapeName).toBe('Left')
+    expect(left.geometry.coordinates[0][0]).toEqual([11, 20])
+    // Closed rings: an arc list that returns to where it started.
+    for (const f of [left, right]) {
+      const r = f.geometry.coordinates[0]
+      expect(r[0]).toEqual(r[r.length - 1])
+    }
+    expect(right.geometry.coordinates[0]).toContainEqual([11, 21])
+  })
+
+  it('gives both sides of a shared border the same coordinates, so a dissolve cancels it', () => {
+    const [left, right] = decodeTopology(shared)
+    const merged = dissolve([left.geometry, right.geometry])
+    expect(ringsOf(merged)).toHaveLength(1)
+    expect(area(merged)).toBeCloseTo(area(left.geometry) + area(right.geometry), 10)
+  })
+
+  it('still cancels it after thinning, because the border is thinned once', () => {
+    // The reason the download is kept as a topology at all. Thin the two rings
+    // separately and the shared edge comes back slightly different on each
+    // side, leaving a hairline sliver where the dissolve failed to cancel.
+    expect(decodeTopology(shared)[0].geometry.coordinates[0]).toHaveLength(9)
+    const [left, right] = decodeTopology(thinTopology(shared, 0.02, simplifyRing))
+    expect(left.geometry.coordinates[0]).toHaveLength(5)
+    const merged = dissolve([left.geometry, right.geometry])
+    expect(ringsOf(merged)).toHaveLength(1)
+  })
+
+  it('reads a topology that was never quantised, and one with nothing in it', () => {
+    const flat = {
+      arcs: [
+        [
+          [0, 0],
+          [1, 0],
+          [1, 1],
+          [0, 1],
+          [0, 0],
+        ],
+      ],
+      objects: { a: { type: 'Polygon', arcs: [[0]], properties: { shapeName: 'Unit' } } },
+    }
+    expect(decodeTopology(flat)[0].geometry.coordinates[0]).toHaveLength(5)
+    expect(decodeTopology({ arcs: [], objects: {} })).toEqual([])
+    // A geometry type the boundary layer has no use for is skipped, not thrown.
+    expect(decodeTopology({ arcs: [[[0, 0]]], objects: { p: { type: 'Point', coordinates: [0, 0] } } })).toEqual([])
+  })
+
+  it('carries a MultiPolygon\'s holes through as holes', () => {
+    const withHole = {
+      arcs: [square(0, 0, 10).map((p) => p), square(3, 3, 2).map((p) => p)],
+      objects: {
+        a: {
+          type: 'MultiPolygon',
+          arcs: [[[0], [1]]],
+          properties: { shapeName: 'Ringed' },
+        },
+      },
+    }
+    const [f] = decodeTopology(withHole)
+    expect(f.geometry.type).toBe('MultiPolygon')
+    expect(f.geometry.coordinates[0]).toHaveLength(2)
+    expect(area(f.geometry)).toBeCloseTo(100 - 4, 6)
   })
 })
 
@@ -177,6 +379,74 @@ describe('dissolve', () => {
   it('is unbothered by the same shape passed twice', () => {
     const s = { type: 'Polygon', coordinates: [square(0, 0)] }
     expect(area(dissolve([s, s]))).toBeCloseTo(1, 9)
+  })
+})
+
+// A window on the shape rather than the shape: the whole reason the finest
+// rung can be served at all for a country the size of Canada.
+describe('clipping to a window', () => {
+  const BOX = [0, 0, 10, 10]
+  const ringArea = (r) => Math.abs(signedArea(r))
+
+  it('leaves a ring that is already inside completely alone', () => {
+    const r = square(2, 2, 5)
+    expect(clipRing(r, BOX)).toEqual(r)
+  })
+
+  it('cuts a ring that hangs over the edge down to the part on screen', () => {
+    const clipped = clipRing(square(5, 5, 20), BOX)
+    // The overhang is gone and the corner that was inside is still there.
+    expect(clipped.every(([x, y]) => x >= 5 && x <= 10 && y >= 5 && y <= 10)).toBe(true)
+    expect(ringArea(clipped)).toBeCloseTo(25, 6)
+    expect(clipped[0]).toEqual(clipped[clipped.length - 1]) // still closed
+  })
+
+  it('answers nothing for a ring the window never touches', () => {
+    expect(clipRing(square(50, 50, 5), BOX)).toBe(null)
+  })
+
+  it('keeps a window that spans the ring as the whole ring', () => {
+    const clipped = clipRing(square(2, 2, 5), [-100, -100, 100, 100])
+    expect(ringArea(clipped)).toBeCloseTo(25, 6)
+  })
+
+  it('drops the islands off screen and keeps the one on it', () => {
+    const geom = {
+      type: 'MultiPolygon',
+      coordinates: [[square(1, 1, 3)], [square(80, 80, 3)]],
+    }
+    const out = clipGeometry(geom, BOX)
+    expect(out.type).toBe('MultiPolygon')
+    expect(out.coordinates).toHaveLength(1)
+    expect(ringArea(out.coordinates[0][0])).toBeCloseTo(9, 6)
+  })
+
+  it('carries a hole through, and drops one the window cut away', () => {
+    const geom = {
+      type: 'Polygon',
+      coordinates: [square(0, 0, 10), square(2, 2, 3), square(20, 20, 3)],
+    }
+    const out = clipGeometry(geom, [0, 0, 10, 10])
+    expect(out.coordinates[0]).toHaveLength(2) // outer + the hole that is inside
+    expect(ringArea(out.coordinates[0][1])).toBeCloseTo(9, 6)
+  })
+
+  it('answers nothing at all when the window misses everything', () => {
+    expect(clipGeometry({ type: 'Polygon', coordinates: [square(50, 50, 3)] }, BOX)).toBe(null)
+    expect(clipGeometry(null, BOX)).toBe(null)
+    expect(clipGeometry({ type: 'Point', coordinates: [1, 1] }, BOX)).toBe(null)
+  })
+
+  it('cuts a real coastline to a fraction of itself without moving what is left', () => {
+    // A jagged 400-point coast: the window keeps a tenth of it, and every
+    // point it keeps is a point the original had, in the same place.
+    const pts = []
+    for (let i = 0; i <= 400; i++) pts.push([i / 40, 5 + Math.sin(i / 3) * 0.4])
+    pts.push([10, -5], [0, -5], [0, 5])
+    const clipped = clipRing(pts, [0, -10, 1, 10])
+    expect(clipped.length).toBeLessThan(pts.length / 5)
+    const inside = pts.filter(([x]) => x <= 1)
+    for (const p of inside) expect(clipped.some(([x, y]) => x === p[0] && y === p[1])).toBe(true)
   })
 })
 
@@ -224,15 +494,20 @@ describe.skipIf(!built)('the built slices', () => {
   // with no build there is no index to read.
   const index = built ? read(join(HERE, 'index.json')) : { countries: {} }
 
-  it('gives every country in the index the files the index claims', () => {
+  it('gives every country in the index the files the index claims, at every rung', () => {
     expect(Object.keys(index.countries).length).toBeGreaterThan(200)
-    expect(index.detail).toBeGreaterThan(0)
+    // The ladder is published in the index so the server and the client can
+    // discover it instead of restating shape.mjs's constants.
+    expect(index.lods).toEqual(LODS)
+    expect(geoLods()).toEqual(LODS)
     for (const [code, c] of Object.entries(index.countries)) {
       expect(code).toMatch(/^[A-Z]{2}$/)
       expect(c.name).toBeTruthy()
-      expect(existsSync(join(HERE, 'admin0', code + '.json'))).toBe(true)
-      if (c.admin1) expect(read(join(HERE, 'admin1', code + '.json'))).toHaveLength(c.admin1)
-      if (c.merged) expect(Object.keys(read(join(HERE, 'merged', code + '.json')))).toHaveLength(c.merged)
+      for (const lod of index.lods) {
+        expect(existsSync(join(lodDir('admin0', lod.id), code + '.json')), `${code} LOD ${lod.id}`).toBe(true)
+        if (c.admin1) expect(sliceOf('admin1', code, lod.id)).toHaveLength(c.admin1)
+        if (c.merged) expect(Object.keys(sliceOf('merged', code, lod.id))).toHaveLength(c.merged)
+      }
     }
   })
 
@@ -244,7 +519,47 @@ describe.skipIf(!built)('the built slices', () => {
     for (const code of codesIn('admin1')) expect(countryShape(code), code).toBeTruthy()
   })
 
-  it('holds together structurally in every file it wrote', { timeout: 60_000 }, () => {
+  it('gets finer as the ladder climbs, without ever losing the mainland', () => {
+    // Nine countries chosen for the shapes that break naive simplification:
+    // an archipelago strung down a mainland (CL), islands off a big island
+    // (GB, JP), a fjord coast (NO), pure archipelago (PH, ID, GR), the biggest
+    // vertex counts on file (CA, RU).
+    for (const code of ['CL', 'GB', 'JP', 'NO', 'PH', 'ID', 'CA', 'GR', 'RU']) {
+      const geoms = index.lods.map((lod) => countryShape(code, lod.id).geometry)
+      for (let i = 1; i < geoms.length; i++) {
+        expect(countVertices(geoms[i]), `${code} LOD ${i}`).toBeGreaterThan(countVertices(geoms[i - 1]))
+        expect(geoms[i].coordinates.length, `${code} LOD ${i}`).toBeGreaterThanOrEqual(geoms[i - 1].coordinates.length)
+      }
+      // Whatever the drop rule takes, it never takes the shape the country is:
+      // the widest ring is the same one at every rung.
+      const widest = geoms.map((g) => Math.max(...ringsOf(g).map(extent)))
+      for (const w of widest) expect(w / widest[2], code).toBeGreaterThan(0.98)
+      // And the coarse rung is a real saving, not a rounding difference.
+      expect(countVertices(geoms[0]) * 2, code).toBeLessThan(countVertices(geoms[2]))
+    }
+  })
+
+  it('resolves a region at the rung it was asked for, and clamps the rest', () => {
+    // Same feature, same identity, more detail — the LOD picks the geometry
+    // and nothing else. Anything off the end of the ladder clamps rather than
+    // returning nothing: an unknown rung is still a request to draw.
+    const shapes = index.lods.map((lod) => regionShapes('GB', ['Scotland'], lod.id).matched[0])
+    expect(new Set(shapes.map((f) => f.id)).size).toBe(1)
+    for (let i = 1; i < shapes.length; i++)
+      expect(countVertices(shapes[i].geometry)).toBeGreaterThan(countVertices(shapes[i - 1].geometry))
+    expect(lodFor(99).id).toBe(index.lods.length - 1)
+    expect(lodFor(-4).id).toBe(0)
+    expect(lodFor('nonsense').id).toBe(0)
+    expect(countryShape('CL', 99)).toEqual(countryShape('CL', index.lods.length - 1))
+    // The default is the coarse rung: the cheapest thing to send, and what a
+    // client that has not said otherwise is drawing.
+    expect(countryShape('CL')).toEqual(countryShape('CL', 0))
+    expect(regionShapes('BR', ['Bahia']).matched[0].geometry).toEqual(
+      regionShapes('BR', ['Bahia'], 0).matched[0].geometry
+    )
+  })
+
+  it('holds together structurally in every file it wrote', { timeout: 120_000 }, () => {
     // Millions of coordinates, so the checks are plain conditions and only the
     // failures reach expect(): an assertion per vertex costs minutes.
     const faults = []
@@ -259,17 +574,19 @@ describe.skipIf(!built)('the built slices', () => {
           if (!(Math.abs(x) <= 180.001) || !(Math.abs(y) <= 90.001)) faults.push(`${where}: point ${x},${y}`)
       }
     }
-    for (const code of codesIn('admin0')) check(read(join(HERE, 'admin0', code + '.json')).geometry, code)
-    for (const code of codesIn('admin1'))
-      for (const f of read(join(HERE, 'admin1', code + '.json'))) {
-        if (!f.id || !f.parts?.length) faults.push(`${code}: ${f.name} has no identity`)
-        check(f.geometry, f.id)
-      }
-    for (const code of codesIn('merged'))
-      for (const [sig, f] of Object.entries(read(join(HERE, 'merged', code + '.json')))) {
-        if (signature([f]) !== sig) faults.push(`${code}: ${sig} is filed under the wrong signature`)
-        check(f.geometry, sig)
-      }
+    for (const lod of index.lods) {
+      for (const code of codesIn('admin0', lod.id)) check(sliceOf('admin0', code, lod.id).geometry, `${code} l${lod.id}`)
+      for (const code of codesIn('admin1', lod.id))
+        for (const f of sliceOf('admin1', code, lod.id)) {
+          if (!f.id || !f.parts?.length) faults.push(`${code}: ${f.name} has no identity`)
+          check(f.geometry, `${f.id} l${lod.id}`)
+        }
+      for (const code of codesIn('merged', lod.id))
+        for (const [sig, f] of Object.entries(sliceOf('merged', code, lod.id))) {
+          if (signature([f]) !== sig) faults.push(`${code}: ${sig} is filed under the wrong signature`)
+          check(f.geometry, `${sig} l${lod.id}`)
+        }
+    }
     expect(faults.slice(0, 20)).toEqual([])
   })
 
@@ -335,7 +652,7 @@ describe.skipIf(!built)('the built slices', () => {
     // whole-country fallback at least looks like what it is.
     const wrong = []
     for (const code of codesIn('admin1')) {
-      const list = read(join(HERE, 'admin1', code + '.json'))
+      const list = sliceOf('admin1', code)
       for (const f of list) {
         const got = matchFeatures(list, [f.name]).matched[0]
         if (!got) wrong.push(`${code} ${f.name}: nothing`)
@@ -346,14 +663,18 @@ describe.skipIf(!built)('the built slices', () => {
   })
 
   it('gives the Valencian Community all three of its provinces', () => {
-    // It used to answer with Castellón alone: every province carries
+    // It used to answer with Castellón alone: every province carried
     // "Comunidad Valenciana" among its own names, and the first one in the file
     // won. Near enough is the wrong answer here — one province of three, drawn
-    // confidently, is worse than the honest whole-country fallback.
-    const provinces = ['Castellón', 'Valencia', 'Alicante'].map((n) => regionShapes('ES', [n]).matched[0].id)
+    // confidently, is worse than the honest whole-country fallback. The finer
+    // source files Spain as its nineteen communities rather than its provinces,
+    // so the three province names now have to land on the community that holds
+    // them, and land on the same one.
+    const provinces = ['Castellón', 'Valencia', 'Alicante'].map((n) => regionShapes('ES', [n]).matched)
+    for (const m of provinces) expect(m).toHaveLength(1)
     const { matched } = regionShapes('ES', ['Comunidad Valenciana'])
     expect(matched).toHaveLength(1)
-    expect([...matched[0].parts].sort()).toEqual([...provinces].sort())
+    expect(new Set(provinces.map((m) => m[0].id))).toEqual(new Set([matched[0].id]))
 
     // The English exonym is in no Natural Earth field, so it matches nothing —
     // and nothing is what it must return. Resolving it to whichever province
@@ -395,13 +716,31 @@ describe.skipIf(!built)('the built slices', () => {
   })
 
   it('builds a territory Natural Earth files only as parishes', () => {
-    const parishes = read(join(HERE, 'admin1', 'BM.json')).filter((f) => !f.group)
-    const bermuda = countryShape('BM')
+    // Natural Earth has no country outline for Bermuda at all — only its nine
+    // parishes — so the country has to be made rather than read. Measured at
+    // the finest rung: Bermuda is 0.28° corner to corner, so at the coarse
+    // rungs it is deliberately drawn below its own size.
+    const fine = LODS[LODS.length - 1].id
+    const parishes = sliceOf('admin1', 'BM', fine).filter((f) => !f.group)
+    const bermuda = countryShape('BM', fine)
     expect(bermuda.name).toBe('Bermuda')
     expect(index.countries.BM.synthesized).toBe(true)
-    const sum = parishes.reduce((n, f) => n + area(f.geometry), 0)
-    expect(area(bermuda.geometry)).toBeGreaterThan(sum * 0.95)
-    expect(area(bermuda.geometry)).toBeLessThan(sum * 1.05)
+    // Same ground as the parishes — the two sources trace the same reefs
+    // differently, so this is a sanity band, not an identity.
+    const [x0, y0, x1, y1] = bbox(parishes.flatMap((f) => ringsOf(f.geometry).flat()))
+    const [a0, b0, a1, b1] = bbox(ringsOf(bermuda.geometry).flat())
+    for (const [got, want] of [
+      [a0, x0],
+      [b0, y0],
+      [a1, x1],
+      [b1, y1],
+    ])
+      expect(Math.abs(got - want)).toBeLessThan(0.02)
+    // And drawn from the finer source, which is the whole reason it is taken
+    // over the parishes it replaces.
+    expect(countVertices(bermuda.geometry)).toBeGreaterThan(
+      parishes.reduce((n, f) => n + countVertices(f.geometry), 0)
+    )
   })
 
   it('says nothing rather than something wrong about a country it has no file for', () => {
@@ -414,27 +753,44 @@ describe.skipIf(!built)('the built slices', () => {
 })
 
 describe.skipIf(!existsSync(SRC))('against the Natural Earth source', () => {
-  it('never moves a real coastline further than its own tolerance', () => {
-    // The claim the whole module rests on, measured on the shapes it was
-    // actually built from rather than on a curve chosen to be easy.
+  const sample = () => {
     const features = read(SRC).features.filter((f) => {
       const n = ringsOf(f.geometry).reduce((m, r) => m + r.length, 0)
       return n > 500 && n < 8000
     })
     expect(features.length).toBeGreaterThan(20)
-    for (const f of features.slice(0, 25)) {
-      const tol = featureTol(f.geometry)
-      const slack = Math.SQRT2 * 10 ** -precisionFor(tol) // coordinates are rounded after simplifying
-      for (const r of ringsOf(f.geometry)) {
-        const s = simplifyRing(r, tol)
-        if (s.length < 4) continue // too small to keep: becomes its own bounding box
-        expect(maxDeviation(r, s), f.properties.NAME).toBeLessThanOrEqual(tol)
+    return features.slice(0, 25)
+  }
+
+  it('never moves a real coastline further than the rung it was drawn for', { timeout: 60_000 }, () => {
+    // The claim the whole module rests on, measured at every rung and on the
+    // shapes it was actually built from rather than on a curve chosen to be
+    // easy. A ring the rung dropped is not measured — it was not drawn.
+    for (const f of sample())
+      for (const lod of LODS) {
+        const slack = Math.SQRT2 * 10 ** -precisionFor(lod.tol) // coordinates are rounded after simplifying
+        for (const r of ringsOf(f.geometry)) {
+          if (extent(r) < DROP_TOLS * lod.tol) continue
+          expect(maxDeviation(r, ring(r, lod.tol)), `${f.properties.NAME} LOD ${lod.id}`).toBeLessThanOrEqual(
+            lod.tol + slack
+          )
+        }
+        const out = simplifyAt(f.geometry, lod.tol)
+        expect(signedArea(ringsOf(out)[0])).not.toBe(0)
       }
-      const out = simplify(f.geometry)
-      const orig = ringsOf(f.geometry)
-      const flat = ringsOf(out).flat()
-      expect(maxDeviation(orig.flat().filter((_, i) => i % 7 === 0), flat)).toBeLessThan(tol * 3 + slack)
-      expect(signedArea(ringsOf(out)[0])).not.toBe(0)
+  })
+
+  it('draws the finest rung as the source drew it', { timeout: 60_000 }, () => {
+    // LOD 2 is what a zoomed-in map gets, and it has to be the coastline rather
+    // than an impression of it: every vertex within a third of a metre of the
+    // source outline, and the area it encloses within a tenth of a percent.
+    const fine = LODS[LODS.length - 1]
+    for (const f of sample()) {
+      const out = simplifyAt(f.geometry, fine.tol)
+      const kept = ringsOf(f.geometry).filter((r) => extent(r) >= DROP_TOLS * fine.tol)
+      expect(maxDeviation(kept.flat(), ringsOf(out).flat()), f.properties.NAME).toBeLessThan(fine.tol * 2)
+      const raw = { type: f.geometry.type, coordinates: f.geometry.coordinates }
+      if (area(raw) > 1) expect(area(out) / area(raw), f.properties.NAME).toBeCloseTo(1, 3)
     }
   })
 })

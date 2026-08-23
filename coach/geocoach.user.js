@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.8.1
+// @version      2.12.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -99,7 +99,11 @@
     }).catch(viaGM)
   }
 
-  tlog('body 2.8.1 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
+  // Kept equal to @version above by a test — the log line is how a machine we
+  // are not sitting at says which body it is actually running, and a stale
+  // literal here sends the reader looking for a bug that was fixed hours ago.
+  const BODY_VERSION = '2.12.0'
+  tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
    * server still gets every round so pano dossiers keep building at home.
@@ -184,7 +188,20 @@
   // call in this file. The Mac being asleep is a normal condition rather than a
   // fault: every failure below is silent and total — no overlay, no exception,
   // card untouched — and leaves a tlog line as the only trace.
+  //
+  // Three things separate "correct" from "feels instant", and each is a section
+  // of its own below:
+  //   · the coarse outline survives page loads in localStorage, and the store is
+  //     filled at round start rather than at card time, so the shape is in hand
+  //     on the frame the card appears rather than a LAN trip later;
+  //   · GeoGuessr's own result fitBounds is held for a beat and widened in
+  //     place, so the camera makes one move instead of zooming in and back out;
+  //   · detail rides the zoom, because a coastline nobody can see is only a
+  //     download.
   const SCOPE_GEO_URL = LOCAL + '/api/scope-geo'
+  // Which area a round is about, asked by pano id at round start — the same
+  // machine, because it is the one that holds the catalogs as well as the shapes.
+  const SCOPE_FOR_PANO_URL = LOCAL + '/api/scope-for-pano'
   // The card's own chrome, so the shape reads as GeoCoach's annotation and not
   // as something GeoGuessr drew: the panel violet for the crisp outline and the
   // tint, its muted violet for the soft glow that sits under the outline.
@@ -194,7 +211,15 @@
   // through it — the outline is the statement, the fill only says "inside".
   const SCOPE_FILL_ALPHA = 0.14
   // Roughly where a per-frame restyle stops being free on a mid-range laptop.
-  // Well above a province and well below a big country's full coastline.
+  // Since the LOD split this guard is about *first paints* and nothing else,
+  // which is exactly what it should be. A first paint is always lod 0 — a few
+  // thousand points for a whole country — so essentially everything fades,
+  // which is what the user wants. The finer levels arrive as silent swaps
+  // styled once rather than frame by frame, so their size never meets this
+  // number at all. What it still catches is the case that matters most: a
+  // server that predates the ladder and answers a lod-0 request with the full
+  // coastline anyway. That is precisely when a frame-by-frame fade would
+  // stutter, and a shape that simply appears beats one that judders in.
   const FADE_POINT_LIMIT = 8000
 
   /** Total coordinate pairs in a FeatureCollection — the only cost measure
@@ -206,27 +231,383 @@
       if (typeof c[0] === 'number') return void n++
       for (const x of c) walk(x)
     }
-    for (const f of geojson.features || []) walk(f && f.geometry && f.geometry.coordinates)
+    for (const f of (geojson && geojson.features) || []) walk(f && f.geometry && f.geometry.coordinates)
     return n
   }
 
+  /** The server's ladder, mirrored: z ≤ 5 is a continent, where a generalised
+   * outline is all the pixels could show anyway; 6–8 is a country filling the
+   * frame; 9+ is close enough that a smoothed coastline reads as simply wrong.
+   * Coarser levels are dramatically smaller, so guessing low costs nothing and
+   * guessing high costs the whole point of the ladder. */
+  function lodForZoom(z) {
+    if (typeof z !== 'number' || !isFinite(z)) return 0
+    if (z <= 5) return 0
+    if (z <= 8) return 1
+    return 2
+  }
+
+  /** The rung that is drawn as a window on the shape rather than the shape.
+   * It has to be: the finest rung of Canada is nine hundred thousand points,
+   * and the reason the overlay used to refuse that detail to precisely the
+   * countries that needed it most. Cut to the visible map it is two thousand,
+   * whatever the country. */
+  const FINE_LOD = 2
+
+  /** Stroke weights in *pixels*, and a pixel does not mean the same thing at
+   * every zoom. A 7px glow traces a national border handsomely at z9; at z4 it
+   * is wider than the water between the islands of southern Chile, so an
+   * archipelago renders as one dark smear and the shape it was meant to teach
+   * is lost. The weights ride the zoom instead: a hairline when the country is
+   * a thumbnail, full weight once a border is a real edge on screen.
+   * Quantised to ¼px so spinning the wheel inside one band restyles nothing. */
+  function scopeWeights(z) {
+    const t = Math.max(0, Math.min(1, ((typeof z === 'number' && isFinite(z) ? z : 4) - 2) / 10))
+    const q = (a, b) => Math.round((a + (b - a) * t) * 4) / 4
+    return { glow: q(2.5, 8), main: q(1, 2.4) }
+  }
+
+  // --------------------------------------------------------------- boxes
+  // Everything the camera does is decided on plain {n,s,e,w} lat/lng boxes:
+  // the shape's, the frame GeoGuessr asked for, and the union of the two.
+
+  /** A plain box only means anything when it does not wrap. A shape or a
+   * viewport crossing the antimeridian (Russia, Fiji, a map spun right round)
+   * has a bbox that claims most of the planet, and framing on it would be
+   * worse than not framing at all. */
+  const boxIsSane = (b) =>
+    !!b &&
+    isFinite(b.n) &&
+    isFinite(b.s) &&
+    isFinite(b.e) &&
+    isFinite(b.w) &&
+    b.n > b.s &&
+    b.e > b.w &&
+    b.e - b.w < 180
+
+  /** The shape's bounding box straight off the coordinates: cheaper than
+   * walking the rendered features, and available before anything is drawn. */
+  function scopeBounds(geojson) {
+    let n = -Infinity
+    let s = Infinity
+    let e = -Infinity
+    let w = Infinity
+    const walk = (c) => {
+      if (!Array.isArray(c)) return
+      if (typeof c[0] === 'number' && typeof c[1] === 'number') {
+        if (c[1] > n) n = c[1]
+        if (c[1] < s) s = c[1]
+        if (c[0] > e) e = c[0]
+        if (c[0] < w) w = c[0]
+        return
+      }
+      for (const x of c) walk(x)
+    }
+    for (const f of (geojson && geojson.features) || []) walk(f && f.geometry && f.geometry.coordinates)
+    return n > s && e > w ? { n, s, e, w } : null
+  }
+
+  /** The scope's box: the server sends one alongside the geometry, and a server
+   * that predates the ladder does not — but the coordinates always carry it. */
+  function boxOf(res) {
+    // `frame` is the main mass and `bbox` the true extent: a Chile round should
+    // end up framed on Chile, not on the 43° of Pacific between the mainland
+    // and Easter Island. Either beats walking the coordinates.
+    for (const b of [res && res.frame, res && res.bbox])
+      if (b && isFinite(b.n) && isFinite(b.s) && isFinite(b.e) && isFinite(b.w) && b.n > b.s && b.e > b.w)
+        return { n: b.n, s: b.s, e: b.e, w: b.w }
+    return res ? scopeBounds(res.geojson) : null
+  }
+
+  /** Whatever Google handed us for a fitBounds call, as a box. It accepts both
+   * a LatLngBounds and a bare literal, so both have to come back out. */
+  function boxOfBounds(b) {
+    if (!b || typeof b !== 'object') return null
+    try {
+      if (typeof b.getSouthWest === 'function' && typeof b.getNorthEast === 'function') {
+        const sw = b.getSouthWest()
+        const ne = b.getNorthEast()
+        return { n: ne.lat(), s: sw.lat(), e: ne.lng(), w: sw.lng() }
+      }
+      if (isFinite(b.north) && isFinite(b.south) && isFinite(b.east) && isFinite(b.west))
+        return { n: b.north, s: b.south, e: b.east, w: b.west }
+    } catch {}
+    return null
+  }
+
+  const boxUnion = (a, b) => ({
+    n: Math.max(a.n, b.n),
+    s: Math.min(a.s, b.s),
+    e: Math.max(a.e, b.e),
+    w: Math.min(a.w, b.w),
+  })
+
+  const boxCenter = (b) => ({ lat: (b.n + b.s) / 2, lng: (b.e + b.w) / 2 })
+
+  const boxCovers = (outer, inner) =>
+    !!outer && !!inner && outer.n >= inner.n && outer.s <= inner.s && outer.e >= inner.e && outer.w <= inner.w
+
+  /** The wire form the server parses: west,south,east,north, at five decimals.
+   * Rounded on this side too, so a map settling through sub-pixel jitter asks
+   * for the same window twice and the second ask is a cache hit. */
+  const boxParam = (b) => [b.w, b.s, b.e, b.n].map((v) => Math.round(v * 1e5) / 1e5).join(',')
+
+  /** What the map is showing, or null when it is showing something this code
+   * refuses to reason about — an unsettled map, or a view across the
+   * antimeridian, where Google reports east *west* of west and every
+   * containment test below would quietly invert. Null means "no window", which
+   * means the whole shape, which is always correct and merely larger. */
+  function viewBox(map) {
+    let b = null
+    try {
+      b = boxOfBounds(map.getBounds())
+    } catch {}
+    return b && b.n > b.s && b.e > b.w ? b : null
+  }
+
+  /** The window actually requested: the view grown by half its own size on
+   * every side, so a small pan or a zoom step lands inside geometry already in
+   * hand and only real travel goes back to the server. Refused for a view wide
+   * enough that cutting it saves nothing — at that width the whole shape is
+   * the cheaper answer as well as the simpler one. */
+  const SCOPE_CLIP_PAD = 0.5
+  function padBox(view) {
+    if (!view) return null
+    const dy = (view.n - view.s) * SCOPE_CLIP_PAD
+    const dx = (view.e - view.w) * SCOPE_CLIP_PAD
+    const b = {
+      n: Math.min(85, view.n + dy),
+      s: Math.max(-85, view.s - dy),
+      e: Math.min(180, view.e + dx),
+      w: Math.max(-180, view.w - dx),
+    }
+    return b.n > b.s && b.e > b.w && b.e - b.w < 120 && b.n - b.s < 60 ? b : null
+  }
+
+  /** How much of the shape's box a given frame actually shows, 0..1. An
+   * unmeasurable pair answers 1 — "already visible" — because the only thing
+   * this number is used for is deciding to move the camera, and a camera move
+   * we cannot justify is one we should not make. */
+  function visibleFraction(box, view) {
+    if (!boxIsSane(box) || !boxIsSane(view)) return 1
+    const area = (box.n - box.s) * (box.e - box.w)
+    if (!(area > 0)) return 1
+    const lat = Math.min(box.n, view.n) - Math.max(box.s, view.s)
+    const lng = Math.min(box.e, view.e) - Math.max(box.w, view.w)
+    return lat > 0 && lng > 0 ? (lat * lng) / area : 0
+  }
+
+  // The old overlay corrected the framing with a second fitBounds after
+  // GeoGuessr's own, which the user saw as a jerk — so it only fired when the
+  // shape was almost entirely off-screen (0.35 visible). Widening is now folded
+  // into GeoGuessr's single camera move and costs nothing at all to look at, so
+  // that bar drops to "any meaningful part of the region is cut off": the user
+  // likes ending up with the whole region in frame, and now they can have it
+  // for free. The late path is the one that still costs a visible 600ms tween,
+  // so it keeps a stricter bar and only fires when the shape is half missing.
+  const WIDEN_FREE = 0.8
+  const WIDEN_LATE = 0.45
+
+  const shouldWiden = (box, view, threshold) =>
+    boxIsSane(box) && boxIsSane(view) && visibleFraction(box, view) < threshold
+
+  /** Web Mercator's y, normalised 0 (north pole) to 1 (south). */
+  function mercN(lat) {
+    const s = Math.sin((Math.max(-85.05, Math.min(85.05, lat)) * Math.PI) / 180)
+    return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)
+  }
+
+  /** The zoom Google would choose for this box in a div this size. fitBounds
+   * works it out internally and will not say, and the number is needed to tween
+   * toward: panToBounds pans but never zooms, and fitBounds snaps. 256 is the
+   * Maps tile size, i.e. the width of the whole world at zoom 0. */
+  function zoomForBox(box, width, height, padding) {
+    if (!boxIsSane(box) || !(width > 0) || !(height > 0)) return null
+    const pad = padding || 0
+    const w = Math.max(32, width - pad * 2)
+    const h = Math.max(32, height - pad * 2)
+    const fx = (box.e - box.w) / 360
+    const fy = Math.abs(mercN(box.s) - mercN(box.n))
+    const zx = fx > 0 ? Math.log2(w / (256 * fx)) : 22
+    const zy = fy > 0 ? Math.log2(h / (256 * fy)) : 22
+    return Math.max(0, Math.min(22, Math.min(zx, zy)))
+  }
+
+  /** ease-in-out cubic: leaves and arrives at rest, which is the whole
+   * difference between a camera move and a jump. */
+  function easeInOut(t) {
+    const k = Math.max(0, Math.min(1, t))
+    return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2
+  }
+
+  /** Longitudes interpolate the short way round, or a tween between Alaska and
+   * Kamchatka would sweep the camera across the entire Atlantic. */
+  function lerpLng(a, b, k) {
+    return a + (((b - a + 540) % 360) - 180) * k
+  }
+
+  // ------------------------------------------------------------- storage
+  // The in-memory cache dies with the tab, and a cold cache is exactly the case
+  // the user notices: the first result after a page load waits on the LAN, and
+  // if the Mac is slow to answer the overlay lands late or never. The coarse
+  // level is small enough to keep on disk, so it does — LRU, budgeted, and only
+  // ever lod 0. The finer levels are large and wanted rarely; a session's worth
+  // of those in memory is plenty.
+  //
+  // GM_setValue is not granted to this script (the installed loader only asks
+  // for GM_xmlhttpRequest and unsafeWindow, and the body must never assume a
+  // newer loader), so localStorage it is — the same store the card's position
+  // and size already live in.
+  const SCOPE_STORE_PREFIX = 'gc-scope1:'
+  const SCOPE_STORE_LRU = 'gc-scope1-lru'
+  const SCOPE_STORE_MAX = 2.5 * 1024 * 1024
+  // No single shape may own the budget: past this it is cheaper to re-fetch it
+  // than to evict everything else for it.
+  const SCOPE_STORE_ONE_MAX = 900 * 1024
+  // Boundaries only change when the Mac's Natural Earth slices are rebuilt, and
+  // nothing in the browser would ever hear about it. A week is short enough
+  // that a rebuild reaches the page by itself and long enough that the store is
+  // warm for every session that matters.
+  const SCOPE_STORE_TTL = 7 * 24 * 60 * 60 * 1000
+
+  function scopeStoreLru() {
+    try {
+      const a = JSON.parse(localStorage.getItem(SCOPE_STORE_LRU))
+      return Array.isArray(a) ? a.filter((e) => e && typeof e.k === 'string' && typeof e.n === 'number') : []
+    } catch {
+      return []
+    }
+  }
+  function scopeStoreSaveLru(list) {
+    try {
+      localStorage.setItem(SCOPE_STORE_LRU, JSON.stringify(list))
+    } catch {}
+  }
+  function scopeStoreDrop(k) {
+    try {
+      localStorage.removeItem(SCOPE_STORE_PREFIX + k)
+    } catch {}
+  }
+
+  /** The stored payload for a key, or null. Expired, corrupt and absent are all
+   * the same answer — go and ask the server — and all three tidy up after
+   * themselves so a bad entry cannot be read twice. */
+  function scopeStoreGet(k) {
+    let raw = null
+    try {
+      raw = localStorage.getItem(SCOPE_STORE_PREFIX + k)
+    } catch {
+      return null
+    }
+    if (!raw) return null
+    let rec = null
+    try {
+      rec = JSON.parse(raw)
+    } catch {}
+    if (!rec || !rec.res || typeof rec.t !== 'number' || Date.now() - rec.t > SCOPE_STORE_TTL) {
+      scopeStoreDrop(k)
+      scopeStoreSaveLru(scopeStoreLru().filter((e) => e.k !== k))
+      return null
+    }
+    const list = scopeStoreLru().filter((e) => e.k !== k)
+    list.push({ k, n: raw.length }) // newest last: the eviction end is the front
+    scopeStoreSaveLru(list)
+    return rec.res
+  }
+
+  /** `text` is the server's own response body, embedded rather than re-
+   * serialised: a country outline is a few hundred KB and a parse-then-
+   * stringify round trip of that is real time on the paint path. */
+  function scopeStorePut(k, text) {
+    if (typeof text !== 'string' || !text || text.length > SCOPE_STORE_ONE_MAX) return false
+    const raw = '{"t":' + Date.now() + ',"res":' + text + '}'
+    const list = scopeStoreLru().filter((e) => e.k !== k)
+    list.push({ k, n: raw.length })
+    let total = 0
+    for (const e of list) total += e.n
+    // Oldest first, and never the entry being written: a budget that one shape
+    // alone exceeds is a reason to give up on it, not to empty the store.
+    while (list.length > 1 && total > SCOPE_STORE_MAX) {
+      const old = list.shift()
+      total -= old.n
+      scopeStoreDrop(old.k)
+    }
+    for (;;) {
+      try {
+        localStorage.setItem(SCOPE_STORE_PREFIX + k, raw)
+        scopeStoreSaveLru(list)
+        return true
+      } catch {
+        // Quota, and the origin is shared with GeoGuessr's own storage, so the
+        // pressure is as likely to be theirs as ours. Evict our oldest and try
+        // again; when there is nothing left of ours to give, abandon the write
+        // rather than throwing — a missing cache entry costs one LAN request.
+        if (list.length > 1) {
+          scopeStoreDrop(list.shift().k)
+          continue
+        }
+        scopeStoreDrop(k)
+        scopeStoreSaveLru([])
+        return false
+      }
+    }
+  }
+
+  // --------------------------------------------------------------- fetch
   // A meta repeats far more often than it varies (that is the whole point of
-  // the deck), and a country outline can run to a few hundred KB, so the last
-  // few answers stay in memory. Only successes are cached: a server that was
-  // asleep a minute ago may well be awake now.
+  // the deck), so answers stay in memory for the session, keyed by level as
+  // well as by area. Only successes are cached: a server that was asleep a
+  // minute ago may well be awake now.
   const scopeGeoCache = new Map()
-  const SCOPE_CACHE_MAX = 6
+  // Windows made this a busier cache than it was: one whole shape per rung
+  // plus a handful of windows as the user moves around. All of them small
+  // except the whole shapes, and those are the ones worth never evicting.
+  const SCOPE_CACHE_MAX = 24
 
   const scopeKey = (scope) =>
     scope.country + '|' + (Array.isArray(scope.regions) ? scope.regions.join('|') : '')
 
-  function fetchScopeGeo(scope) {
+  const scopeCacheKey = (key, lod, win) => key + '|' + lod + (win ? '|' + win : '')
+
+  function rememberScopeGeo(ck, res) {
+    scopeGeoCache.set(ck, res)
+    if (scopeGeoCache.size > SCOPE_CACHE_MAX) scopeGeoCache.delete(scopeGeoCache.keys().next().value)
+  }
+
+  /** Everything that can be had without touching the network. Memory first,
+   * then — for the whole coarse shape only — the disk store. A window is never
+   * stored: it belongs to one camera position and would be a waste of the
+   * budget the shapes worth keeping are competing for. */
+  function cachedScopeGeo(key, lod, win) {
+    const ck = scopeCacheKey(key, lod, win)
+    const hit = scopeGeoCache.get(ck)
+    if (hit) {
+      // Touched, so the eviction order is least-recently-*used* and a whole
+      // shape still in play cannot be pushed out by the windows it feeds.
+      scopeGeoCache.delete(ck)
+      scopeGeoCache.set(ck, hit)
+      return hit
+    }
+    if (lod !== 0 || win) return null
+    const stored = scopeStoreGet(ck)
+    if (stored) rememberScopeGeo(ck, stored)
+    return stored || null
+  }
+
+  function fetchScopeGeo(scope, lod, win) {
+    const level = lod || 0
     const key = scopeKey(scope)
-    const hit = scopeGeoCache.get(key)
+    const box = win ? boxParam(win) : ''
+    const ck = scopeCacheKey(key, level, box)
+    const hit = cachedScopeGeo(key, level, box)
     if (hit) return Promise.resolve(hit)
     let url = SCOPE_GEO_URL + '?country=' + encodeURIComponent(scope.country)
     if (Array.isArray(scope.regions) && scope.regions.length)
       url += '&regions=' + encodeURIComponent(scope.regions.join('|'))
+    // Always explicit, including the level the server would default to: the
+    // request URL is what shows up in a log when detail looks wrong.
+    url += '&lod=' + level
+    if (box) url += '&box=' + box
     return new Promise((resolve, reject) => {
       const parsed = (text) => {
         let j = null
@@ -237,8 +618,10 @@
         // only thing this code is allowed to do is draw a real shape.
         if (!j || !j.ok || !j.geojson || !Array.isArray(j.geojson.features) || !j.geojson.features.length)
           return reject(new Error('no geometry'))
-        scopeGeoCache.set(key, j)
-        if (scopeGeoCache.size > SCOPE_CACHE_MAX) scopeGeoCache.delete(scopeGeoCache.keys().next().value)
+        rememberScopeGeo(ck, j)
+        // Off the paint path deliberately: cheap as the write is, nothing
+        // waits on it and the very next thing that happens is a draw.
+        if (level === 0 && !box) setTimeout(() => scopeStorePut(ck, text), 0)
         resolve(j)
       }
       if (typeof GM_xmlhttpRequest === 'function') {
@@ -260,6 +643,55 @@
     })
   }
 
+  /** Fetches the round's shape while the user is still guessing.
+   *
+   * The store is what makes the overlay feel instant, but it can only ever help
+   * the *second* time a meta comes round: on a first encounter the card waits
+   * on a LAN trip that costs about a second — nearly all of it GM_xmlhttpRequest
+   * overhead rather than the server, which answers in under a millisecond — and
+   * the camera moves twice, once for GeoGuessr's framing and again when the
+   * shape finally turns up. A guess takes far longer than a second, so asking at
+   * round start turns every first encounter into a store hit.
+   *
+   * The pano id is all the client has that early — the card, and with it the
+   * scope, does not exist yet — so the server resolves it to the same scope the
+   * card will carry. Everything here is best-effort: a sleeping Mac, a pano from
+   * a map that was never indexed, a country with no boundary on file all end the
+   * same way, with nothing warmed and nothing said. */
+  function warmScopeGeo(panoId) {
+    // Called once per round the moment the pano is served, which makes it the
+    // one place that reliably knows a new round has begun — so last round's
+    // answer is dropped here, before anything can mistake it for this one's.
+    scopeWarm = null
+    if (!panoId || typeof GM_xmlhttpRequest !== 'function') return
+    const t0 = Date.now()
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: SCOPE_FOR_PANO_URL + '?pano=' + encodeURIComponent(panoId),
+      timeout: 8000,
+      onload: (r) => {
+        let scope = null
+        try {
+          const j = JSON.parse(r.responseText)
+          if (r.status === 200 && j && j.ok && j.scope && typeof j.scope.country === 'string') scope = j.scope
+        } catch {}
+        if (!scope) return
+        scopeWarm = scope
+        const key = scopeKey(scope)
+        // Already in hand from an earlier round: the warm has done its job by
+        // finding nothing left to do, and a request here would be pure waste.
+        if (cachedScopeGeo(key, 0)) return
+        fetchScopeGeo(scope, 0).then(
+          () => tlog('scope: ' + key + ' warmed ahead of the round (' + (Date.now() - t0) + 'ms)'),
+          () => {},
+        )
+      },
+      onerror: () => {},
+      ontimeout: () => {},
+    })
+  }
+
+  // ----------------------------------------------------------- the maps
   /** Arms the constructor wrap that feeds `__geocoachMaps`. The loader carries
    * the same hook and gets there first when it is current, but the body cannot
    * assume that: a loader is installed once and only updates when Tampermonkey
@@ -272,6 +704,29 @@
   function ensureMapCapture() {
     try {
       const buf = W.__geocoachMaps || (W.__geocoachMaps = [])
+      // Every map that reaches the buffer gets its camera armed, and the buffer
+      // is where that hook has to live. When the installed loader is current it
+      // is *its* proxy the page constructs through, not ours, so a construct
+      // trap here would never see the result map — but the loader still pushes
+      // the instance into this array, so shadowing the array's own `push` sees
+      // every map either wrapper builds. Non-enumerable, so nothing that walks
+      // the buffer notices.
+      if (!buf.__geocoachArmed) {
+        const push = Array.prototype.push
+        try {
+          Object.defineProperty(buf, '__geocoachArmed', { value: true, configurable: true })
+          Object.defineProperty(buf, 'push', {
+            configurable: true,
+            writable: true,
+            value: function () {
+              for (const m of arguments) armMapCamera(m)
+              return push.apply(this, arguments)
+            },
+          })
+        } catch {}
+      }
+      // Maps built before this ran (a body that loaded late) are armed here.
+      for (const m of buf) armMapCamera(m)
       // The loader's own registry, shared: a constructor it already wrapped
       // must come back as the same proxy rather than be wrapped a second time,
       // or a hot-reloaded body would buffer every map once per layer.
@@ -382,6 +837,37 @@
     } catch {}
   }
 
+  // A collapsed or thumbnail-sized map is never the result map, and drawing a
+  // country outline into one would be illegible anyway.
+  const RESULT_MIN_W = 240
+  const RESULT_MIN_H = 160
+
+  function mapRect(m) {
+    let div = null
+    try {
+      div = m && typeof m.getDiv === 'function' ? m.getDiv() : null
+    } catch {}
+    if (!div || !div.isConnected) return null
+    try {
+      return div.getBoundingClientRect()
+    } catch {
+      return null
+    }
+  }
+
+  const isResultSized = (m) => {
+    const r = mapRect(m)
+    return !!r && r.width >= RESULT_MIN_W && r.height >= RESULT_MIN_H
+  }
+
+  function mapZoom(m) {
+    try {
+      const z = m && typeof m.getZoom === 'function' ? m.getZoom() : null
+      if (typeof z === 'number' && isFinite(z)) return z
+    } catch {}
+    return 4 // a country-sized view: the middle of the weight ramp, lod 0
+  }
+
   /** Several maps exist at once — the guess mini-map, the result map, whatever
    * the menu behind it rendered — and the one worth drawing on is simply the
    * biggest one actually on screen. Decided at draw time and never cached: the
@@ -392,18 +878,8 @@
     let best = null
     let bestArea = 0
     for (const m of buf) {
-      let div = null
-      try {
-        div = m && typeof m.getDiv === 'function' ? m.getDiv() : null
-      } catch {}
-      if (!div || !div.isConnected) continue
-      let r = null
-      try {
-        r = div.getBoundingClientRect()
-      } catch {}
-      // A collapsed or thumbnail-sized map is never the result map, and
-      // drawing a country outline into one would be illegible anyway.
-      if (!r || r.width < 240 || r.height < 160) continue
+      const r = mapRect(m)
+      if (!r || r.width < RESULT_MIN_W || r.height < RESULT_MIN_H) continue
       const area = r.width * r.height
       if (area > bestArea) {
         bestArea = area
@@ -413,74 +889,311 @@
     return best
   }
 
-  /** The shape's bounding box straight off the coordinates: cheaper than
-   * walking the rendered features, and available before anything is drawn. */
-  function scopeBounds(geojson) {
-    let n = -Infinity
-    let s = Infinity
-    let e = -Infinity
-    let w = Infinity
-    const walk = (c) => {
-      if (!Array.isArray(c)) return
-      if (typeof c[0] === 'number' && typeof c[1] === 'number') {
-        if (c[1] > n) n = c[1]
-        if (c[1] < s) s = c[1]
-        if (c[0] > e) e = c[0]
-        if (c[0] < w) w = c[0]
+  /** What the buffer looked like when something went wrong. "No overlay this
+   * round" has three quite different causes — nothing captured, nothing on
+   * screen, nothing big enough — and this line is what tells them apart
+   * afterwards, from a log shipped off a machine we were not sitting at. */
+  function describeMaps() {
+    const buf = W.__geocoachMaps
+    if (!Array.isArray(buf)) return 'no capture buffer'
+    if (!buf.length) return 'buffer empty'
+    return buf
+      .map((m) => {
+        const r = mapRect(m)
+        return r ? Math.round(r.width) + '×' + Math.round(r.height) : 'detached'
+      })
+      .join(' ')
+  }
+
+  // -------------------------------------------------------------- camera
+  // The sequence this replaces: GeoGuessr fitBounds to frame guess+answer, the
+  // map zooms in, our geometry lands a second later, a second fitBounds jerks
+  // it back out. Two camera moves in opposite directions, which reads as a
+  // glitch however good each one is on its own.
+  //
+  // So the widen happens *inside* GeoGuessr's own move. Their fitBounds is held
+  // for a few hundred milliseconds — invisible, where a double zoom is not —
+  // and released once over the union of what they asked for and the region. One
+  // move, straight to the final framing. The hold is armed by the guess POST
+  // (see onRequest), which is the earliest moment anything knows a result is
+  // coming, and expires by itself, so the worst a bug here can do is delay
+  // GeoGuessr's framing by SCOPE_HOLD_MS.
+  const SCOPE_HOLD_MS = 350
+  // From guess POST to result framing is well under a second; the window only
+  // has to be generous enough to cover a slow render and mean enough that a map
+  // resize twenty seconds later is not mistaken for one.
+  const SCOPE_ARM_MS = 12000
+  const SCOPE_TWEEN_MS = 600
+
+  let scopeHoldArmed = 0 // when the guess POST went out, 0 once spent
+  let scopeHeld = null // a fitBounds call being sat on
+  let scopeBox = null // the region's box, once known, for this round
+  let scopeCamTouched = false // the user has taken the map; we never move it again
+  let scopeCamSettled = false // our one framing decision has been made
+  let scopeCamRound = null // which round the three flags above belong to
+  let scopeTween = null
+  // The scope the server resolved for the round being played, if the warm got
+  // there in time. Cleared when a new round is served, read by the guess POST.
+  let scopeWarm = null
+
+  /** Called the instant the guess POST leaves the page — before GeoGuessr has
+   * its answer, let alone its result map — because that is the last moment at
+   * which the hold can be armed ahead of the framing it means to catch. */
+  function armScopeHold() {
+    releaseHeld() // a hold left over from a previous round must never linger
+    cancelScopeTween()
+    scopeHoldArmed = Date.now()
+    scopeBox = null
+    scopeCamTouched = false
+    scopeCamSettled = false
+    scopeCamRound = 'armed'
+    // The warm resolved this round's region while the user was still guessing,
+    // so its extent is in hand a good half-second before the card that names
+    // it. Handing it over here is what lets the hold below end the moment it
+    // begins: GeoGuessr's own fitBounds goes out already widened, and the
+    // region is framed by the same move that frames the guess. Without it the
+    // hold can only wait out its few hundred milliseconds and give up, and the
+    // framing has to be corrected afterwards — the visible jump.
+    try {
+      const warm = scopeWarm && cachedScopeGeo(scopeKey(scopeWarm), 0)
+      if (warm) offerScopeBox(boxOf(warm))
+    } catch {}
+  }
+
+  /** Adopts the round's camera state. If armScopeHold already ran for this
+   * round the flags are its, untouched — the user may have grabbed the map in
+   * the meantime and that decision outranks everything here. */
+  function startRoundCamera(roundKey) {
+    if (scopeCamRound === 'armed') {
+      scopeCamRound = roundKey
+      return
+    }
+    if (scopeCamRound === roundKey) return
+    scopeCamRound = roundKey
+    scopeBox = null
+    scopeCamTouched = false
+    scopeCamSettled = false
+  }
+
+  function cancelScopeTween() {
+    if (!scopeTween) return
+    scopeTween.dead = true
+    scopeTween = null
+  }
+
+  /** The region's extent, from wherever it came from — the disk store on the
+   * frame the card appeared, or the LAN a second later. A hold waiting on it
+   * ends here. */
+  function offerScopeBox(box) {
+    if (!boxIsSane(box)) return
+    scopeBox = box
+    if (scopeHeld) releaseHeld()
+  }
+
+  const holdWanted = (map) =>
+    !!scopeHoldArmed &&
+    Date.now() - scopeHoldArmed < SCOPE_ARM_MS &&
+    !scopeCamTouched &&
+    !scopeHeld &&
+    isResultSized(map)
+
+  /** Lets the held fitBounds through, widened to hold the region if the region
+   * would otherwise be cut off. Called by the geometry arriving, by the hold
+   * timing out, and by a new round arming over the top of it — whichever comes
+   * first, and never twice. */
+  function releaseHeld() {
+    const held = scopeHeld
+    if (!held) return
+    scopeHeld = null
+    try {
+      clearTimeout(held.timer)
+    } catch {}
+    const args = held.args
+    try {
+      const asked = boxOfBounds(args[0])
+      if (asked && scopeBox && !scopeCamTouched) {
+        if (shouldWiden(scopeBox, asked, WIDEN_FREE)) {
+          const b = latLngBounds(boxUnion(asked, scopeBox))
+          if (b) {
+            args[0] = b
+            scopeCamSettled = true
+            tlog('scope: region folded into GeoGuessr’s own camera move after ' + (Date.now() - held.t) + 'ms')
+          }
+        } else {
+          scopeCamSettled = true // already in frame — this framing is the final one
+        }
+      }
+    } catch {}
+    try {
+      held.orig.apply(held.map, args)
+    } catch {}
+  }
+
+  function latLngBounds(box) {
+    const g = W.google && W.google.maps
+    if (!g || typeof g.LatLngBounds !== 'function') return null
+    try {
+      const b = new g.LatLngBounds()
+      b.extend({ lat: box.n, lng: box.e })
+      b.extend({ lat: box.s, lng: box.w })
+      return b
+    } catch {
+      return null
+    }
+  }
+
+  /** Wraps one map instance's fitBounds and watches for the user taking the
+   * wheel. Done per instance rather than in the constructor proxy on purpose:
+   * when the installed loader is current the page constructs through *its*
+   * proxy, so a construct trap in this file never runs — see ensureMapCapture. */
+  function armMapCamera(map) {
+    if (!map || typeof map !== 'object' || map.__geocoachCam) return
+    let orig = null
+    try {
+      orig = map.fitBounds
+    } catch {}
+    if (typeof orig !== 'function') return
+    try {
+      Object.defineProperty(map, '__geocoachCam', { value: true, configurable: true })
+      map.fitBounds = function () {
+        const args = Array.prototype.slice.call(arguments)
+        try {
+          if (holdWanted(this)) {
+            scopeHoldArmed = 0 // one hold per round, whatever else calls fitBounds
+            const held = { map: this, orig, args, t: Date.now(), timer: 0 }
+            held.timer = setTimeout(() => {
+              if (scopeHeld !== held) return
+              tlog('scope: camera hold expired with no geometry — GeoGuessr’s framing stands')
+              releaseHeld()
+            }, SCOPE_HOLD_MS)
+            scopeHeld = held
+            // The store can answer before this call is even made, in which case
+            // the hold is over as soon as it began.
+            if (scopeBox) releaseHeld()
+            return undefined
+          }
+          // Not the held call — GeoGuessr re-framing later, or nothing armed at
+          // all. Their move wins over any tween of ours, and if the region is
+          // in hand it may as well ride along in this one too.
+          if (scopeBox && !scopeCamTouched) {
+            cancelScopeTween()
+            const asked = boxOfBounds(args[0])
+            if (asked && shouldWiden(scopeBox, asked, WIDEN_FREE)) {
+              const b = latLngBounds(boxUnion(asked, scopeBox))
+              if (b) {
+                args[0] = b
+                scopeCamSettled = true
+              }
+            }
+          }
+        } catch {}
+        return orig.apply(this, args)
+      }
+    } catch {
+      return
+    }
+    // Once the user has moved the map it is theirs for the rest of the round —
+    // no widen, no tween, nothing. A drag fires through the Maps API; a wheel
+    // or a press only ever reaches the div.
+    const touched = () => {
+      if (scopeCamTouched) return
+      scopeCamTouched = true
+      cancelScopeTween()
+      tlog('scope: user took the map — the camera is left alone for this round')
+    }
+    try {
+      if (typeof map.addListener === 'function') map.addListener('dragstart', touched)
+    } catch {}
+    try {
+      const div = typeof map.getDiv === 'function' ? map.getDiv() : null
+      if (div && typeof div.addEventListener === 'function') {
+        div.addEventListener('wheel', touched, { passive: true, capture: true })
+        div.addEventListener('pointerdown', touched, { capture: true })
+      }
+    } catch {}
+  }
+
+  /** An eased move of centre and zoom, for when the geometry missed the hold.
+   * fitBounds would snap and panToBounds will not zoom, so the target zoom is
+   * worked out here and both are stepped by hand. Abandoned the moment the user
+   * touches anything. */
+  function tweenCamera(map, center, zoom, ms) {
+    let from = null
+    try {
+      const c = map.getCenter()
+      const z = map.getZoom()
+      if (c && typeof z === 'number' && isFinite(z)) from = { lat: c.lat(), lng: c.lng(), z }
+    } catch {}
+    if (!from || typeof map.setCenter !== 'function' || typeof map.setZoom !== 'function') return false
+    cancelScopeTween()
+    const tw = { dead: false }
+    scopeTween = tw
+    const t0 = Date.now()
+    const step = () => {
+      if (tw.dead || scopeCamTouched) return
+      const k = easeInOut((Date.now() - t0) / ms)
+      try {
+        map.setZoom(from.z + (zoom - from.z) * k)
+        map.setCenter({ lat: from.lat + (center.lat - from.lat) * k, lng: lerpLng(from.lng, center.lng, k) })
+      } catch {
+        tw.dead = true
         return
       }
-      for (const x of c) walk(x)
+      if (k < 1) requestAnimationFrame(step)
+      else if (scopeTween === tw) scopeTween = null
     }
-    for (const f of geojson.features || []) walk(f && f.geometry && f.geometry.coordinates)
-    return n > s && e > w ? { n, s, e, w } : null
+    requestAnimationFrame(step)
+    return true
   }
 
-  /** GeoGuessr frames the result around the guess and the answer, which is
-   * nearly always the right framing — so the default is to leave it alone. The
-   * one case worth correcting is a shape the user cannot see at all: the
-   * answer country two continents from a wild guess, with the overlay drawn
-   * politely off-screen. Then the view opens once, wide enough to hold both,
-   * and never again for this round. */
-  function widenIfOffscreen(map, box, key) {
-    if (scopeWidenedFor === key) return
-    // A shape crossing the antimeridian (Russia, Fiji) has a meaningless plain
-    // bbox; rather than frame it wrongly, leave GeoGuessr's view as it is.
-    if (box.e - box.w > 180) return
-    let vb = null
+  /** The framing the hold could not make, because the geometry arrived after
+   * GeoGuessr's camera had already moved. This one the user *will* see move, so
+   * it only fires when the region is genuinely half off-screen, and it eases
+   * rather than snaps. Once per round either way: settling the question counts
+   * as answering it, even when the answer is "leave it". */
+  function frameScope(map) {
+    if (scopeCamSettled || scopeCamTouched || scopeHeld || !scopeBox) return
+    let view = null
     try {
-      vb = map.getBounds()
+      view = boxOfBounds(map.getBounds())
     } catch {}
-    if (!vb) return // the map hasn't settled yet — its framing isn't ours to judge
-    const sw = vb.getSouthWest()
-    const ne = vb.getNorthEast()
-    const vs = sw.lat()
-    const vn = ne.lat()
-    const vw = sw.lng()
-    const ve = ne.lng()
-    if (ve < vw) return // the viewport itself wraps — same reasoning
-    const overlapLat = Math.min(box.n, vn) - Math.max(box.s, vs)
-    const overlapLng = Math.min(box.e, ve) - Math.max(box.w, vw)
-    const area = (box.n - box.s) * (box.e - box.w)
-    const shown = overlapLat > 0 && overlapLng > 0 && area > 0 ? (overlapLat * overlapLng) / area : 0
-    if (shown > 0.35) return
-    scopeWidenedFor = key
-    const b = new W.google.maps.LatLngBounds()
-    b.extend({ lat: box.n, lng: box.e })
-    b.extend({ lat: box.s, lng: box.w })
-    b.extend({ lat: vn, lng: ve })
-    b.extend({ lat: vs, lng: vw })
-    try {
-      map.fitBounds(b, 64)
-      tlog('scope: widened to keep the shape in view')
-    } catch {}
+    if (!view) return // the map has not settled yet — its framing is not ours to judge
+    if (!shouldWiden(scopeBox, view, WIDEN_LATE)) {
+      scopeCamSettled = true
+      return
+    }
+    const rect = mapRect(map)
+    if (!rect) return
+    const target = boxUnion(view, scopeBox)
+    const zoom = zoomForBox(target, rect.width, rect.height, 64)
+    if (zoom == null) return
+    scopeCamSettled = true
+    // Widening only: the union can never need a closer zoom than the view it
+    // contains, and a rounding error that zoomed *in* would be very visible.
+    const to = Math.min(zoom, mapZoom(map))
+    if (tweenCamera(map, boxCenter(target), to, SCOPE_TWEEN_MS))
+      tlog('scope: eased out to hold the region (z' + mapZoom(map).toFixed(1) + '→z' + to.toFixed(1) + ')')
   }
 
+  // -------------------------------------------------------------- paint
   // Bumped by every draw and every teardown. A geometry fetch that lands after
   // the card it belongs to is gone — dismissed, next round, navigated away —
   // sees a stale generation and does nothing.
   let scopeGen = 0
-  let scopeLayers = []
-  let scopeWidenedFor = null
+  let scopeLayers = [] // the Data pair currently on the map
+  let scopeStyle = null // restyles that pair
+  let scopeStyled = '' // the weights it was last styled with
+  let scopeFadeK = 1 // and the opacity level, so a restyle mid-fade keeps it
+  let scopeMap = null
+  let scopeGeojson = null
+  let scopeScope = null // the round's scope, for fetching finer levels
+  let scopeLod = -1
+  let scopeClip = null // the window the drawn geometry covers; null means all of it
+  let scopeFine = false // …and whether that geometry came from a windowed ask
+  let scopeFetching = '' // the request in flight, so a settling map cannot stack them
+  let scopeRehomes = 0
+  let scopeTimers = []
+  let scopeListeners = []
 
   function removeScopeOverlay() {
     scopeGen++
@@ -490,63 +1203,301 @@
       } catch {}
     }
     scopeLayers = []
+    scopeStyle = null
+    scopeStyled = ''
+    scopeFadeK = 1
+    scopeMap = null
+    scopeGeojson = null
+    scopeScope = null
+    scopeLod = -1
+    scopeClip = null
+    scopeFine = false
+    scopeFetching = ''
+    scopeRehomes = 0
+    for (const t of scopeTimers) {
+      try {
+        clearTimeout(t)
+      } catch {}
+    }
+    scopeTimers = []
+    for (const l of scopeListeners) {
+      try {
+        l.remove()
+      } catch {}
+    }
+    scopeListeners = []
+    cancelScopeTween()
+    // The round is over, so its box must not widen the summary screen's map.
+    // A held fitBounds is deliberately *not* released here: showCard tears the
+    // previous overlay down microseconds before drawing the new one, and
+    // releasing there would spend the hold on the round it was armed for.
+    scopeBox = null
   }
 
   /** Two passes over the same shape: a wide, soft violet stroke underneath and
    * a crisp thin one on top, which reads as a faint glow around the border
    * instead of a flat line — and keeps the edge findable where it runs over
-   * dark water or a busy coastline. Both fade up together, because a
-   * few-hundred-KB outline snapping into existence looks like a glitch. */
-  function paintScope(map, geojson) {
+   * dark water or a busy coastline. `k` is the opacity the pair starts at: 0
+   * for a first paint about to fade up, the level already on screen for a pair
+   * being swapped in mid-round. Either way it is styled before the features
+   * land, so there is never a default-blue first frame. */
+  function paintScope(map, geojson, k) {
     const g = W.google && W.google.maps
-    if (!g || typeof g.Data !== 'function') return false
+    if (!g || typeof g.Data !== 'function') return null
     const glow = new g.Data({ map })
-    scopeLayers.push(glow)
     const main = new g.Data({ map })
-    scopeLayers.push(main)
     // clickable:false throughout: the overlay must never swallow a click meant
     // for the map underneath it.
-    const style = (k) => {
+    const style = (op, w) => {
       glow.setStyle({
         clickable: false,
         zIndex: 1,
         fillOpacity: 0,
         strokeColor: SCOPE_GLOW,
-        strokeOpacity: 0.5 * k,
-        strokeWeight: 7,
+        strokeOpacity: 0.5 * op,
+        strokeWeight: w.glow,
       })
       main.setStyle({
         clickable: false,
         zIndex: 2,
         strokeColor: SCOPE_INK,
-        strokeOpacity: 0.95 * k,
-        strokeWeight: 2,
+        strokeOpacity: 0.95 * op,
+        strokeWeight: w.main,
         fillColor: SCOPE_INK,
-        fillOpacity: SCOPE_FILL_ALPHA * k,
+        fillOpacity: SCOPE_FILL_ALPHA * op,
       })
     }
-    style(0) // styled before the features land, so no default-blue first frame
+    style(k, scopeWeights(mapZoom(map)))
     glow.addGeoJson(geojson)
     main.addGeoJson(geojson)
-    // Every frame of the fade is a full restyle of both layers, and a restyle
-    // costs whatever the geometry costs. Canada's coastline is two orders of
-    // magnitude heavier than Aragón's, and a fade that stutters looks worse
-    // than no fade at all — so past a point the shape simply appears.
-    if (countPoints(geojson) > FADE_POINT_LIMIT) {
-      style(1)
-      return true
-    }
+    return { layers: [glow, main], style }
+  }
+
+  function applyScopeStyle(k) {
+    if (!scopeStyle) return
+    scopeFadeK = k
+    const w = scopeWeights(mapZoom(scopeMap))
+    scopeStyled = w.glow + ':' + w.main
+    scopeStyle(k, w)
+  }
+
+  /** Weights follow the zoom, but only when they actually change — a restyle
+   * walks every coordinate in the shape, and at lod 2 that is not free. */
+  function restyleScope() {
+    if (!scopeStyle) return
+    const w = scopeWeights(mapZoom(scopeMap))
+    if (scopeStyled === w.glow + ':' + w.main) return
+    applyScopeStyle(scopeFadeK)
+  }
+
+  /** A few-hundred-KB outline snapping into existence looks like a glitch, so
+   * the first paint arrives instead: both layers fade up together, ease-out, in
+   * a third of a second. Only ever the first paint — see FADE_POINT_LIMIT. */
+  function fadeScopeIn() {
     const gen = scopeGen
     const t0 = Date.now()
     const FADE = 320
     const step = () => {
       if (gen !== scopeGen) return
       const t = Math.min(1, (Date.now() - t0) / FADE)
-      style(t * (2 - t)) // ease-out: arrives gently rather than stopping dead
+      applyScopeStyle(t * (2 - t))
       if (t < 1) requestAnimationFrame(step)
     }
     requestAnimationFrame(step)
-    return true
+  }
+
+  function adoptScopePair(map, pair) {
+    const old = scopeLayers
+    scopeLayers = pair.layers
+    scopeStyle = pair.style
+    scopeMap = map
+    if (!old.length) return
+    // Remove-then-add flashes the map bare for a frame. Inverted: the new pair
+    // is already styled and attached, so the old one only has to survive until
+    // the browser has painted the new one — one frame.
+    requestAnimationFrame(() => {
+      for (const l of old) {
+        try {
+          l.setMap(null)
+        } catch {}
+      }
+    })
+  }
+
+  /** The same region drawn from different geometry. No fade: this is not an
+   * arrival, it is an outline changing resolution, and fading it would
+   * advertise a change nobody asked to see. */
+  function swapScopeGeometry(map, res, win, key) {
+    const pair = paintScope(map, res.geojson, scopeFadeK)
+    if (!pair) return
+    adoptScopePair(map, pair)
+    const was = scopeLod
+    scopeGeojson = res.geojson
+    scopeLod = typeof res.lod === 'number' ? res.lod : scopeLod
+    // What the server says it covered, not what was asked for — a window that
+    // missed the region entirely comes back as the whole shape, and the two
+    // must not be confused. Falling back to the ask keeps the loop below from
+    // re-asking for a window the server has already declined to cut.
+    scopeClip = (res.clip && { n: res.clip.n, s: res.clip.s, e: res.clip.e, w: res.clip.w }) || win || null
+    scopeFine = !!win
+    scopeStyled = '' // the new pair has its own styles; let the next zoom restyle it
+    tlog(
+      'scope ' +
+        key +
+        ': ' +
+        (win
+          ? 'lod ' + scopeLod + ' cut to the visible map'
+          : scopeLod > was
+            ? 'detail up to lod ' + scopeLod
+            : 'back to the whole shape at lod ' + scopeLod) +
+        ' (' +
+        countPoints(res.geojson) +
+        ' pts)',
+    )
+  }
+
+  /** Detail follows the camera.
+   *
+   * The coarse rungs are the whole shape, because at that zoom the whole shape
+   * is what is on screen. The finest rung is a window: the visible map grown by
+   * half a screen in each direction, cut server-side, so the cost of drawing a
+   * coastline properly is set by the size of the map and not by the size of the
+   * country. Panning out of that window fetches the next one; zooming back out
+   * puts the whole shape back, which is free, because it has been in memory
+   * since the card appeared. */
+  function syncScopeDetail(map, gen) {
+    if (gen !== scopeGen || !scopeScope || !scopeMap) return
+    const want = lodForZoom(mapZoom(map))
+    const view = viewBox(map)
+    const win = want >= FINE_LOD ? padBox(view) : null
+    // Already showing what this camera is asking for. Two different questions:
+    // a window has to still contain the map, while the whole shape only has to
+    // be at least as fine as the rung wants — zooming out never degrades it.
+    if (win ? scopeFine && boxCovers(scopeClip, view) : !scopeFine && want <= scopeLod) return
+    const scope = scopeScope
+    const key = scopeKey(scope)
+    const ck = scopeCacheKey(key, want, win && boxParam(win))
+    if (ck === scopeFetching) return
+    scopeFetching = ck
+    fetchScopeGeo(scope, want, win).then(
+      (res) => {
+        if (scopeFetching === ck) scopeFetching = ''
+        if (gen !== scopeGen || !scopeMap) return
+        // A server that predates the ladder ignores ?lod and answers with the
+        // same full geometry every time. Swapping identical shapes would cost a
+        // rebuild for nothing, so a whole-shape swap needs the detail to have
+        // actually gone up — and once it has not, this rung is not worth asking
+        // for again this round. A window is exempt: it is *meant* to have fewer
+        // points than the shape it was cut from.
+        if (!win && !scopeFine && countPoints(res.geojson) <= countPoints(scopeGeojson)) {
+          scopeLod = Math.max(scopeLod, want)
+          tlogOnce(
+            'scope-lod-flat:' + key + ':' + want,
+            'scope ' + key + ': lod ' + want + ' is no finer than what is drawn — staying put',
+          )
+          return
+        }
+        swapScopeGeometry(scopeMap, res, win, key)
+      },
+      (err) => {
+        if (scopeFetching === ck) scopeFetching = ''
+        tlogOnce(
+          'scope-lod-fail:' + key + ':' + want,
+          'scope ' + key + ': lod ' + want + ' unavailable (' + ((err && err.message) || 'failed') + ')',
+        )
+      },
+    )
+  }
+
+  /** The result map is not always the map that existed when the card appeared:
+   * GeoGuessr re-mounts it, and a shape drawn on the outgoing instance is gone
+   * from the screen while every variable here still says it was drawn. That is
+   * the shape of "sometimes the overlay doesn't take". So the choice of map is
+   * re-made for a few seconds after the first paint, and the geometry moves
+   * house without a flicker when it turns out to have changed. */
+  function rehomeIfMoved(gen) {
+    if (gen !== scopeGen || !scopeMap || !scopeGeojson || scopeRehomes >= 3) return
+    const map = pickResultMap()
+    if (!map || map === scopeMap) return
+    const pair = paintScope(map, scopeGeojson, scopeFadeK)
+    if (!pair) return
+    scopeRehomes++
+    adoptScopePair(map, pair)
+    scopeStyled = ''
+    watchMap(map, false)
+    tlog('scope: result map changed under the overlay — redrawn on the new one (' + describeMaps() + ')')
+    frameScope(map)
+  }
+
+  function watchMap(map, watchdog) {
+    const gen = scopeGen
+    const on = (evt, fn) => {
+      try {
+        if (typeof map.addListener !== 'function') return
+        const l = map.addListener(evt, fn)
+        if (l) scopeListeners.push(l)
+      } catch {}
+    }
+    let settleTimer = 0
+    const settled = () => {
+      if (gen !== scopeGen) return
+      restyleScope()
+      syncScopeDetail(map, gen)
+      rehomeIfMoved(gen)
+    }
+    on('idle', settled)
+    on('zoom_changed', () => {
+      if (gen !== scopeGen) return
+      restyleScope() // weights track the zoom immediately; only the fetch waits
+      try {
+        clearTimeout(settleTimer)
+      } catch {}
+      settleTimer = setTimeout(settled, 250) // a spun wheel must not fire three requests
+      scopeTimers.push(settleTimer)
+    })
+    if (!watchdog) return
+    // `idle` alone is not enough for the re-mount case: the new map fires its
+    // own idle, not the old one's, and the old one may never fire again.
+    for (const ms of [400, 1200, 3000, 6000]) scopeTimers.push(setTimeout(() => rehomeIfMoved(gen), ms))
+  }
+
+  // The card is drawn the instant the guess is graded, which can be a beat
+  // before the result map is mounted and sized. Twelve seconds of looking is
+  // not a fix for anything on its own — the fix is rehomeIfMoved and the log
+  // line below — but it costs nothing and it covers a genuinely slow mount.
+  const SCOPE_MAP_WAIT = 12000
+
+  function waitForResultMap(gen, cb) {
+    const t0 = Date.now()
+    let looks = 0
+    const tick = () => {
+      if (gen !== scopeGen) return
+      looks++
+      const map = pickResultMap()
+      if (map) {
+        try {
+          cb(map, Date.now() - t0)
+        } catch (err) {
+          // A half-drawn overlay is worse than none.
+          removeScopeOverlay()
+          tlog('scope draw failed: ' + (err && err.message))
+        }
+        return
+      }
+      if (Date.now() - t0 < SCOPE_MAP_WAIT) {
+        scopeTimers.push(setTimeout(tick, 200))
+        return
+      }
+      tlog(
+        'scope: no visible map to draw on after ' +
+          (Date.now() - t0) +
+          'ms and ' +
+          looks +
+          ' looks — ' +
+          describeMaps(),
+      )
+    }
+    tick()
   }
 
   /** Draws the card's scope on the result map. Called by showCard and torn
@@ -565,47 +1516,61 @@
       removeScopeOverlay()
       const gen = scopeGen
       const key = scopeKey(scope)
+      startRoundCamera((card.roundId || '') + ':' + key)
+      scopeScope = scope
       const t0 = Date.now()
-      fetchScopeGeo(scope).then(
-        (res) => {
-          try {
-            if (gen !== scopeGen) return
-            // The card is drawn the instant the guess is graded, which can be
-            // a beat before the result map is mounted and sized; wait a short
-            // while for one to appear rather than missing it by 200ms.
-            const deadline = Date.now() + 4000
-            const tick = () => {
-              if (gen !== scopeGen) return
-              const map = pickResultMap()
-              if (!map) {
-                if (Date.now() < deadline) return setTimeout(tick, 250)
-                tlog('scope ' + key + ': no visible map to draw on')
-                return
-              }
-              try {
-                if (!paintScope(map, res.geojson)) return removeScopeOverlay()
-                tlog(
-                  'scope drawn: ' +
-                    (res.kind || '?') +
-                    ' ' +
-                    (res.label || key) +
-                    ' (' +
-                    res.geojson.features.length +
-                    ' feature(s), ' +
-                    (Date.now() - t0) +
-                    'ms)',
-                )
-                const box = scopeBounds(res.geojson)
-                if (box) widenIfOffscreen(map, box, (card.roundId || '') + ':' + key)
-              } catch (err) {
-                // A half-drawn overlay is worse than none.
-                removeScopeOverlay()
-                tlog('scope ' + key + ' draw failed: ' + (err && err.message))
-              }
-            }
-            tick()
-          } catch {}
-        },
+      const arrived = (res, source) => {
+        if (gen !== scopeGen) return
+        // Before the paint, and before the map even has to exist: the box is
+        // what a held fitBounds is waiting on, and every millisecond of that
+        // hold is one GeoGuessr's framing is late by.
+        offerScopeBox(boxOf(res))
+        const lod = typeof res.lod === 'number' ? res.lod : 0
+        waitForResultMap(gen, (map, waited) => {
+          const fade = countPoints(res.geojson) <= FADE_POINT_LIMIT
+          const pair = paintScope(map, res.geojson, fade ? 0 : 1)
+          if (!pair) return
+          adoptScopePair(map, pair)
+          scopeGeojson = res.geojson
+          scopeLod = lod
+          scopeClip = null
+          scopeFine = false
+          scopeFadeK = fade ? 0 : 1
+          if (fade) fadeScopeIn()
+          tlog(
+            'scope drawn: ' +
+              (res.kind || '?') +
+              ' ' +
+              (res.label || key) +
+              ' (' +
+              res.geojson.features.length +
+              ' feature(s), lod ' +
+              lod +
+              ', ' +
+              countPoints(res.geojson) +
+              ' pts, ' +
+              source +
+              ', map after ' +
+              waited +
+              'ms, ' +
+              (Date.now() - t0) +
+              'ms total)',
+          )
+          frameScope(map)
+          watchMap(map, true)
+          syncScopeDetail(map, gen)
+        })
+      }
+      // The whole point of the disk store: on a repeated meta the shape is in
+      // hand synchronously, so the card, the outline and GeoGuessr's camera all
+      // land together instead of a second apart.
+      const cached = cachedScopeGeo(key, 0)
+      if (cached) {
+        arrived(cached, 'stored')
+        return
+      }
+      fetchScopeGeo(scope, 0).then(
+        (res) => arrived(res, 'server ' + (Date.now() - t0) + 'ms'),
         (err) => tlog('scope ' + key + ': ' + ((err && err.message) || 'failed')),
       )
     } catch {}
@@ -1022,15 +1987,21 @@
   // The clue lookup (Learnable Meta metadata, keyed by the round's pano id) is
   // the one slow server leg (~900ms cold). The round's pano id is visible the
   // moment the round is served — a whole guess-time earlier — so ping the
-  // server then and the lookup is cached long before the card needs it.
+  // server then and the lookup is cached long before the card needs it. The
+  // scope overlay's boundary costs about the same and is wanted at the same
+  // moment, so it rides along on the same early sighting of the pano.
   const prewarmed = new Set()
   function prewarmRound(g) {
     const cur = g.rounds[g.rounds.length - 1]
     const pano = cur && cur.panoId ? hex2a(cur.panoId) : null
-    if (!pano) return
     const key = g.token + ':' + g.rounds.length
     if (prewarmed.has(key)) return
+    // A round whose pano is not visible yet still has to drop the last round's
+    // warm — it is precisely the round that must not inherit it — and it stays
+    // unmarked so the next game-state can warm it properly.
+    if (!pano) return warmScopeGeo(null)
     prewarmed.add(key)
+    warmScopeGeo(pano)
     const body = JSON.stringify({ mapId: g.map, panoId: pano })
     const req = () =>
       W.fetch(PREWARM_URL, {
@@ -1289,6 +2260,11 @@
       if (/\/api\/v3\/games\/[A-Za-z0-9]+/.test(url)) {
         const tFetch = Date.now()
         tlog('games ' + rec.method + ' intercepted')
+        // The guess POST is the earliest moment anything knows a result screen
+        // is coming — earlier than the answer, the card, or the map. Arming the
+        // camera hold here is what lets the region be folded into GeoGuessr's
+        // own framing instead of correcting it afterwards.
+        if (rec.method === 'POST') armScopeHold()
         rec.promise.then((res) =>
           res.clone().json().then((g) => {
             if (rec.method === 'POST') tlog('game-state parsed ' + (Date.now() - tFetch) + 'ms after guess POST started')

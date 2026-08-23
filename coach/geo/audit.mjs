@@ -6,7 +6,10 @@
  * Run: node coach/geo/audit.mjs [--quiet]
  *
  * It reads only built output, so it answers the question the test suite cannot:
- * not "is the code right" but "does this build cover the deck". A name that
+ * not "is the code right" but "does this build cover the deck". Every rung of
+ * the LOD ladder is checked, not just the one the server defaults to: a country
+ * whose fine slice never got written would draw at a distance and vanish the
+ * moment the user zoomed in. A name that
  * resolves to nothing is invisible from the browser — the overlay silently
  * falls back to the whole country — so it has to be visible here. Exits
  * non-zero when a scope resolves to no shape at all, or when a country that has
@@ -17,7 +20,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { countryCode, countryShape, geoReady, regionShapes } from './resolve.mjs'
+import { countryCode, countryShape, geoLods, geoReady, regionShapes } from './resolve.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const COACH = join(HERE, '..')
@@ -29,6 +32,7 @@ if (!geoReady()) {
 }
 
 const scope = JSON.parse(readFileSync(join(COACH, 'scope-regions.json'), 'utf8'))
+const lods = geoLods()
 const problems = []
 const notes = []
 let full = 0
@@ -45,7 +49,13 @@ for (const [key, names] of Object.entries(scope)) {
     problems.push(`NO COUNTRY  ${country}  <- ${key}`)
     continue
   }
+  // Names resolve identically at every rung — only the geometry differs — so
+  // the report is written from the coarsest, and the others are checked only
+  // for being there at all.
   const { matched, missing } = regionShapes(code, names)
+  for (const lod of lods)
+    if (!regionShapes(code, names, lod.id).matched.length && matched.length)
+      problems.push(`LOD ${lod.id} MISSING  [${code}] ${key} — resolves at LOD 0 but not here`)
   if (!matched.length) {
     none++
     problems.push(`NONE     [${code}] ${key}\n         want: ${names.join(', ')}`)
@@ -82,13 +92,21 @@ for (const [code, n] of uncovered) {
   // supposed to dissolve the one into the other. A country Natural Earth does
   // not carry at either level is a gap in the source, and no amount of building
   // will close it — say so and move on.
-  if (existsSync(join(HERE, 'admin1', code + '.json')))
+  if (existsSync(join(HERE, 'admin1', 'l0', code + '.json')))
     problems.push(`NO SHAPE for ${code} — ${rounds}, yet its subdivisions are on file: the dissolve should have covered it`)
   else notes.push(`ABSENT   ${code} — ${rounds}, and Natural Earth carries no boundary for it at any level`)
 }
 
+/* A country that draws at one zoom and disappears at another is the failure
+   the LOD split can introduce and nothing else would catch. */
+for (const [code] of played) {
+  if (!countryShape(code)) continue
+  for (const lod of lods) if (!countryShape(code, lod.id)) problems.push(`NO LOD ${lod.id} slice for ${code}`)
+}
+
 console.log(`scopes: full ${full} | partial ${partial} | none ${none} | unknown country ${noCountry}`)
 console.log(`rounds: ${played.size} countries played, ${played.size - uncovered.length} with a boundary on file`)
+console.log(`ladder: ${lods.map((l) => `LOD ${l.id} tol ${l.tol}° z≤${l.maxZoom}`).join(' | ')}`)
 if (notes.length && !quiet) console.log('\n' + notes.join('\n'))
 if (problems.length) {
   console.error('\n' + problems.join('\n'))

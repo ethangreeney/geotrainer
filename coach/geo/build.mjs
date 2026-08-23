@@ -1,34 +1,49 @@
 /**
- * Turns the two Natural Earth 10m source files into the per-country slices the
- * server hands out. Run once: `node coach/geo/build.mjs` (sources fetched by
- * `node coach/geo/fetch.mjs`). The output is gitignored — it rebuilds in a few
- * seconds.
+ * Turns the sources into the per-country slices the server hands out. Run once:
+ * `node coach/geo/build.mjs` (sources fetched by `node coach/geo/fetch.mjs`).
+ * The output is gitignored — it rebuilds in about half a minute.
  *
- * Why slice at build time: the sources are 52 MB of JSON. Parsing them on every
- * request is slow and holding them resident is worse, but a round only ever
- * needs one country. Sliced, the server reads a file measured in kilobytes.
+ * Two sources, and they do different jobs. Natural Earth is the naming layer:
+ * every alternate spelling a subdivision answers to, and the outlines for
+ * everywhere geoBoundaries has nothing. geoBoundaries is the geometry, drawn
+ * from OpenStreetMap, and it is where the detail lives — Hokkaidō is 747 points
+ * in Natural Earth and 123,899 in geoBoundaries, which is the difference
+ * between an outline that cuts across a bay and one that goes round it. The two
+ * are joined by ISO code where there is one, by name where there is not, and by
+ * geometry — which shape's interior holds which — where the names disagree.
+ * Where geoBoundaries turns out to be the coarser of the two, that country
+ * keeps Natural Earth.
  *
- * Why the tolerance is adaptive: the map frames whatever it is given, so a
- * shape is always drawn at roughly the same size on screen no matter how big it
- * is on the ground. A fixed tolerance in degrees therefore spends its whole
- * budget in the wrong place — it leaves Canada carrying a hundred thousand
- * vertices no eye can resolve, while a small province is trimmed at the same
- * rate. Scaling the tolerance to the feature's own extent gives every outline
- * the same on-screen fidelity — well under a pixel of error at the zoom the
- * result map lands on — at a fraction of the payload. That, and the dissolve
- * that merges neighbours into one outline, live in shape.mjs; this file is the
- * driver that decides what to slice, group, merge and name.
+ * Why slice at build time: the sources are hundreds of megabytes of JSON.
+ * Parsing them on every request is slow and holding them resident is worse, but
+ * a round only ever needs one country. Sliced, the server reads a file measured
+ * in kilobytes.
  *
- * Writes:
- *   admin0/<CC>.json   { code, name, geometry }
- *   admin1/<CC>.json   [ { id, name, names, code, parts, geometry }, ... ]
- *   merged/<CC>.json   { "<signature>": { name, names, parts, geometry } }
- *   index.json         what exists, for the server's readiness check
+ * Why every shape is built three times: what an eye can resolve depends on the
+ * zoom, not on the country. One tolerance per feature — the old scheme, sized
+ * from the feature's own extent — let Chile's 37° mainland set the budget for
+ * every rock in the Patagonian archipelago, so the islands came out a kilometre
+ * coarse and the smallest came out as literal rectangles; and being fixed at
+ * build time, the outline could never repay a user for zooming in. So each
+ * feature is written once per rung of shape.mjs's LOD ladder, coarse to fine,
+ * and the client swaps rungs as the map zooms. The tolerances, the ring-drop rule, and the dissolve that merges
+ * neighbours into one outline all live in shape.mjs; this file is the driver
+ * that decides what to slice, group, merge and name.
+ *
+ * Writes, for each LOD `l0`, `l1`, `l2`:
+ *   admin0/<l>/<CC>.json   { code, name, geometry }
+ *   admin1/<l>/<CC>.json   [ { id, name, names, code, parts, geometry }, ... ]
+ *   merged/<l>/<CC>.json   { "<signature>": { name, names, parts, geometry } }
+ *   index.json             what exists and the ladder it was built on
+ *
+ * One directory per LOD rather than one file holding all three, because the
+ * server reads whole files: answering a LOD 0 request must never mean parsing
+ * Canada's LOD 2 coastline.
  */
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DETAIL, countVertices, dissolve, simplify } from './shape.mjs'
+import { LODS, countVertices, dissolve, hitTester, ringsOf, simplifyAt } from './shape.mjs'
 import { bare, countryCode, matchFeatures, norm, signature } from './resolve.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -48,12 +63,27 @@ const iso2 = (p) => {
 
 for (const dir of ['admin0', 'admin1', 'merged']) {
   rmSync(join(HERE, dir), { recursive: true, force: true })
-  mkdirSync(join(HERE, dir), { recursive: true })
+  for (const lod of LODS) mkdirSync(join(HERE, dir, 'l' + lod.id), { recursive: true })
 }
 
-const index = { countries: {}, builtAt: new Date().toISOString(), detail: DETAIL }
+// The ladder goes in the index rather than being restated in the server and in
+// the client: one definition, discovered by whoever needs it.
+const index = { countries: {}, builtAt: new Date().toISOString(), lods: LODS }
 let vIn = 0
-let vOut = 0
+const vOut = new Map(LODS.map((l) => [l.id, 0]))
+const bytes = new Map(LODS.map((l) => [l.id, 0]))
+
+/** Writes one slice at one LOD, tallying vertices as it goes so the run reports
+ * what actually landed on disk. The three payload shapes — a country, a list of
+ * subdivisions, a map of merges — are all just things with a geometry, which is
+ * all the tally cares about. */
+const slice = (dir, lod, code, payload) => {
+  const each = payload.geometry ? [payload] : Array.isArray(payload) ? payload : Object.values(payload)
+  for (const f of each) vOut.set(lod.id, vOut.get(lod.id) + countVertices(f.geometry))
+  const json = JSON.stringify(payload)
+  bytes.set(lod.id, bytes.get(lod.id) + Buffer.byteLength(json))
+  writeFileSync(join(HERE, dir, 'l' + lod.id, code + '.json'), json)
+}
 
 /* ── admin0 ─────────────────────────────────────────────────────────────── */
 
@@ -70,22 +100,22 @@ for (const f of load('ne_10m_admin_0_countries.geojson').features) {
   if (rankOf(f.properties) > rankOf(best.get(code)?.properties ?? {})) best.set(code, f)
 }
 
+/** One country outline at every rung. The geometry handed in is raw Natural
+ * Earth — or a raw dissolve — and is thinned here and nowhere earlier. */
 const writeCountry = (code, name, names, geometry) => {
-  writeFileSync(join(HERE, 'admin0', code + '.json'), JSON.stringify({ code, name, geometry }))
+  for (const lod of LODS) slice('admin0', lod, code, { code, name, geometry: simplifyAt(geometry, lod.tol) })
   index.countries[code] = { name, names: [...new Set(names)], admin1: 0, merged: 0 }
 }
 
 for (const f of best.values()) {
   const p = f.properties
-  const geometry = simplify(f.geometry)
   vIn += countVertices(f.geometry)
-  vOut += countVertices(geometry)
   // Every spelling the country answers to, so a meta key written as
   // "Bosnia:" or "United States:" finds the same file.
   const names = new Set()
   for (const k of ['NAME_EN', 'NAME', 'NAME_LONG', 'NAME_SORT', 'NAME_CIAWF', 'ADMIN', 'SOVEREIGNT', 'NAME_ALT'])
     if (typeof p[k] === 'string') for (const part of p[k].split('|')) if (part.trim()) names.add(part.trim())
-  writeCountry(iso2(p), p.NAME_EN || p.NAME, names, geometry)
+  writeCountry(iso2(p), p.NAME_EN || p.NAME, names, f.geometry)
 }
 
 /* ── admin1 ─────────────────────────────────────────────────────────────── */
@@ -111,9 +141,7 @@ for (const f of load('ne_10m_admin_1_states_provinces.geojson').features) {
     if (typeof v === 'string') for (const part of v.split('|')) if (part.trim()) names.add(part.trim())
   }
   if (!names.size) continue
-  const geometry = simplify(f.geometry)
   vIn += countVertices(f.geometry)
-  vOut += countVertices(geometry)
   if (!byCountry.has(code)) byCountry.set(code, [])
   // adm1_code is unique across the whole file and present on every feature, so
   // it is the stable identity a precomputed merge can be keyed on.
@@ -125,11 +153,229 @@ for (const f of load('ne_10m_admin_1_states_provinces.geojson').features) {
     names: [...names],
     code: p.iso_3166_2 || p.adm1_code || null,
     parts: [id],
-    geometry,
+    geometry: f.geometry,
     groups: [p.region, p.geonunit].filter((g) => typeof g === 'string' && g.trim()),
   })
   if (!parentNames.has(code)) parentNames.set(code, new Set())
   for (const k of ['admin', 'geonunit']) if (typeof p[k] === 'string' && p[k].trim()) parentNames.get(code).add(p[k])
+}
+
+/* ── geoBoundaries ──────────────────────────────────────────────────────── */
+
+/**
+ * Where geoBoundaries has a country, its subdivisions replace Natural Earth's
+ * geometry outright — the whole of Hokkaidō was 747 points, one vertex every
+ * six kilometres, which is why the outline used to cut straight across bays
+ * that are plainly there on the map underneath. The same island out of
+ * OpenStreetMap is a hundred and twenty thousand, thinned here to twelve.
+ *
+ * Only the geometry is replaced. Natural Earth stays the naming layer, because
+ * the scopes were written from whatever the geocoder happened to return and
+ * geoBoundaries carries exactly one name per unit. Its names are matched back
+ * to Natural Earth's — by ISO 3166-2 code where both know one, by name
+ * otherwise — and every alternate spelling comes across, so a scope that says
+ * "Hokkaidō" or "Catalonia" still lands on the shape now drawn from the other
+ * source.
+ *
+ * The country outline is rewritten too, as the dissolve of its own
+ * subdivisions, so a countrywide highlight and a regional one never disagree
+ * about where the coast is. That dissolve is only exact because the download
+ * was thinned as TopoJSON arcs: a border shared by two provinces is one arc,
+ * thinned once, and both sides still cancel it to the last digit.
+ */
+const GB = join(SRC, 'gb')
+
+/** Natural Earth's spellings, reachable by any one of them. Keyed by every name
+ * a subdivision answers to, and additionally by each grouping it belongs to —
+ * so a geoBoundaries unit called "Cataluña", which Natural Earth only has as a
+ * `region` over four provinces, still picks up "Catalonia" and "Catalunya". */
+const neAliases = new Map()
+const neByIso = new Map()
+for (const [code, list] of byCountry) {
+  const aliases = new Map()
+  const add = (key, names) => {
+    if (!key) return
+    if (!aliases.has(key)) aliases.set(key, new Set())
+    for (const n of names) aliases.get(key).add(n)
+  }
+  const groups = new Map()
+  for (const f of list) {
+    for (const n of f.names) add(norm(n), f.names)
+    if (f.code) neByIso.set(f.code.toUpperCase(), f.names)
+    for (const g of f.groups) {
+      if (!groups.has(g)) groups.set(g, [])
+      groups.get(g).push(f)
+    }
+  }
+  for (const [name, members] of groups) {
+    const shared = members[0].names.filter((n) => members.every((m) => m.names.some((x) => norm(x) === norm(n))))
+    add(norm(name), [name, ...shared])
+  }
+  neAliases.set(code, aliases)
+}
+
+/**
+ * Joins geoBoundaries units to Natural Earth's names by the ground they cover.
+ *
+ * The name join carries the alternate spellings, and it is what the curated
+ * scopes match against — so a unit that fails to join answers to one spelling
+ * only and any scope written with a different one silently draws nothing. Names
+ * fail for dull reasons: geoBoundaries spells South Africa's Northern Cape
+ * "Nothern Cape", and one transposed letter would have cost the province its
+ * scope entirely.
+ *
+ * The two datasets disagree about spelling but not about where a province is,
+ * so unjoined units are matched by geometry instead: sample the unit, ask which
+ * Natural Earth subdivision holds the samples, and take that one's names.
+ * Sampling rather than a centroid because a centroid falls outside anything
+ * crescent-shaped; a clear majority rather than a first hit because border
+ * vertices sit in both.
+ */
+function groundJoin(units, neFeatures, aliases) {
+  const orphans = units.filter((u) => !nameDonors(u.name, aliases).length)
+  const out = new Map()
+  if (!orphans.length || !neFeatures.length) return out
+  // Only Natural Earth units no name claimed, so a geometric near-miss can
+  // never steal the names of a subdivision that already joined cleanly.
+  const claimed = new Set(units.flatMap((u) => nameDonors(u.name, aliases)).map(norm))
+  const free = neFeatures.filter((f) => !f.names.some((n) => claimed.has(norm(n))))
+  if (!free.length) return out
+  const neTests = free.map((f) => ringsOf(f.geometry).map(hitTester))
+  for (const u of orphans) {
+    const pts = interiorPoints(u.geometry)
+    if (!pts.length) continue
+    const hits = neTests.map((t) => pts.filter((p) => covers(t, p)).length)
+    const rank = hits.map((n, i) => [n, i]).sort((a, b) => b[0] - a[0])
+    // A clear winner, not a bare majority. The two datasets draw the same coast
+    // differently, so a coastal province loses a good share of its samples to
+    // sea that Natural Earth puts outside every province — but it loses none of
+    // them to the neighbour, and doubling the runner-up is the test that says so.
+    if (rank[0][0] && rank[0][0] >= 2 * (rank[1]?.[0] ?? 0)) out.set(u, free[rank[0][1]].names)
+  }
+  return out
+}
+
+/** Every spelling a geoBoundaries name offers. It writes a bilingual
+ * subdivision as one string with a slash — "Cataluña/Catalunya",
+ * "País Vasco/Euskadi" — and neither half of that is a name anything else in
+ * the world uses, so the whole thing joins to nothing and the region answers to
+ * a spelling no scope would ever be written with. */
+const spellings = (name) =>
+  [...new Set([name ?? '', ...String(name ?? '').split('/')].map((s) => s.trim()).filter(Boolean))]
+
+/** The Natural Earth names a geoBoundaries name earns, by any of its
+ * spellings. */
+const nameDonors = (name, aliases) => [
+  ...new Set(spellings(name).flatMap((s) => [...(aliases.get(norm(s)) ?? [])])),
+]
+
+/** Inside by the even-odd rule over every ring at once, so a hole or an island
+ * in a lake answers correctly without tracking which ring belongs to which
+ * polygon. */
+const covers = (tests, p) => {
+  let n = 0
+  for (const t of tests) if (t(p)) n++
+  return n % 2 === 1
+}
+
+/** Points that are certainly inside a shape: a grid over its extent, keeping
+ * what lands within. Vertices would be cheaper and are useless here — they sit
+ * exactly on the border, which is the one place the two datasets disagree and
+ * the one place a containment test can go either way. */
+function interiorPoints(geom) {
+  const rings = ringsOf(geom)
+  if (!rings.length) return []
+  const tests = rings.map(hitTester)
+  let x0 = Infinity
+  let y0 = Infinity
+  let x1 = -Infinity
+  let y1 = -Infinity
+  for (const r of rings)
+    for (const c of r) {
+      if (c[0] < x0) x0 = c[0]
+      if (c[0] > x1) x1 = c[0]
+      if (c[1] < y0) y0 = c[1]
+      if (c[1] > y1) y1 = c[1]
+    }
+  const N = 32
+  const pts = []
+  for (let i = 0; i < N; i++)
+    for (let j = 0; j < N; j++) {
+      const p = [x0 + ((i + 0.5) / N) * (x1 - x0), y0 + ((j + 0.5) / N) * (y1 - y0)]
+      if (covers(tests, p)) pts.push(p)
+    }
+  return pts
+}
+
+let gbCountries = 0
+let gbUnits = 0
+const gbDeclined = []
+for (const file of existsSync(GB) ? readdirSync(GB).filter((f) => f.endsWith('.json')) : []) {
+  const code = file.slice(0, -5).toUpperCase()
+  const gb = JSON.parse(readFileSync(join(GB, file), 'utf8'))
+  const units = (gb.features ?? []).filter((u) => u.geometry)
+  if (!units.length) continue
+  for (const u of units) vIn += countVertices(u.geometry)
+
+  // geoBoundaries is not uniformly better. Most countries gain enormously —
+  // Canada thirty-fold, Chile twenty-seven, Japan seventeen — but a handful
+  // arrive from a generalised source and are plainly coarser than what we
+  // already have: the United Kingdom is four nations in four thousand points
+  // against Natural Earth's twenty thousand. Counting decides it, per country,
+  // rather than a hand-kept list that would rot at the next release.
+  const gbV = units.reduce((n, u) => n + countVertices(u.geometry), 0)
+  const neV = (byCountry.get(code) ?? []).reduce((n, f) => n + countVertices(f.geometry), 0)
+  if (gbV <= neV) {
+    gbDeclined.push(code)
+    continue
+  }
+
+  // Whatever this country is already called, from the country file if Natural
+  // Earth has one and from its own subdivisions if not — geoBoundaries knows
+  // one name per unit and the scopes were written against every spelling.
+  const known = index.countries[code]
+  const countryName = known?.name ?? [...(parentNames.get(code) ?? [])][0] ?? code
+  const countryNames = known?.names ?? [...(parentNames.get(code) ?? [])]
+  const wasSynthesized = !known
+
+  // A territory with nothing to subdivide — Bermuda, American Samoa — arrives as
+  // its outline alone. Take the better outline and leave its Natural Earth
+  // parishes as they are; nothing scopes to a parish.
+  if (gb.level === 'ADM0') {
+    writeCountry(code, countryName, countryNames, units[0].geometry)
+    if (wasSynthesized) index.countries[code].synthesized = true
+    gbCountries++
+    continue
+  }
+
+  const aliases = neAliases.get(code) ?? new Map()
+  const byGround = groundJoin(units, byCountry.get(code) ?? [], aliases)
+  const list = units.map((u, i) => {
+    const names = new Set(spellings(u.name))
+    const byName = nameDonors(u.name, aliases)
+    const donors = (u.code && neByIso.get(u.code.toUpperCase())) ?? (byName.length ? byName : byGround.get(u))
+    for (const n of donors ?? []) names.add(n)
+    // `gb:` ids never collide with Natural Earth's adm1_code, so the two sources
+    // can sit in `raw` together while the ADM0-only countries still resolve.
+    const id = `gb:${code}:${i}`
+    raw.set(id, u.geometry)
+    return {
+      id,
+      name: u.name ?? [...names][0] ?? id,
+      names: [...names],
+      code: u.code ?? null,
+      parts: [id],
+      geometry: u.geometry,
+      groups: [],
+    }
+  })
+  byCountry.set(code, list)
+  // The country is its own subdivisions, dissolved — not Natural Earth's
+  // outline, which would disagree with them along every coast.
+  writeCountry(code, countryName, countryNames, dissolve(list.map((f) => f.geometry)))
+  if (wasSynthesized || known?.synthesized) index.countries[code].synthesized = true
+  gbCountries++
+  gbUnits += list.length
 }
 
 /**
@@ -173,8 +419,7 @@ for (const [code, list] of byCountry) {
     const keys = new Set([name, ...shared].map(bare))
     for (const m of members) m.names = m.names.filter((n) => !keys.has(bare(n)))
     const parts = [...new Set(members.flatMap((m) => m.parts))]
-    const geometry = simplify(dissolve(parts.map((p) => raw.get(p))))
-    vOut += countVertices(geometry)
+    const geometry = dissolve(parts.map((p) => raw.get(p)))
     list.push({ id: `${code}~${norm(name)}`, name, names: [name, ...shared], code: null, parts, geometry, group: true })
   }
   for (const f of list) delete f.groups
@@ -189,15 +434,15 @@ for (const [code, list] of byCountry) {
 for (const [code, list] of byCountry) {
   if (index.countries[code]) continue
   const parts = [...new Set(list.filter((f) => !f.group).flatMap((f) => f.parts))]
-  const geometry = simplify(dissolve(parts.map((p) => raw.get(p))))
-  vOut += countVertices(geometry)
+  const geometry = dissolve(parts.map((p) => raw.get(p)))
   const names = [...(parentNames.get(code) ?? [])]
   writeCountry(code, names[0] ?? code, names, geometry)
   index.countries[code].synthesized = true
 }
 
 for (const [code, list] of byCountry) {
-  writeFileSync(join(HERE, 'admin1', code + '.json'), JSON.stringify(list))
+  for (const lod of LODS)
+    slice('admin1', lod, code, list.map((f) => ({ ...f, geometry: simplifyAt(f.geometry, lod.tol) })))
   if (index.countries[code]) index.countries[code].admin1 = list.length
   else index.countries[code] = { name: code, names: [], admin1: list.length, merged: 0 }
 }
@@ -236,8 +481,7 @@ for (const [key, names] of Object.entries(scope)) {
   if (!merged.has(code)) merged.set(code, {})
   if (merged.get(code)[sig]) continue
   const parts = [...new Set(matched.flatMap((f) => f.parts))]
-  const geometry = simplify(dissolve(parts.map((p) => raw.get(p))))
-  vOut += countVertices(geometry)
+  const geometry = dissolve(parts.map((p) => raw.get(p)))
   // Label from the widest features only: where a scope names both a community
   // and one of its provinces, "Cataluña + Valenciana" is the honest caption and
   // "+ Valencia" would be noise.
@@ -252,7 +496,15 @@ for (const [key, names] of Object.entries(scope)) {
   }
 }
 for (const [code, sets] of merged) {
-  writeFileSync(join(HERE, 'merged', code + '.json'), JSON.stringify(sets))
+  for (const lod of LODS)
+    slice(
+      'merged',
+      lod,
+      code,
+      Object.fromEntries(
+        Object.entries(sets).map(([sig, f]) => [sig, { ...f, geometry: simplifyAt(f.geometry, lod.tol) }])
+      )
+    )
   if (index.countries[code]) index.countries[code].merged = Object.keys(sets).length
 }
 writeFileSync(join(HERE, 'index.json'), JSON.stringify(index, null, 2))
@@ -261,6 +513,15 @@ const synthesized = Object.values(index.countries).filter((c) => c.synthesized).
 console.log(
   `admin0: ${Object.keys(index.countries).length} countries (${synthesized} dissolved from their own subdivisions) | ` +
     `admin1: ${byCountry.size} countries, ${[...byCountry.values()].reduce((n, l) => n + l.length, 0)} subdivisions | ` +
-    `merged: ${[...merged.values()].reduce((n, s) => n + Object.keys(s).length, 0)} scope sets`
+    `merged: ${[...merged.values()].reduce((n, s) => n + Object.keys(s).length, 0)} scope sets | ` +
+    `geoBoundaries: ${gbCountries} countries, ${gbUnits} subdivisions` +
+    (gbDeclined.length ? ` (Natural Earth kept for ${gbDeclined.join(', ')} — finer there)` : '')
 )
-console.log(`vertices ${vIn.toLocaleString()} → ${vOut.toLocaleString()} (${((1 - vOut / vIn) * 100).toFixed(1)}% trimmed)`)
+for (const lod of LODS) {
+  const n = vOut.get(lod.id)
+  console.log(
+    `  LOD ${lod.id} (tol ${lod.tol}°, z≤${lod.maxZoom}): ` +
+      `${n.toLocaleString()} vertices (raw sources hold ${vIn.toLocaleString()}), ` +
+      `${(bytes.get(lod.id) / 2 ** 20).toFixed(1)} MB on disk`
+  )
+}

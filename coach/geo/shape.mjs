@@ -12,11 +12,52 @@
  * another at the same latitude, which is all they are ever used for.
  */
 
-// Error budget: a shape drawn across ~600 px may deviate by DETAIL⁻¹ of its own
-// width. 1/4000 is a fifth of a pixel — below what a display can show.
-export const DETAIL = 4000
-export const MIN_TOL = 0.0002 // floor, so small shapes stay honest rather than exact
-export const MAX_TOL = 0.02
+/**
+ * The level-of-detail ladder, and where each rung's tolerance comes from.
+ *
+ * A web-mercator tile is 256 px wide and spans 360° at zoom 0, so one pixel is
+ * 360/(256·2^z) degrees. Aim each rung at *half a pixel at the top of its own
+ * zoom band* — the finest error that band can possibly show — and the numbers
+ * fall out of the arithmetic rather than out of taste:
+ *
+ *   LOD 0, top of band z=5   180/(256·32)   = 0.0220°  → 0.02
+ *   LOD 1, top of band z=8   180/(256·256)  = 0.0027°  → 0.0025
+ *   LOD 2, no band above it  180/(256·2048) = 0.00034° → 0.0003
+ *
+ * LOD 2 is the last rung, so there is no "top of band" to size it by; it is
+ * sized for z≈11, about as close as the result map is ever pushed, and from
+ * there it just draws finer than the screen can show.
+ *
+ * `maxZoom` on the last rung is a number past any real map zoom rather than a
+ * null, so a client can pick a rung with a plain `z <= maxZoom` scan.
+ */
+export const LODS = [
+  { id: 0, tol: 0.02, maxZoom: 5 },
+  { id: 1, tol: 0.0025, maxZoom: 8 },
+  { id: 2, tol: 0.0003, maxZoom: 24 },
+]
+
+/**
+ * An outer ring whose bounding box diagonal is under this many tolerances is
+ * dropped for that LOD: at half a pixel per tolerance, ten of them is a ring
+ * five pixels across, which the overlay then strokes with a seven-pixel glow.
+ * A shape smaller than the line that draws it is a dot, and a hundred dots
+ * along a coast — Patagonia, the Hebrides — read as one solid mass. Leaving it
+ * out is the more honest drawing, and it returns properly outlined one rung
+ * down, where it is finally big enough to have a shape.
+ *
+ * Ten rather than the three or four that "just below a pixel" would suggest,
+ * because at three the rule does nothing measurable: Chile keeps 160 of its 163
+ * outlines and the UK 53 of 57. At ten, Chile drops to 123 and the UK to 27,
+ * while Shetland (1.03° across) and Orkney (0.71°) — the ones that have to
+ * survive — clear the 0.2° LOD 0 threshold five times over.
+ */
+export const DROP_TOLS = 10
+
+/** Floor on the tolerance the sliver rescue below may refine to. 1e-6° is a
+ * tenth of a metre, which is also where precisionFor's six-decimal cap lands —
+ * refining past it would only be undone by the rounding. */
+export const REFINE_FLOOR = 1e-6
 
 /** Squared perpendicular distance from p to the segment ab, in raw degrees.
  * Squared because Douglas-Peucker only ever compares distances. */
@@ -79,26 +120,33 @@ export function extent(pts) {
   return Math.hypot(x1 - x0, y1 - y0)
 }
 
-export const clampTol = (t) => Math.min(MAX_TOL, Math.max(MIN_TOL, t))
+/** Whether a ring is too small to be worth drawing at `tol` — see DROP_TOLS. */
+export const tooSmall = (r, tol) => extent(r) < DROP_TOLS * tol
 
-/** A polygon ring needs 4 points to close. Below that the shape is finer than
- * the budget allows, so it becomes its own bounding box: present, correctly
- * placed, and honest about the detail it no longer carries. An islet that far
- * below the budget is a couple of pixels on screen either way. */
+/** A polygon ring needs 4 points to close, and a long thin sliver can simplify
+ * below that — Douglas-Peucker keeps the endpoints and one apex, and a closed
+ * ring's endpoints are the same point. This used to hand back the ring's
+ * bounding box, which is where the boxy islands came from: a rectangle is not
+ * an approximation of a coastline, it is a different shape drawn confidently.
+ * Refine instead. The sliver is above the drop threshold, so it has earned its
+ * pixels; giving it a quarter of the tolerance until it holds four points draws
+ * it finer than the budget rather than wronger than the budget, and costs a
+ * handful of vertices on the handful of rings that need it.
+ *
+ * Rounding happens here rather than in the caller so a rescued ring keeps the
+ * decimals its own tolerance justifies — rounded to the LOD's coarser
+ * precision, the sliver would collapse right back to a line. */
 export function ring(r, tol) {
-  const s = simplifyRing(r, tol)
-  if (s.length >= 4) return s
-  const [x0, y0, x1, y1] = bbox(r)
-  return [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
-}
-
-/** Whole-feature extent drives the budget: it is the feature, not the ring,
- * that the map frames. */
-export function featureTol(geom) {
-  const rings = ringsOf(geom)
-  let max = 0
-  for (const r of rings) max = Math.max(max, extent(r))
-  return clampTol(max / DETAIL)
+  let t = tol
+  let s = simplifyRing(r, t)
+  while (s.length < 4 && t > REFINE_FLOOR) {
+    t /= 4
+    s = simplifyRing(r, t)
+  }
+  // Degenerate even at full precision (a ring of repeated points): keep it as
+  // drawn. Nothing here can invent a shape that was never there.
+  if (s.length < 4) s = r
+  return roundRing(s, precisionFor(t))
 }
 
 /** Decimals worth keeping at a given tolerance: a tenth of it, which holds
@@ -112,14 +160,49 @@ function roundRing(r, dp) {
   return r.map(([x, y]) => [Math.round(x * m) / m, Math.round(y * m) / m])
 }
 
-export function simplify(geom) {
+/**
+ * One geometry, thinned for one rung of the ladder.
+ *
+ * The tolerance is a function of zoom, not of the feature. The old build sized
+ * it from the feature's largest ring, which meant Chile's 37°-tall mainland set
+ * the budget for every rock in the Patagonian archipelago: the coast came out
+ * smooth and the islands came out as boxes, at every zoom, forever. Zoom is the
+ * thing that decides what an eye can resolve, so zoom is the thing that decides
+ * the tolerance — and a feature is now built three times, once per band.
+ *
+ * Rings below the drop threshold leave, and a hole leaves with the outer ring
+ * that contained it: dropping the outer and keeping the hole would punch a void
+ * in open water. Holes are judged on their own size too, since a sub-pixel hole
+ * is noise the same way a sub-pixel island is. What never happens is a feature
+ * emptying itself — an island nation is *all* small rings, and invisible is not
+ * an acceptable answer for the country the round was played in — so if the rule
+ * would take everything, the largest ring stays.
+ */
+export function simplifyAt(geom, tol) {
   if (!geom) return null
   if (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon') return geom
-  const tol = featureTol(geom)
-  const dp = precisionFor(tol)
-  const one = (r) => roundRing(ring(r, tol), dp)
-  if (geom.type === 'Polygon') return { type: 'Polygon', coordinates: geom.coordinates.map(one) }
-  return { type: 'MultiPolygon', coordinates: geom.coordinates.map((poly) => poly.map(one)) }
+  const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates
+  const kept = []
+  for (const poly of polys) {
+    if (!poly.length || tooSmall(poly[0], tol)) continue
+    // A ring of three points is two points and a repeat: no area, nothing to
+    // draw. OpenStreetMap has a scattering of them and they arrive intact,
+    // because `ring` refuses to invent detail and hands a degenerate ring back
+    // as it found it. Dropping is the honest answer — an outer ring with no
+    // area takes its polygon with it.
+    const outer = ring(poly[0], tol)
+    if (outer.length < 4) continue
+    const holes = poly.slice(1).filter((h) => !tooSmall(h, tol))
+    kept.push([outer, ...holes.map((h) => ring(h, tol)).filter((h) => h.length >= 4)])
+  }
+  if (!kept.length) {
+    let widest = null
+    for (const poly of polys) if (poly.length && (!widest || extent(poly[0]) > extent(widest))) widest = poly[0]
+    const r = widest && ring(widest, tol)
+    if (r && r.length >= 4) kept.push([r])
+  }
+  if (geom.type === 'Polygon' && kept.length === 1) return { type: 'Polygon', coordinates: kept[0] }
+  return { type: 'MultiPolygon', coordinates: kept }
 }
 
 export const countVertices = (g) =>
@@ -166,7 +249,48 @@ export function inside(p, r) {
   return hit
 }
 
-const pt = (c) => c[0] + ',' + c[1]
+/**
+ * The same crossing test as `inside`, prepared for a ring that will be asked
+ * many times.
+ *
+ * Nesting a hundred thousand Arctic islets means asking, for each one, whether
+ * it sits inside the Canadian mainland — and the mainland is one ring of well
+ * over a million points, so the honest answer costs a million comparisons and
+ * the honest build never finishes. Only the edges at the islet's own latitude
+ * can possibly be crossed, so the ring is bucketed into horizontal bands once
+ * and each query walks one band: a few dozen edges instead of a million.
+ *
+ * Small rings skip all of this — building the index would cost more than the
+ * scans it saves.
+ */
+export function hitTester(ring) {
+  if (ring.length < 512) return (p) => inside(p, ring)
+  let lo = Infinity
+  let hi = -Infinity
+  for (const c of ring) {
+    if (c[1] < lo) lo = c[1]
+    if (c[1] > hi) hi = c[1]
+  }
+  const n = Math.max(1, Math.min(8192, ring.length >> 4))
+  const h = (hi - lo) / n || 1
+  const bands = Array.from({ length: n }, () => [])
+  const band = (y) => Math.min(n - 1, Math.max(0, Math.floor((y - lo) / h)))
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = band(Math.min(ring[i][1], ring[j][1]))
+    const b = band(Math.max(ring[i][1], ring[j][1]))
+    for (let k = a; k <= b; k++) bands[k].push(i, j)
+  }
+  return (p) => {
+    const b = bands[band(p[1])]
+    let hit = false
+    for (let t = 0; t < b.length; t += 2) {
+      const [xi, yi] = ring[b[t]]
+      const [xj, yj] = ring[b[t + 1]]
+      if (yi > p[1] !== yj > p[1] && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) hit = !hit
+    }
+    return hit
+  }
+}
 
 /**
  * Merges neighbouring features into one outline with no internal borders.
@@ -183,26 +307,88 @@ const pt = (c) => c[0] + ',' + c[1]
  * geometry twice is harmless: identical directed edges collapse in the map.
  */
 export function dissolve(geoms) {
-  const edges = new Map() // "from>to" -> [from, to]
-  for (const g of geoms)
-    for (const r of ringsOf(g))
-      for (let i = 1; i < r.length; i++) edges.set(pt(r[i - 1]) + '>' + pt(r[i]), [r[i - 1], r[i]])
-  const from = new Map()
-  for (const [k, [, b]] of edges) {
-    const [ka, kb] = k.split('>')
-    if (edges.has(kb + '>' + ka)) continue
-    if (!from.has(ka)) from.set(ka, [])
-    from.get(ka).push(b)
+  /**
+   * Vertices as small integers rather than as "x,y" strings.
+   *
+   * Cancelling edges means recognising the same corner arriving from two
+   * neighbours, and the obvious way to do that is to spell the coordinates out
+   * and compare the text. At Natural Earth's scale that was free. At
+   * OpenStreetMap's it is the whole cost of the build: Canada is two and a half
+   * million vertices, and formatting every one of them twice — once for each
+   * edge it belongs to — dominates everything else the dissolve does.
+   *
+   * The cheap path exploits how the geometry got here. Decoded from a
+   * topology, a border shared by two provinces is one arc, and both provinces
+   * reference the very same coordinate arrays; a reversed arc is a reversed
+   * list of the same arrays. So identity alone identifies most corners, and the
+   * text is only ever built for a coordinate this dissolve has not seen as an
+   * object before — which is every vertex exactly once, and which is also what
+   * keeps the answer right for Natural Earth's geometry, where two neighbours
+   * genuinely hold separate arrays holding equal numbers.
+   */
+  const byRef = new Map()
+  const byText = new Map()
+  const point = []
+  const idOf = (c) => {
+    let id = byRef.get(c)
+    if (id !== undefined) return id
+    const text = c[0] + ',' + c[1]
+    id = byText.get(text)
+    if (id === undefined) {
+      id = point.length
+      point.push(c)
+      byText.set(text, id)
+    }
+    byRef.set(c, id)
+    return id
   }
+
+  // a -> set of b, for every directed edge a→b. Nested maps rather than one map
+  // of joined keys, for the same reason as above: no key to build.
+  const out = new Map()
+  let edgeCount = 0
+  for (const g of geoms)
+    for (const r of ringsOf(g)) {
+      let a = idOf(r[0])
+      for (let i = 1; i < r.length; i++) {
+        const b = idOf(r[i])
+        let ends = out.get(a)
+        if (!ends) out.set(a, (ends = new Set()))
+        if (!ends.has(b)) {
+          ends.add(b)
+          edgeCount++
+        }
+        a = b
+      }
+    }
+
+  // An edge that appears both ways round is interior — the border two
+  // neighbours share — and drops out. What survives is the outline of the
+  // union, still head-to-tail.
+  const from = new Map()
+  for (const [a, ends] of out)
+    for (const b of ends) {
+      if (out.get(b)?.has(a)) continue
+      let list = from.get(a)
+      if (!list) from.set(a, (list = []))
+      list.push(b)
+    }
+
   const rings = []
+  // A walk can visit each surviving edge at most once, so the edge count is the
+  // only honest ceiling. It has to be computed rather than picked: Canada's
+  // mainland is one ring of well over a million points at the finest rung, and
+  // a fixed guard sized for Natural Earth's coastlines would quietly truncate
+  // it into an outline that ends in the middle of the Arctic.
+  const limit = edgeCount + 1
   for (const [start, ends] of from) {
     while (ends.length) {
-      const r = [start.split(',').map(Number)]
+      const r = [point[start]]
       let cur = ends.pop()
       let guard = 0
-      while (pt(cur) !== start && guard++ < 200000) {
-        r.push(cur)
-        const nxt = from.get(pt(cur))
+      while (cur !== start && guard++ < limit) {
+        r.push(point[cur])
+        const nxt = from.get(cur)
         if (!nxt?.length) break
         cur = nxt.pop()
       }
@@ -210,14 +396,126 @@ export function dissolve(geoms) {
       if (r.length >= 4) rings.push(r)
     }
   }
-  // Largest-first, so an enclave lands as a hole in the ring that contains it
-  // rather than as a solid patch of its own.
-  rings.sort((a, b) => Math.abs(signedArea(b)) - Math.abs(signedArea(a)))
+  const sized = rings.map((r) => ({ r, a: Math.abs(signedArea(r)), box: bbox(r) }))
+  sized.sort((x, y) => y.a - x.a)
+
+  /**
+   * Which ring, if any, encloses each of the others.
+   *
+   * Asking that of every ring already placed is quadratic, and Canada's coast
+   * at the finest rung dissolves into a hundred thousand rings — the Arctic
+   * archipelago is mostly islets — which is ten billion comparisons and a build
+   * that never ends. So the rings placed so far are indexed by the whole-degree
+   * cells their bounding boxes cover, and a new ring only ever asks the one
+   * cell its first point falls in. Anything spanning more cells than it is
+   * worth indexing — a mainland, a country-sized outline — goes in a short list
+   * that is always consulted, which is both correct and tiny.
+   */
+  const CELLS_INDEXED = 4096
+  const grid = new Map()
+  const wide = []
   const polys = []
-  for (const r of rings) {
-    const host = polys.find((poly) => inside(r[0], poly[0]))
-    if (host) host.push(r)
-    else polys.push([r])
+  const boxes = []
+  const tests = []
+  for (const { r, box } of sized) {
+    let host = -1
+    const cell = Math.floor(box[0]) + ':' + Math.floor(box[1])
+    // Ascending index is descending area, so the first container found is the
+    // tightest-fitting one that was placed — an enclave inside an enclave lands
+    // in the right host.
+    const candidates = [...wide, ...(grid.get(cell) ?? [])].sort((a, b) => a - b)
+    for (const i of candidates) {
+      const h = boxes[i]
+      if (box[0] < h[0] || box[1] < h[1] || box[2] > h[2] || box[3] > h[3]) continue
+      if ((tests[i] ??= hitTester(polys[i][0]))(r[0])) {
+        host = i
+        break
+      }
+    }
+    if (host >= 0) {
+      polys[host].push(r)
+      continue
+    }
+    const i = polys.length
+    polys.push([r])
+    boxes.push(box)
+    tests.push(null)
+    const x0 = Math.floor(box[0])
+    const x1 = Math.floor(box[2])
+    const y0 = Math.floor(box[1])
+    const y1 = Math.floor(box[3])
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) > CELLS_INDEXED) {
+      wide.push(i)
+      continue
+    }
+    for (let x = x0; x <= x1; x++)
+      for (let y = y0; y <= y1; y++) {
+        const k = x + ':' + y
+        if (!grid.has(k)) grid.set(k, [])
+        grid.get(k).push(i)
+      }
   }
   return { type: 'MultiPolygon', coordinates: polys }
 }
+
+/**
+ * The part of a shape that falls inside a rectangle.
+ *
+ * The detail ladder can only ever be a compromise while the whole outline has
+ * to travel: Hokkaidō at the finest rung is a quarter of a megabyte and fine to
+ * send, but Chile is two and Canada is forty, so the server has to answer a
+ * zoomed-in map with a coarse shape and the coastline goes back to cutting
+ * across bays. Clipping breaks the link between how much detail a shape has and
+ * how much of it has to be sent: what leaves the server is bounded by the size
+ * of the window, not by the size of the country, and every country can be drawn
+ * at full precision.
+ *
+ * Sutherland–Hodgman, one half-plane at a time. It is exact for a convex
+ * clipping shape, and a rectangle is convex; where it degenerates — a concave
+ * ring re-entering the box, which comes back joined along the edge rather than
+ * as two rings — the join lies on the boundary of the window, which the caller
+ * keeps well off screen.
+ */
+export function clipGeometry(geom, box) {
+  if (!geom) return null
+  const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.type === 'MultiPolygon' ? geom.coordinates : null
+  if (!polys) return null
+  const kept = []
+  for (const poly of polys) {
+    const outer = clipRing(poly[0], box)
+    if (!outer) continue
+    kept.push([outer, ...poly.slice(1).map((h) => clipRing(h, box)).filter(Boolean)])
+  }
+  return kept.length ? { type: 'MultiPolygon', coordinates: kept } : null
+}
+
+/** One ring against one rectangle `[w, s, e, n]`, or null if nothing survives. */
+export function clipRing(pts, [x0, y0, x1, y1]) {
+  // The closing repeat is an artefact of how a ring is written down; the
+  // algorithm wants the cycle, and re-closing at the end is what puts it back.
+  let out = pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]
+    ? pts.slice(0, -1)
+    : pts.slice()
+  const sides = [
+    [(p) => p[0] >= x0, (a, b) => atX(a, b, x0)],
+    [(p) => p[0] <= x1, (a, b) => atX(a, b, x1)],
+    [(p) => p[1] >= y0, (a, b) => atY(a, b, y0)],
+    [(p) => p[1] <= y1, (a, b) => atY(a, b, y1)],
+  ]
+  for (const [keep, cross] of sides) {
+    const next = []
+    for (let i = 0; i < out.length; i++) {
+      const cur = out[i]
+      const prev = out[(i + out.length - 1) % out.length]
+      const kc = keep(cur)
+      if (kc !== keep(prev)) next.push(cross(prev, cur))
+      if (kc) next.push(cur)
+    }
+    out = next
+    if (out.length < 3) return null
+  }
+  return [...out, out[0]]
+}
+
+const atX = (a, b, x) => [x, a[1] + ((x - a[0]) / (b[0] - a[0])) * (b[1] - a[1])]
+const atY = (a, b, y) => [a[0] + ((y - a[1]) / (b[1] - a[1])) * (b[0] - a[0]), y]

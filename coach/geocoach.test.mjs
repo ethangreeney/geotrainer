@@ -22,8 +22,12 @@ const sliceOk = startAt >= 0 && endAt > startAt
 const section = sliceOk ? bodySrc.slice(startAt, endAt) : ''
 
 /** The section's own top-level names, handed back for the tests to drive. */
-const EXPORTS = `;return { fetchScopeGeo, scopeKey, ensureMapCapture, pickResultMap, scopeBounds,
-  widenIfOffscreen, paintScope, drawScopeOverlay, removeScopeOverlay, layers: () => scopeLayers }`
+const EXPORTS = `;return { fetchScopeGeo, warmScopeGeo, scopeKey, ensureMapCapture, pickResultMap, scopeBounds,
+  paintScope, drawScopeOverlay, removeScopeOverlay, layers: () => scopeLayers,
+  lodForZoom, scopeWeights, zoomForBox, boxOfBounds, visibleFraction, countPoints,
+  armScopeHold, armMapCamera, offerScopeBox, frameScope, boxOf,
+  boxCovers, boxParam, viewBox, padBox,
+  scopeStoreGet, scopeStorePut, easeInOut, lerpLng }`
 
 /** The loader, run against a stub window. Its body fetch never calls back. */
 function runLoader(W) {
@@ -54,7 +58,14 @@ const SCOPE = { country: 'CA', regions: ['Ontario'] }
  * whatever the test says it is. `reply` returns a response object, or the
  * string 'error'/'timeout' to take those callbacks instead.
  */
-function makeEnv({ payload = PAYLOAD, reply, pathname = '/results/xyz', viewport = null } = {}) {
+function makeEnv({
+  payload = PAYLOAD,
+  reply,
+  pathname = '/results/xyz',
+  viewport = null,
+  zoom = 4,
+  quota = Infinity,
+} = {}) {
   if (!sliceOk) throw new Error('scope-overlay section not found in geocoach.user.js')
   const dataLayers = []
   const fitCalls = []
@@ -77,6 +88,8 @@ function makeEnv({ payload = PAYLOAD, reply, pathname = '/results/xyz', viewport
       this.map = m
     }
   }
+  /** Google's bounds object accumulates points and reports the corners; the
+   * overlay both builds one (to widen a fitBounds) and reads one back out. */
   class LatLngBounds {
     constructor() {
       this.pts = []
@@ -85,12 +98,57 @@ function makeEnv({ payload = PAYLOAD, reply, pathname = '/results/xyz', viewport
       this.pts.push(p)
       return this
     }
+    getSouthWest() {
+      const s = Math.min(...this.pts.map((p) => p.lat))
+      const w = Math.min(...this.pts.map((p) => p.lng))
+      return { lat: () => s, lng: () => w }
+    }
+    getNorthEast() {
+      const n = Math.max(...this.pts.map((p) => p.lat))
+      const e = Math.max(...this.pts.map((p) => p.lng))
+      return { lat: () => n, lng: () => e }
+    }
   }
-  const div = { isConnected: true, getBoundingClientRect: () => ({ width: 900, height: 600 }) }
+  const divListeners = {}
+  const div = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ width: 900, height: 600 }),
+    addEventListener: (ev, fn) => ((divListeners[ev] ||= []).push(fn)),
+  }
+  const listeners = {}
+  let view = viewport
+  const cam = { zoom, center: { lat: 0, lng: 0 } }
   const map = {
     getDiv: () => div,
     fitBounds: (...args) => fitCalls.push(args),
-    getBounds: () => viewport,
+    getBounds: () => view,
+    getZoom: () => cam.zoom,
+    setZoom: (z) => (cam.zoom = z),
+    getCenter: () => ({ lat: () => cam.center.lat, lng: () => cam.center.lng }),
+    setCenter: (c) => (cam.center = c),
+    addListener: (ev, fn) => {
+      ;(listeners[ev] ||= []).push(fn)
+      return { remove: () => (listeners[ev] = listeners[ev].filter((f) => f !== fn)) }
+    },
+  }
+  const fire = (ev) => (listeners[ev] || []).forEach((f) => f())
+  const fireDiv = (ev) => (divListeners[ev] || []).forEach((f) => f())
+  /** Zooming the way the user does: the value changes, then the map says so. */
+  const zoomTo = (z) => {
+    cam.zoom = z
+    fire('zoom_changed')
+  }
+  // A localStorage that behaves like the real one where it matters: string
+  // values, and a quota that throws once the tests want to see eviction.
+  const cells = new Map()
+  const localStorage = {
+    getItem: (k) => (cells.has(k) ? cells.get(k) : null),
+    removeItem: (k) => cells.delete(k),
+    setItem(k, v) {
+      const other = [...cells].reduce((n, [kk, vv]) => (kk === k ? n : n + kk.length + vv.length), 0)
+      if (other + k.length + String(v).length > quota) throw new Error('QuotaExceededError')
+      cells.set(k, String(v))
+    },
   }
   const W = { google: { maps: { Data, LatLngBounds, Map: class {} } }, __geocoachMaps: [map] }
   const answer = reply || (() => ({ status: 200, responseText: JSON.stringify(payload) }))
@@ -103,13 +161,16 @@ function makeEnv({ payload = PAYLOAD, reply, pathname = '/results/xyz', viewport
       else req.onload?.(r)
     }, 0)
   }
+  const seenOnce = new Set()
   const api = new Function(
     'W',
     'LOCAL',
     'tlog',
+    'tlogOnce',
     'GM_xmlhttpRequest',
     'document',
     'location',
+    'localStorage',
     'requestAnimationFrame',
     'fetch',
     section + EXPORTS,
@@ -117,19 +178,33 @@ function makeEnv({ payload = PAYLOAD, reply, pathname = '/results/xyz', viewport
     W,
     'http://127.0.0.1:5177',
     (line) => tlogLines.push(line),
+    (key, line) => {
+      if (seenOnce.has(key)) return
+      seenOnce.add(key)
+      tlogLines.push(line)
+    },
     GM_xmlhttpRequest,
     { getElementById: () => null },
     { pathname },
+    localStorage,
     (fn) => setTimeout(fn, 16),
     () => Promise.reject(new Error('mixed content')),
   )
-  return { api, W, map, div, dataLayers, fitCalls, requests, tlogLines }
+  /** Panning: the bounds change, then the map settles and says so. */
+  const panTo = (b) => {
+    view = b
+    fire('idle')
+  }
+  return { api, W, map, div, cam, cells, dataLayers, fitCalls, requests, tlogLines, fire, fireDiv, zoomTo, panTo }
 }
 
 const urlsOf = (env) => env.requests.map((r) => r.url)
 const styleOf = (layer) => layer.styles[layer.styles.length - 1]
 /** Lets the GM reply land, the map be found, and the fade run to completion. */
 const settle = () => vi.advanceTimersByTimeAsync(500)
+/** The same, plus the 600ms framing tween — so a test that drives the camera
+ * afterwards is not fighting the one move the overlay makes on arrival. */
+const arrive = () => vi.advanceTimersByTimeAsync(1200)
 
 // Fake timers throughout: the overlay waits on a network reply, polls for a
 // map that may not be mounted yet, and fades over 320ms. Real waits would make
@@ -142,6 +217,17 @@ describe('test setup', () => {
     expect(startAt, 'section start marker missing from geocoach.user.js').toBeGreaterThanOrEqual(0)
     expect(endAt, 'section end marker (removeCard) missing or above the start').toBeGreaterThan(startAt)
     expect(section).toContain('function drawScopeOverlay')
+  })
+
+  it('logs the same version it declares', () => {
+    // The "body X up" line is the only thing that says which body a machine we
+    // are not sitting at is running, and it drifted once already.
+    const body = read('geocoach.user.js')
+    const declared = body.match(/@version\s+([\d.]+)/)
+    const logged = body.match(/const BODY_VERSION = '([\d.]+)'/)
+    expect(declared, '@version missing').toBeTruthy()
+    expect(logged, 'BODY_VERSION missing').toBeTruthy()
+    expect(logged[1]).toBe(declared[1])
   })
 })
 
@@ -372,9 +458,9 @@ describe('scope-geo request', () => {
     env.api.fetchScopeGeo({ country: 'ES', regions: ['Cataluña'] }).catch(() => {})
     env.api.fetchScopeGeo({ country: 'ID', regions: ['Nusa Tenggara Timur'] }).catch(() => {})
     expect(urlsOf(env)).toEqual([
-      'http://127.0.0.1:5177/api/scope-geo?country=CA&regions=Ontario%7CQuebec',
-      'http://127.0.0.1:5177/api/scope-geo?country=ES&regions=Catalu%C3%B1a',
-      'http://127.0.0.1:5177/api/scope-geo?country=ID&regions=Nusa%20Tenggara%20Timur',
+      'http://127.0.0.1:5177/api/scope-geo?country=CA&regions=Ontario%7CQuebec&lod=0',
+      'http://127.0.0.1:5177/api/scope-geo?country=ES&regions=Catalu%C3%B1a&lod=0',
+      'http://127.0.0.1:5177/api/scope-geo?country=ID&regions=Nusa%20Tenggara%20Timur&lod=0',
     ])
   })
 
@@ -383,8 +469,8 @@ describe('scope-geo request', () => {
     env.api.fetchScopeGeo({ country: 'SE', regions: null }).catch(() => {})
     env.api.fetchScopeGeo({ country: 'SE', regions: [] }).catch(() => {})
     expect(urlsOf(env)).toEqual([
-      'http://127.0.0.1:5177/api/scope-geo?country=SE',
-      'http://127.0.0.1:5177/api/scope-geo?country=SE',
+      'http://127.0.0.1:5177/api/scope-geo?country=SE&lod=0',
+      'http://127.0.0.1:5177/api/scope-geo?country=SE&lod=0',
     ])
   })
 
@@ -432,7 +518,7 @@ describe('drawing the scope', () => {
       strokeColor: '#2b1b58',
       fillColor: '#2b1b58',
       strokeOpacity: 0.95,
-      strokeWeight: 2,
+      strokeWeight: 1.25, // the z4 rung of the weight ramp
     })
     expect(styleOf(main).fillOpacity).toBeCloseTo(0.14, 10)
     // Light enough that the guess and answer pins stay readable through it.
@@ -465,7 +551,7 @@ describe('drawing the scope', () => {
     const env = makeEnv()
     env.W.__geocoachMaps = []
     env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
-    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(15_000)
     expect(env.dataLayers).toHaveLength(0)
     expect(env.tlogLines.join(' ')).toMatch(/no visible map/)
   })
@@ -629,11 +715,7 @@ describe('choosing the map to draw on', () => {
   })
 })
 
-describe('bounds and the one-time widen', () => {
-  const viewport = (s, w, n, e) => ({
-    getSouthWest: () => ({ lat: () => s, lng: () => w }),
-    getNorthEast: () => ({ lat: () => n, lng: () => e }),
-  })
+describe('bounds', () => {
   const BOX = { n: 57, s: 41, e: -74, w: -95 }
 
   it('reads the bounding box off the raw coordinates', () => {
@@ -647,40 +729,817 @@ describe('bounds and the one-time widen', () => {
     expect(api.scopeBounds({})).toBeNull()
   })
 
-  it('widens once when the shape is nowhere near the current view', () => {
-    const env = makeEnv({ viewport: viewport(-40, 100, 0, 160) }) // an Australian framing
-    env.api.widenIfOffscreen(env.map, BOX, 'r1:CA|Ontario')
+  it('trusts the server’s own bbox over the drawn coordinates', () => {
+    // The point of the server sending one: at a coarse level the coordinates
+    // have been simplified inwards, so measuring them under-frames the region.
+    const { api } = makeEnv()
+    const bbox = { n: 58, s: 40, e: -73, w: -96 }
+    expect(api.boxOf({ bbox, geojson: ONTARIO })).toEqual(bbox)
+    expect(api.boxOf({ geojson: ONTARIO })).toEqual(BOX)
+    expect(api.boxOf({ bbox: { n: 1, s: 2, e: 3, w: 4 }, geojson: ONTARIO })).toEqual(BOX)
+    // And the main mass beats the true extent: Chile is framed on Chile, not on
+    // the ocean out to Easter Island.
+    const frame = { n: 57, s: 41, e: -74, w: -80 }
+    expect(api.boxOf({ frame, bbox, geojson: ONTARIO })).toEqual(frame)
+    expect(api.boxOf({ frame: null, bbox, geojson: ONTARIO })).toEqual(bbox)
+  })
+})
+
+// The camera is the part the user actually feels: one move, not two. The guess
+// POST arms a hold, GeoGuessr's own fitBounds is sat on for a few hundred ms,
+// and it is released widened to take in the region — so the zoom-in-then-out
+// jerk never happens. Geometry that misses the hold eases instead of snapping.
+describe('the camera makes one move', () => {
+  const BOX = { n: 57, s: 41, e: -74, w: -95 }
+  /** A LatLngBounds of the env's own class, the way GeoGuessr would pass one. */
+  const bounds = (env, box) =>
+    new env.W.google.maps.LatLngBounds().extend({ lat: box.n, lng: box.e }).extend({ lat: box.s, lng: box.w })
+  const boxOfCall = (env, i) => env.api.boxOfBounds(env.fitCalls[i][0])
+  const AWAY = { n: 0, s: -40, e: 160, w: 100 } // an Australian framing
+  const NEAR = { n: 60, s: 35, e: -70, w: -100 } // Ontario, comfortably framed
+
+  it('sits on GeoGuessr’s framing until the region turns up, then folds it in', () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.map.fitBounds(bounds(env, AWAY), 40)
+    expect(env.fitCalls).toEqual([]) // held: nothing has moved yet
+
+    env.api.offerScopeBox(BOX)
     expect(env.fitCalls).toHaveLength(1)
-    const [bounds, padding] = env.fitCalls[0]
-    expect(padding).toBeGreaterThan(0)
-    expect(bounds.pts).toContainEqual({ lat: 57, lng: -74 }) // the shape
-    expect(bounds.pts).toContainEqual({ lat: -40, lng: 100 }) // and what was already framed
-    env.api.widenIfOffscreen(env.map, BOX, 'r1:CA|Ontario')
+    expect(boxOfCall(env, 0)).toEqual({ n: 57, s: -40, e: 160, w: -95 }) // the union
+    expect(env.fitCalls[0][1]).toBe(40) // their own padding rides along
+    expect(env.tlogLines.join(' ')).toMatch(/folded into/)
+  })
+
+  it('never moves twice', async () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.map.fitBounds(bounds(env, AWAY))
+    env.api.offerScopeBox(BOX)
+    await vi.advanceTimersByTimeAsync(2000) // the hold’s own expiry must not re-fire it
     expect(env.fitCalls).toHaveLength(1)
   })
 
-  it('leaves GeoGuessr’s framing alone when the shape is already visible', () => {
-    const env = makeEnv({ viewport: viewport(35, -100, 60, -70) })
-    env.api.widenIfOffscreen(env.map, BOX, 'k')
-    expect(env.fitCalls).toEqual([])
+  it('hands the framing back untouched when the region is already in frame', () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    const asked = bounds(env, NEAR)
+    env.map.fitBounds(asked)
+    env.api.offerScopeBox(BOX)
+    expect(env.fitCalls).toHaveLength(1)
+    expect(env.fitCalls[0][0]).toBe(asked) // the very object they passed
   })
 
-  it('leaves the framing alone before the map has settled', () => {
-    const env = makeEnv({ viewport: null })
-    env.api.widenIfOffscreen(env.map, BOX, 'k')
+  it('lets the framing through on its own if no geometry ever arrives', async () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    const asked = bounds(env, AWAY)
+    env.map.fitBounds(asked)
     expect(env.fitCalls).toEqual([])
+    await vi.advanceTimersByTimeAsync(400)
+    expect(env.fitCalls).toHaveLength(1)
+    expect(env.fitCalls[0][0]).toBe(asked)
+    expect(env.tlogLines.join(' ')).toMatch(/hold expired/)
   })
 
-  it('never re-frames on a shape whose plain bbox spans the antimeridian', () => {
-    const env = makeEnv({ viewport: viewport(-40, 100, 0, 160) })
-    env.api.widenIfOffscreen(env.map, { n: 70, s: 40, e: 179, w: -179 }, 'k')
-    expect(env.fitCalls).toEqual([])
+  it('holds nothing at all on a map too small to be the result map', () => {
+    const env = makeEnv()
+    env.div.getBoundingClientRect = () => ({ width: 180, height: 120 })
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.map.fitBounds(bounds(env, AWAY))
+    expect(env.fitCalls).toHaveLength(1) // the guess mini-map is left alone
   })
 
-  it('may widen again for the next round', () => {
-    const env = makeEnv({ viewport: viewport(-40, 100, 0, 160) })
-    env.api.widenIfOffscreen(env.map, BOX, 'r1:CA|Ontario')
-    env.api.widenIfOffscreen(env.map, BOX, 'r2:CA|Ontario')
+  /** Both legs of the warm: the pano→scope lookup and the geometry it then
+   * pulls, answered off the one stub. */
+  const warmReply = (req) =>
+    req.url.includes('scope-for-pano')
+      ? { status: 200, responseText: JSON.stringify({ ok: true, scope: SCOPE }) }
+      : { status: 200, responseText: JSON.stringify(PAYLOAD) }
+
+  it('takes the region from the warm, so the first framing is the final one', async () => {
+    // The warm runs while the user is still guessing, so by the time the guess
+    // POST arms the hold the extent is already in hand — GeoGuessr's own
+    // fitBounds goes out widened and there is nothing left to correct.
+    const env = makeEnv({ reply: warmReply })
+    env.api.warmScopeGeo('pano-1')
+    await settle()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.map.fitBounds(bounds(env, AWAY))
+    expect(env.fitCalls).toHaveLength(1) // no hold to wait out
+    expect(boxOfCall(env, 0)).toEqual({ n: 57, s: -40, e: 160, w: -95 })
+    expect(env.tlogLines.join(' ')).toMatch(/folded into/)
+  })
+
+  it('drops the warm when the next round is served', async () => {
+    // Otherwise a round whose own warm fails would be framed on the last
+    // round's region, which is worse than not framing it at all.
+    const env = makeEnv({ reply: warmReply })
+    env.api.warmScopeGeo('pano-1')
+    await settle()
+    env.api.warmScopeGeo(null) // a round with no pano to warm from
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    const asked = bounds(env, AWAY)
+    env.map.fitBounds(asked)
+    expect(env.fitCalls).toEqual([]) // held, exactly as if nothing were warmed
+    await vi.advanceTimersByTimeAsync(400)
+    expect(env.fitCalls[0][0]).toBe(asked)
+  })
+
+  it('goes straight through when the shape was already in hand', () => {
+    // The disk store answers before GeoGuessr has framed anything: the hold
+    // begins and ends inside the one call.
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.api.offerScopeBox(BOX)
+    env.map.fitBounds(bounds(env, AWAY))
+    expect(env.fitCalls).toHaveLength(1)
+    expect(boxOfCall(env, 0)).toEqual({ n: 57, s: -40, e: 160, w: -95 })
+  })
+
+  it('ignores a region box that wraps the antimeridian', async () => {
+    // A shape crossing 180° has a bbox claiming most of the planet; framing on
+    // it would be worse than not framing at all.
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    const asked = bounds(env, AWAY)
+    env.map.fitBounds(asked)
+    env.api.offerScopeBox({ n: 70, s: 40, e: 179, w: -179 })
+    expect(env.fitCalls).toEqual([]) // not sane, so the hold is not ended by it
+    await vi.advanceTimersByTimeAsync(400)
+    expect(env.fitCalls[0][0]).toBe(asked) // it times out and their framing stands
+  })
+
+  it('widens a later GeoGuessr re-frame too, without being asked twice', () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.map.fitBounds(bounds(env, NEAR))
+    env.api.offerScopeBox(BOX)
+    env.map.fitBounds(bounds(env, AWAY)) // they re-frame, e.g. on a panel toggle
     expect(env.fitCalls).toHaveLength(2)
+    expect(boxOfCall(env, 1)).toEqual({ n: 57, s: -40, e: 160, w: -95 })
+  })
+
+  it('stops touching the camera the moment the user does', () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.fireDiv('wheel')
+    env.api.offerScopeBox(BOX)
+    const asked = bounds(env, AWAY)
+    env.map.fitBounds(asked)
+    expect(env.fitCalls).toHaveLength(1)
+    expect(env.fitCalls[0][0]).toBe(asked) // theirs, unwidened
+    expect(env.tlogLines.join(' ')).toMatch(/user took the map/)
+  })
+
+  it('a drag counts as the user taking the map, just like a wheel', () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.fire('dragstart')
+    env.api.offerScopeBox(BOX)
+    const asked = bounds(env, AWAY)
+    env.map.fitBounds(asked)
+    expect(env.fitCalls[0][0]).toBe(asked)
+  })
+
+  it('arming a new round releases whatever the last one was sitting on', () => {
+    const env = makeEnv()
+    env.api.armScopeHold()
+    env.api.armMapCamera(env.map)
+    env.map.fitBounds(bounds(env, AWAY))
+    expect(env.fitCalls).toEqual([])
+    env.api.armScopeHold()
+    expect(env.fitCalls).toHaveLength(1) // nothing is ever left stuck
+  })
+})
+
+// Geometry that arrives after GeoGuessr's camera has already moved cannot be
+// folded into it, so this move the user does see — which is why it eases, only
+// fires when the region is genuinely half off-screen, and only ever widens.
+describe('the late framing eases rather than snaps', () => {
+  const BOX = { n: 57, s: 41, e: -74, w: -95 }
+  const view = (s, w, n, e) => ({
+    getSouthWest: () => ({ lat: () => s, lng: () => w }),
+    getNorthEast: () => ({ lat: () => n, lng: () => e }),
+  })
+
+  it('eases out to hold the region, and never zooms in doing it', async () => {
+    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
+    env.api.offerScopeBox(BOX)
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(env.cam.zoom).toBeLessThan(9)
+    expect(env.cam.center.lat).toBeCloseTo(49, 5) // the union’s centre
+    expect(env.tlogLines.join(' ')).toMatch(/eased out/)
+    expect(env.fitCalls).toEqual([]) // eased, not snapped
+  })
+
+  it('takes several frames to get there', async () => {
+    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
+    env.api.offerScopeBox(BOX)
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(100)
+    const part = env.cam.zoom
+    expect(part).toBeLessThan(9)
+    await vi.advanceTimersByTimeAsync(900)
+    expect(env.cam.zoom).toBeLessThan(part) // still moving after the first frame
+  })
+
+  it('leaves a framing that already shows the region alone', async () => {
+    const env = makeEnv({ viewport: view(35, -100, 60, -70), zoom: 5 })
+    env.api.offerScopeBox(BOX)
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(env.cam.zoom).toBe(5)
+  })
+
+  it('leaves the framing alone before the map has settled', async () => {
+    const env = makeEnv({ viewport: null, zoom: 9 })
+    env.api.offerScopeBox(BOX)
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(env.cam.zoom).toBe(9)
+  })
+
+  it('abandons the ease mid-flight when the user grabs the map', async () => {
+    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
+    env.api.armMapCamera(env.map)
+    env.api.offerScopeBox(BOX)
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(100)
+    const stopped = env.cam.zoom
+    env.fireDiv('pointerdown')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(env.cam.zoom).toBe(stopped)
+  })
+
+  it('never re-frames twice for one round', async () => {
+    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
+    env.api.offerScopeBox(BOX)
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(1000)
+    const settled = env.cam.zoom
+    env.api.frameScope(env.map)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(env.cam.zoom).toBe(settled)
+  })
+
+  it('shares the eased path’s arithmetic with the plain helpers', () => {
+    const { api } = makeEnv()
+    expect(api.easeInOut(0)).toBe(0)
+    expect(api.easeInOut(1)).toBe(1)
+    expect(api.easeInOut(0.5)).toBeCloseTo(0.5, 10)
+    expect(api.easeInOut(0.25)).toBeLessThan(0.25) // slow out of the gate
+    // The short way round: 170°E to 170°W is 20° east, not 340° west.
+    expect(api.lerpLng(170, -170, 0.5)).toBeCloseTo(180, 10)
+    expect(api.lerpLng(-10, 10, 0.5)).toBeCloseTo(0, 10)
+  })
+
+  it('measures how much of a shape a frame actually shows', () => {
+    const { api } = makeEnv()
+    const box = { n: 10, s: 0, e: 10, w: 0 }
+    expect(api.visibleFraction(box, { n: 20, s: -10, e: 20, w: -10 })).toBe(1)
+    expect(api.visibleFraction(box, { n: 10, s: 5, e: 10, w: 0 })).toBeCloseTo(0.5, 10)
+    expect(api.visibleFraction(box, { n: -1, s: -5, e: 10, w: 0 })).toBe(0)
+    expect(api.visibleFraction(box, null)).toBe(1) // unmeasurable is never a reason to move
+  })
+
+  it('works out the zoom that fits a box in a given viewport', () => {
+    const { api } = makeEnv()
+    const world = api.zoomForBox({ n: 70, s: -60, e: 80, w: -80 }, 900, 600, 0)
+    const city = api.zoomForBox({ n: 51.6, s: 51.4, e: -0.0, w: -0.3 }, 900, 600, 0)
+    expect(world).toBeLessThan(city)
+    expect(world).toBeGreaterThan(0)
+    // Padding costs zoom, never gains it.
+    expect(api.zoomForBox({ n: 57, s: 41, e: -74, w: -95 }, 900, 600, 64)).toBeLessThan(
+      api.zoomForBox({ n: 57, s: 41, e: -74, w: -95 }, 900, 600, 0),
+    )
+  })
+})
+
+// The whole answer to "the borders look low-poly": detail is a ladder, and the
+// rung is chosen by the zoom. Coarse first so the shape is on screen fast, finer
+// as the user leans in — and never coarser again once it has been paid for.
+describe('detail follows the zoom', () => {
+  it('picks a level for every zoom, and something sane for a broken one', () => {
+    const { api } = makeEnv()
+    expect([0, 1, 2, 3, 4, 5].map(api.lodForZoom)).toEqual([0, 0, 0, 0, 0, 0])
+    expect([6, 7, 8].map(api.lodForZoom)).toEqual([1, 1, 1])
+    expect([9, 12, 20].map(api.lodForZoom)).toEqual([2, 2, 2])
+    expect(api.lodForZoom(NaN)).toBe(0)
+    expect(api.lodForZoom(undefined)).toBe(0)
+  })
+
+  it('asks for the coarse level first, so the shape lands fast', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(urlsOf(env)[0]).toMatch(/[?&]lod=0(&|$)/)
+  })
+
+  it('fetches and swaps in a finer shape when the user zooms in', async () => {
+    const FINE = JSON.parse(JSON.stringify(ONTARIO))
+    // Finer means more points; the swap is refused if it is not.
+    FINE.features[0].geometry.coordinates[0].splice(1, 0, [-90, 44], [-85, 43], [-80, 45])
+    const env = makeEnv({
+      reply: (req) => ({
+        status: 200,
+        responseText: JSON.stringify(/lod=2/.test(req.url) ? { ...PAYLOAD, geojson: FINE, lod: 2 } : PAYLOAD),
+      }),
+    })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.dataLayers).toHaveLength(2)
+
+    env.zoomTo(11)
+    await settle()
+    expect(urlsOf(env).some((u) => /lod=2/.test(u))).toBe(true)
+    expect(env.api.layers()).toHaveLength(2) // still a pair, not four
+    for (const layer of env.api.layers()) expect(layer.geo).toEqual([FINE])
+    expect(env.tlogLines.join(' ')).toMatch(/detail up to lod 2/)
+  })
+
+  it('never goes back down a rung', async () => {
+    const FINE = JSON.parse(JSON.stringify(ONTARIO))
+    FINE.features[0].geometry.coordinates[0].splice(1, 0, [-90, 44], [-85, 43], [-80, 45])
+    const env = makeEnv({
+      reply: (req) => ({
+        status: 200,
+        responseText: JSON.stringify(/lod=2/.test(req.url) ? { ...PAYLOAD, geojson: FINE, lod: 2 } : PAYLOAD),
+      }),
+    })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    env.zoomTo(11)
+    await settle()
+    const asked = urlsOf(env).length
+    env.zoomTo(3)
+    await settle()
+    expect(urlsOf(env)).toHaveLength(asked) // nothing re-fetched
+    for (const layer of env.api.layers()) expect(layer.geo).toEqual([FINE])
+  })
+
+  it('does not fire a request per notch while the wheel is spinning', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    const before = urlsOf(env).length
+    env.zoomTo(6)
+    env.zoomTo(7)
+    env.zoomTo(9)
+    await vi.advanceTimersByTimeAsync(20)
+    expect(urlsOf(env)).toHaveLength(before) // still settling
+    await settle()
+    expect(urlsOf(env)).toHaveLength(before + 1) // one request, for where it landed
+    expect(urlsOf(env)[before]).toMatch(/lod=2/)
+  })
+
+  it('stops asking for a level an old server answers no finer', async () => {
+    const env = makeEnv() // every level replies with the same geometry
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    env.zoomTo(11)
+    await settle()
+    const asked = urlsOf(env).length
+    env.zoomTo(12)
+    await settle()
+    expect(urlsOf(env)).toHaveLength(asked)
+    expect(env.tlogLines.join(' ')).toMatch(/no finer than what is drawn/)
+  })
+
+  it('keeps the drawn shape when a finer level cannot be had', async () => {
+    const env = makeEnv({ reply: (req) => (/lod=2/.test(req.url) ? 'error' : { status: 200, responseText: JSON.stringify(PAYLOAD) }) })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    env.zoomTo(11)
+    await settle()
+    expect(env.api.layers()).toHaveLength(2)
+    for (const layer of env.api.layers()) expect(layer.geo).toEqual([ONTARIO])
+    expect(env.tlogLines.join(' ')).toMatch(/lod 2 unavailable/)
+  })
+})
+
+// The finest rung is not the shape, it is a window on the shape. Canada's
+// coastline at full detail is nine hundred thousand points and was the reason
+// the overlay used to refuse detail to exactly the countries that needed it
+// most; cut to the visible map it is two thousand, whatever the country.
+describe('the finest rung is a window on the shape', () => {
+  const VIEW = { north: 44, south: 43, east: -79, west: -80 }
+
+  it('grows the view by half a screen on every side', () => {
+    const { api } = makeEnv()
+    expect(api.padBox({ n: 44, s: 43, e: -79, w: -80 })).toEqual({ n: 44.5, s: 42.5, e: -78.5, w: -80.5 })
+    // A view wide enough that cutting saves nothing is refused: the whole
+    // shape is both the cheaper answer and the simpler one.
+    expect(api.padBox({ n: 60, s: -60, e: 100, w: -100 })).toBe(null)
+    expect(api.padBox(null)).toBe(null)
+  })
+
+  it('refuses a view it cannot reason about', () => {
+    const env = makeEnv({ viewport: { north: 44, south: 43, east: -170, west: 170 } })
+    expect(env.api.viewBox(env.map)).toBe(null) // across the antimeridian
+    env.panTo(null)
+    expect(env.api.viewBox(env.map)).toBe(null) // a map that has not settled
+    env.panTo(VIEW)
+    expect(env.api.viewBox(env.map)).toEqual({ n: 44, s: 43, e: -79, w: -80 })
+  })
+
+  it('asks for the visible map once the zoom is close enough to want it', async () => {
+    const env = makeEnv({ viewport: VIEW })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await arrive()
+    expect(urlsOf(env)[0]).not.toMatch(/box=/) // the first paint is the whole shape
+    env.zoomTo(11)
+    await settle()
+    const fine = urlsOf(env).find((u) => /lod=2/.test(u))
+    expect(fine).toContain('box=-80.5,42.5,-78.5,44.5')
+    expect(env.tlogLines.join(' ')).toMatch(/cut to the visible map/)
+  })
+
+  it('does not go back to the server for a pan inside what it was given', async () => {
+    const env = makeEnv({ viewport: VIEW })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await arrive()
+    env.zoomTo(11)
+    await settle()
+    const asked = urlsOf(env).length
+    env.panTo({ north: 44.2, south: 43.2, east: -78.9, west: -79.9 })
+    await settle()
+    expect(urlsOf(env)).toHaveLength(asked)
+  })
+
+  it('fetches the next window once the map leaves the one it has', async () => {
+    const env = makeEnv({ viewport: VIEW })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await arrive()
+    env.zoomTo(11)
+    await settle()
+    const asked = urlsOf(env).length
+    env.panTo({ north: 46, south: 45, east: -76, west: -77 })
+    await settle()
+    expect(urlsOf(env)).toHaveLength(asked + 1)
+    expect(urlsOf(env).pop()).toContain('box=-77.5,44.5,-75.5,46.5')
+  })
+
+  it('puts the whole shape back when the user zooms out again', async () => {
+    const env = makeEnv({ viewport: VIEW })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await arrive()
+    env.zoomTo(11)
+    await settle()
+    const asked = urlsOf(env).length
+    env.zoomTo(4)
+    await settle()
+    expect(env.tlogLines.join(' ')).toMatch(/back to the whole shape/)
+    for (const layer of env.api.layers()) expect(layer.geo).toEqual([ONTARIO])
+    // …and it came out of memory: the whole shape has been in hand since the
+    // card appeared, so going back to it costs nothing at all.
+    expect(urlsOf(env)).toHaveLength(asked)
+  })
+
+  it('never writes a window to the disk store', async () => {
+    const env = makeEnv({ viewport: VIEW, zoom: 11 })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(urlsOf(env).some((u) => /box=/.test(u))).toBe(true)
+    expect([...env.cells.keys()].some((k) => k.includes(','))).toBe(false)
+  })
+
+  it('takes the server\'s word for what a window covers, and stops asking', async () => {
+    // The guess landed on the wrong continent, so the window missed the region
+    // entirely and the server answered with the whole shape instead. Asking
+    // again every time the map settles would be an endless loop.
+    const env = makeEnv({
+      viewport: VIEW,
+      reply: () => ({ status: 200, responseText: JSON.stringify({ ...PAYLOAD, lod: 0, clip: null }) }),
+    })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await arrive()
+    env.zoomTo(11)
+    await settle()
+    const asked = urlsOf(env).length
+    env.fire('idle')
+    await settle()
+    env.panTo({ north: 44.1, south: 43.1, east: -79.1, west: -80.1 })
+    await settle()
+    expect(urlsOf(env)).toHaveLength(asked)
+  })
+
+  it('knows when one box contains another', () => {
+    const { api } = makeEnv()
+    const outer = { n: 10, s: 0, e: 10, w: 0 }
+    expect(api.boxCovers(outer, { n: 9, s: 1, e: 9, w: 1 })).toBe(true)
+    expect(api.boxCovers(outer, outer)).toBe(true)
+    expect(api.boxCovers(outer, { n: 11, s: 1, e: 9, w: 1 })).toBe(false)
+    expect(api.boxCovers(null, outer)).toBe(false)
+    expect(api.boxParam({ n: 44.123456, s: 43, e: -79, w: -80 })).toBe('-80,43,-79,44.12346')
+  })
+})
+
+// A 7px glow is a handsome border at z9 and a solid smear across an archipelago
+// at z4 — the southern Chilean islands were the case that proved it.
+describe('stroke weight rides the zoom', () => {
+  it('is a hairline zoomed out and full weight zoomed in', () => {
+    const { api } = makeEnv()
+    expect(api.scopeWeights(2)).toEqual({ glow: 2.5, main: 1 })
+    expect(api.scopeWeights(12)).toEqual({ glow: 8, main: 2.5 })
+    expect(api.scopeWeights(-5)).toEqual(api.scopeWeights(2)) // clamped both ends
+    expect(api.scopeWeights(30)).toEqual(api.scopeWeights(12))
+    expect(api.scopeWeights(7).glow).toBeGreaterThan(api.scopeWeights(4).glow)
+    expect(api.scopeWeights(NaN)).toEqual(api.scopeWeights(4))
+  })
+
+  it('is quantised, so nudging the wheel inside a band restyles nothing', () => {
+    const { api } = makeEnv()
+    const w = api.scopeWeights(6)
+    expect(api.scopeWeights(6.05)).toEqual(w)
+    expect(w.glow * 4).toBe(Math.round(w.glow * 4))
+  })
+
+  it('re-weights the drawn shape the instant the zoom changes', async () => {
+    const env = makeEnv({ zoom: 4 })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    const [glow, main] = env.dataLayers
+    expect(styleOf(main).strokeWeight).toBe(env.api.scopeWeights(4).main)
+    env.zoomTo(11)
+    expect(styleOf(main).strokeWeight).toBe(env.api.scopeWeights(11).main)
+    expect(styleOf(glow).strokeWeight).toBe(env.api.scopeWeights(11).glow)
+  })
+})
+
+// Shapes are hundreds of KB over a LAN that may be asleep, and the same handful
+// of metas come round again and again — so the coarse level lives on disk and a
+// repeat meta paints on the frame the card appears.
+describe('the shape store on disk', () => {
+  const KEY = 'CA|Ontario|0'
+
+  it('paints a repeat meta with no request at all', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.requests).toHaveLength(1)
+
+    const next = makeEnv({ reply: () => 'error' }) // a fresh page, a dead server
+    for (const [k, v] of env.cells) next.cells.set(k, v)
+    next.api.drawScopeOverlay({ roundId: 'r2', scope: SCOPE })
+    await settle()
+    expect(next.requests).toEqual([])
+    expect(next.dataLayers).toHaveLength(2)
+    expect(next.tlogLines.join(' ')).toContain('stored')
+  })
+
+  it('re-fetches a shape stored more than a week ago', async () => {
+    const { api, cells } = makeEnv()
+    api.scopeStorePut(KEY, JSON.stringify(PAYLOAD))
+    const rec = JSON.parse(cells.get('gc-scope1:' + KEY))
+    rec.t -= 8 * 24 * 60 * 60 * 1000
+    cells.set('gc-scope1:' + KEY, JSON.stringify(rec))
+    expect(api.scopeStoreGet(KEY)).toBeNull()
+    expect(cells.has('gc-scope1:' + KEY)).toBe(false) // and tidies itself up
+  })
+
+  it('treats a corrupt entry as an absent one', () => {
+    const { api, cells } = makeEnv()
+    cells.set('gc-scope1:' + KEY, '{not json')
+    expect(api.scopeStoreGet(KEY)).toBeNull()
+    expect(cells.has('gc-scope1:' + KEY)).toBe(false)
+  })
+
+  it('refuses a shape too big to be worth the whole budget', () => {
+    const { api } = makeEnv()
+    expect(api.scopeStorePut(KEY, '{"res":"' + 'x'.repeat(1_000_000) + '"}')).toBe(false)
+    expect(api.scopeStoreGet(KEY)).toBeNull()
+  })
+
+  it('evicts the oldest shapes rather than failing the write', () => {
+    const { api, cells } = makeEnv({ quota: 4000 })
+    const body = JSON.stringify({ ...PAYLOAD, pad: 'x'.repeat(1200) })
+    expect(api.scopeStorePut('a', body)).toBe(true)
+    expect(api.scopeStorePut('b', body)).toBe(true)
+    expect(api.scopeStorePut('c', body)).toBe(true)
+    expect(api.scopeStoreGet('c')).toBeTruthy() // the newest always survives
+    expect(cells.has('gc-scope1:a')).toBe(false) // the oldest paid for it
+  })
+
+  it('gives up on a write it cannot make room for, rather than throwing', () => {
+    const { api } = makeEnv({ quota: 100 })
+    expect(api.scopeStorePut(KEY, JSON.stringify(PAYLOAD))).toBe(false)
+    expect(api.scopeStoreGet(KEY)).toBeNull()
+  })
+
+  it('keeps a shape read recently and drops one that was not', () => {
+    const { api, cells } = makeEnv({ quota: 4200 })
+    const body = JSON.stringify({ ...PAYLOAD, pad: 'x'.repeat(1200) })
+    api.scopeStorePut('a', body)
+    api.scopeStorePut('b', body)
+    api.scopeStoreGet('a') // reading 'a' makes 'b' the oldest
+    api.scopeStorePut('c', body)
+    expect(cells.has('gc-scope1:a')).toBe(true)
+    expect(cells.has('gc-scope1:b')).toBe(false)
+  })
+
+  it('only ever stores the coarse level', async () => {
+    const FINE = JSON.parse(JSON.stringify(ONTARIO))
+    FINE.features[0].geometry.coordinates[0].splice(1, 0, [-90, 44], [-85, 43], [-80, 45])
+    const env = makeEnv({
+      reply: (req) => ({
+        status: 200,
+        responseText: JSON.stringify(/lod=2/.test(req.url) ? { ...PAYLOAD, geojson: FINE, lod: 2 } : PAYLOAD),
+      }),
+    })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    env.zoomTo(11)
+    await settle()
+    expect([...env.cells.keys()].filter((k) => k.startsWith('gc-scope1:'))).toEqual(['gc-scope1:CA|Ontario|0'])
+  })
+})
+
+// The store only ever helped the second time a meta came round; warming it at
+// round start — a whole guess before the card — makes the first time a hit too.
+describe('warming the store at round start', () => {
+  /** A server that answers both legs: the pano→scope lookup, then the shape. */
+  const warmEnv = (scope = SCOPE, opts = {}) =>
+    makeEnv({
+      reply: (req) =>
+        /scope-for-pano/.test(req.url)
+          ? { status: 200, responseText: JSON.stringify(scope ? { ok: true, scope } : { ok: false }) }
+          : { status: 200, responseText: JSON.stringify(PAYLOAD) },
+      ...opts,
+    })
+
+  it('asks the LAN server what area the round is about, by pano id', async () => {
+    const env = warmEnv()
+    env.api.warmScopeGeo('AbC-123_pano')
+    await settle()
+    expect(urlsOf(env)[0]).toBe('http://127.0.0.1:5177/api/scope-for-pano?pano=AbC-123_pano')
+    expect(env.requests[0]).toMatchObject({ method: 'GET' }) // GM, like every other LOCAL leg
+    expect(urlsOf(env)[1]).toBe('http://127.0.0.1:5177/api/scope-geo?country=CA&regions=Ontario&lod=0')
+    expect(env.tlogLines.join(' ')).toContain('CA|Ontario warmed ahead of the round')
+  })
+
+  it('leaves the card with nothing to fetch and a shape already on disk', async () => {
+    const env = warmEnv()
+    env.api.warmScopeGeo('pano1')
+    await settle()
+    expect(env.requests).toHaveLength(2)
+    expect([...env.cells.keys()]).toContain('gc-scope1:CA|Ontario|0')
+
+    // The real draw, a guess later: nothing left to ask for, and it paints.
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.requests).toHaveLength(2)
+    expect(env.dataLayers).toHaveLength(2)
+  })
+
+  it('survives the page reloading between the warm and the card', async () => {
+    const env = warmEnv()
+    env.api.warmScopeGeo('pano1')
+    await settle()
+
+    const next = makeEnv({ reply: () => 'error' }) // a fresh page, and now a dead server
+    for (const [k, v] of env.cells) next.cells.set(k, v)
+    next.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(next.requests).toEqual([])
+    expect(next.dataLayers).toHaveLength(2)
+    expect(next.tlogLines.join(' ')).toContain('stored')
+  })
+
+  it('warms nothing for a pano the server does not know', async () => {
+    const env = warmEnv(null)
+    env.api.warmScopeGeo('pano-from-some-other-map')
+    await settle()
+    expect(env.requests).toHaveLength(1)
+    expect(env.cells.size).toBe(0)
+    expect(env.tlogLines).toEqual([])
+  })
+
+  it('asks for nothing at all without a pano id', async () => {
+    const env = warmEnv()
+    env.api.warmScopeGeo(null)
+    env.api.warmScopeGeo('')
+    await settle()
+    expect(env.requests).toEqual([])
+  })
+
+  it('does not fetch a shape it already has', async () => {
+    const env = warmEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.requests).toHaveLength(1)
+    env.api.warmScopeGeo('pano1')
+    await settle()
+    expect(urlsOf(env).filter((u) => /scope-geo/.test(u))).toHaveLength(1)
+    expect(env.tlogLines.join(' ')).not.toContain('warmed')
+  })
+
+  // A sleeping Mac is the normal condition away from home, and a warm nobody
+  // asked for must never be the thing that says so.
+  const quiet = {
+    'the server is unreachable': () => 'error',
+    'the lookup times out': () => 'timeout',
+    'the lookup answers garbage': () => ({ status: 200, responseText: '<html>nope' }),
+    'the lookup 404s': () => ({ status: 404, responseText: '' }),
+    'the shape itself cannot be had': (req) =>
+      /scope-for-pano/.test(req.url)
+        ? { status: 200, responseText: JSON.stringify({ ok: true, scope: SCOPE }) }
+        : 'error',
+  }
+  for (const [name, reply] of Object.entries(quiet)) {
+    it(`says nothing and throws nothing when ${name}`, async () => {
+      const env = makeEnv({ reply })
+      expect(() => env.api.warmScopeGeo('pano1')).not.toThrow()
+      await settle()
+      expect(env.tlogLines).toEqual([])
+      expect(env.cells.size).toBe(0)
+    })
+  }
+})
+
+// "The region overlay doesn't always seem to take": GeoGuessr re-mounts the
+// result map, and a shape drawn on the outgoing instance is gone from the
+// screen while every variable still says it was drawn.
+describe('a result map that moves under the overlay', () => {
+  const otherMap = (env) => {
+    const div = {
+      isConnected: true,
+      getBoundingClientRect: () => ({ width: 1000, height: 700 }), // bigger: it wins pickResultMap
+      addEventListener: () => {},
+    }
+    return {
+      getDiv: () => div,
+      fitBounds: () => {},
+      getBounds: () => null,
+      getZoom: () => env.cam.zoom,
+      setZoom: () => {},
+      getCenter: () => ({ lat: () => 0, lng: () => 0 }),
+      setCenter: () => {},
+      addListener: () => ({ remove() {} }),
+    }
+  }
+
+  it('redraws itself on the new map without being told', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.dataLayers).toHaveLength(2)
+
+    const fresh = otherMap(env)
+    env.W.__geocoachMaps = [fresh]
+    await vi.advanceTimersByTimeAsync(1000) // the next watchdog
+    expect(env.dataLayers).toHaveLength(4)
+    for (const layer of env.api.layers()) {
+      expect(layer.map).toBe(fresh)
+      expect(layer.geo).toEqual([ONTARIO])
+    }
+    expect(env.tlogLines.join(' ')).toMatch(/result map changed under the overlay/)
+  })
+
+  it('takes the old pair down once the new one is up', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    const [glow, main] = env.dataLayers
+    env.W.__geocoachMaps = [otherMap(env)]
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(glow.map).toBeNull()
+    expect(main.map).toBeNull()
+    expect(env.api.layers().every((l) => l.map !== null)).toBe(true)
+  })
+
+  it('stops chasing after a few moves rather than thrashing forever', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    for (let i = 0; i < 6; i++) {
+      env.W.__geocoachMaps = [otherMap(env)]
+      await vi.advanceTimersByTimeAsync(1500)
+    }
+    expect(env.dataLayers.length).toBeLessThanOrEqual(2 + 3 * 2)
+  })
+
+  it('gives up on all of it once the card is gone', async () => {
+    const env = makeEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    env.api.removeScopeOverlay()
+    env.W.__geocoachMaps = [otherMap(env)]
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(env.api.layers()).toEqual([])
+    expect(env.dataLayers).toHaveLength(2) // nothing new was ever drawn
   })
 })
