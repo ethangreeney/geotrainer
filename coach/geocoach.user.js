@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.6.0
+// @version      2.8.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -99,7 +99,7 @@
     }).catch(viaGM)
   }
 
-  tlog('body 2.6.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
+  tlog('body 2.8.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
    * server still gets every round so pano dossiers keep building at home.
@@ -173,8 +173,384 @@
   // One send per (game, round), whichever path notices it first.
   const sent = new Set()
 
+  // -------------------------------------------------------- scope overlay
+  // A meta is a claim about a place and the card only names it. Drawing the
+  // area the clue actually covers — the answer's country, or just the admin-1
+  // subdivisions when the meta is narrower than the country — onto GeoGuessr's
+  // own result map puts that claim right next to where the guess landed.
+  //
+  // The geometry comes from the Mac's LAN server, which is http while the page
+  // is https, so this leg goes through GM_xmlhttpRequest like every other LOCAL
+  // call in this file. The Mac being asleep is a normal condition rather than a
+  // fault: every failure below is silent and total — no overlay, no exception,
+  // card untouched — and leaves a tlog line as the only trace.
+  const SCOPE_GEO_URL = LOCAL + '/api/scope-geo'
+  // The card's own chrome, so the shape reads as GeoCoach's annotation and not
+  // as something GeoGuessr drew: the panel violet for the crisp outline and the
+  // tint, its muted violet for the soft glow that sits under the outline.
+  const SCOPE_INK = '#2b1b58'
+  const SCOPE_GLOW = '#a99fce'
+  // Light enough that both pins and the line between them stay readable
+  // through it — the outline is the statement, the fill only says "inside".
+  const SCOPE_FILL_ALPHA = 0.14
+  // Roughly where a per-frame restyle stops being free on a mid-range laptop.
+  // Well above a province and well below a big country's full coastline.
+  const FADE_POINT_LIMIT = 8000
+
+  /** Total coordinate pairs in a FeatureCollection — the only cost measure
+   * that matters here, since it is what the renderer walks per restyle. */
+  function countPoints(geojson) {
+    let n = 0
+    const walk = (c) => {
+      if (!Array.isArray(c)) return
+      if (typeof c[0] === 'number') return void n++
+      for (const x of c) walk(x)
+    }
+    for (const f of geojson.features || []) walk(f && f.geometry && f.geometry.coordinates)
+    return n
+  }
+
+  // A meta repeats far more often than it varies (that is the whole point of
+  // the deck), and a country outline can run to a few hundred KB, so the last
+  // few answers stay in memory. Only successes are cached: a server that was
+  // asleep a minute ago may well be awake now.
+  const scopeGeoCache = new Map()
+  const SCOPE_CACHE_MAX = 6
+
+  const scopeKey = (scope) =>
+    scope.country + '|' + (Array.isArray(scope.regions) ? scope.regions.join('|') : '')
+
+  function fetchScopeGeo(scope) {
+    const key = scopeKey(scope)
+    const hit = scopeGeoCache.get(key)
+    if (hit) return Promise.resolve(hit)
+    let url = SCOPE_GEO_URL + '?country=' + encodeURIComponent(scope.country)
+    if (Array.isArray(scope.regions) && scope.regions.length)
+      url += '&regions=' + encodeURIComponent(scope.regions.join('|'))
+    return new Promise((resolve, reject) => {
+      const parsed = (text) => {
+        let j = null
+        try {
+          j = JSON.parse(text)
+        } catch {}
+        // A 200 with nothing drawable is treated exactly like a failure: the
+        // only thing this code is allowed to do is draw a real shape.
+        if (!j || !j.ok || !j.geojson || !Array.isArray(j.geojson.features) || !j.geojson.features.length)
+          return reject(new Error('no geometry'))
+        scopeGeoCache.set(key, j)
+        if (scopeGeoCache.size > SCOPE_CACHE_MAX) scopeGeoCache.delete(scopeGeoCache.keys().next().value)
+        resolve(j)
+      }
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          timeout: 8000,
+          onload: (r) => (r.status === 200 ? parsed(r.responseText) : reject(new Error('scope-geo ' + r.status))),
+          onerror: () => reject(new Error('server unreachable')),
+          ontimeout: () => reject(new Error('timed out')),
+        })
+      } else {
+        // Only reachable on a direct install without the GM grant, where the
+        // browser blocks https→http anyway — i.e. straight down the silent path.
+        fetch(url)
+          .then((r) => (r.ok ? r.text() : Promise.reject(new Error('scope-geo ' + r.status))))
+          .then(parsed, reject)
+      }
+    })
+  }
+
+  /** Re-arms the loader's constructor wrap. The loader owns this in practice —
+   * it runs at document-start, long before the map is built — but a body
+   * hot-reloaded mid-session (and a legacy direct install with no loader) has
+   * no wrap of its own, and would otherwise capture nothing until the tab is
+   * reloaded. Idempotent: an already-wrapped constructor is left alone. */
+  function ensureMapCapture() {
+    try {
+      const buf = W.__geocoachMaps || (W.__geocoachMaps = [])
+      // The loader's own registry, shared: a constructor it already wrapped
+      // must come back as the same proxy rather than be wrapped a second time,
+      // or a hot-reloaded body would buffer every map once per layer.
+      const wrapped = W.__geocoachMapWrap || (W.__geocoachMapWrap = new WeakMap())
+      // Same proxy for the same constructor however it is reached — off the
+      // namespace or out of importLibrary — so a second pass never hands back
+      // the bare original.
+      const wrapCtor = (Ctor) => {
+        if (typeof Ctor !== 'function') return Ctor
+        if (wrapped.has(Ctor)) return wrapped.get(Ctor)
+        const proxy = new Proxy(Ctor, {
+          construct(target, args, newTarget) {
+            const inst = Reflect.construct(target, args, newTarget)
+            try {
+              buf.push(inst)
+              if (buf.length > 20) buf.shift()
+            } catch {}
+            return inst
+          },
+        })
+        wrapped.set(Ctor, proxy)
+        wrapped.set(proxy, proxy)
+        return proxy
+      }
+      const maps = W.google && W.google.maps
+      if (!maps) return
+      // Mirrors the loader: cover both the namespace constructor and the
+      // importLibrary handout, since either can be the one the page uses.
+      const orig = maps.importLibrary
+      if (typeof orig === 'function' && !orig.__geocoachWrapped) {
+        const patched = function () {
+          const pr = orig.apply(this, arguments)
+          if (!pr || typeof pr.then !== 'function') return pr
+          return pr.then((lib) => {
+            try {
+              if (lib && typeof lib.Map === 'function') lib.Map = wrapCtor(lib.Map)
+            } catch {}
+            return lib
+          })
+        }
+        patched.__geocoachWrapped = true
+        try {
+          maps.importLibrary = patched
+        } catch {}
+      }
+      if (typeof maps.Map !== 'function') return
+      const w = wrapCtor(maps.Map)
+      if (w !== maps.Map) maps.Map = w
+    } catch {}
+  }
+
+  /** Several maps exist at once — the guess mini-map, the result map, whatever
+   * the menu behind it rendered — and the one worth drawing on is simply the
+   * biggest one actually on screen. Decided at draw time and never cached: the
+   * same instance changes size and role between guessing and the result. */
+  function pickResultMap() {
+    const buf = W.__geocoachMaps
+    if (!Array.isArray(buf)) return null
+    let best = null
+    let bestArea = 0
+    for (const m of buf) {
+      let div = null
+      try {
+        div = m && typeof m.getDiv === 'function' ? m.getDiv() : null
+      } catch {}
+      if (!div || !div.isConnected) continue
+      let r = null
+      try {
+        r = div.getBoundingClientRect()
+      } catch {}
+      // A collapsed or thumbnail-sized map is never the result map, and
+      // drawing a country outline into one would be illegible anyway.
+      if (!r || r.width < 240 || r.height < 160) continue
+      const area = r.width * r.height
+      if (area > bestArea) {
+        bestArea = area
+        best = m
+      }
+    }
+    return best
+  }
+
+  /** The shape's bounding box straight off the coordinates: cheaper than
+   * walking the rendered features, and available before anything is drawn. */
+  function scopeBounds(geojson) {
+    let n = -Infinity
+    let s = Infinity
+    let e = -Infinity
+    let w = Infinity
+    const walk = (c) => {
+      if (!Array.isArray(c)) return
+      if (typeof c[0] === 'number' && typeof c[1] === 'number') {
+        if (c[1] > n) n = c[1]
+        if (c[1] < s) s = c[1]
+        if (c[0] > e) e = c[0]
+        if (c[0] < w) w = c[0]
+        return
+      }
+      for (const x of c) walk(x)
+    }
+    for (const f of geojson.features || []) walk(f && f.geometry && f.geometry.coordinates)
+    return n > s && e > w ? { n, s, e, w } : null
+  }
+
+  /** GeoGuessr frames the result around the guess and the answer, which is
+   * nearly always the right framing — so the default is to leave it alone. The
+   * one case worth correcting is a shape the user cannot see at all: the
+   * answer country two continents from a wild guess, with the overlay drawn
+   * politely off-screen. Then the view opens once, wide enough to hold both,
+   * and never again for this round. */
+  function widenIfOffscreen(map, box, key) {
+    if (scopeWidenedFor === key) return
+    // A shape crossing the antimeridian (Russia, Fiji) has a meaningless plain
+    // bbox; rather than frame it wrongly, leave GeoGuessr's view as it is.
+    if (box.e - box.w > 180) return
+    let vb = null
+    try {
+      vb = map.getBounds()
+    } catch {}
+    if (!vb) return // the map hasn't settled yet — its framing isn't ours to judge
+    const sw = vb.getSouthWest()
+    const ne = vb.getNorthEast()
+    const vs = sw.lat()
+    const vn = ne.lat()
+    const vw = sw.lng()
+    const ve = ne.lng()
+    if (ve < vw) return // the viewport itself wraps — same reasoning
+    const overlapLat = Math.min(box.n, vn) - Math.max(box.s, vs)
+    const overlapLng = Math.min(box.e, ve) - Math.max(box.w, vw)
+    const area = (box.n - box.s) * (box.e - box.w)
+    const shown = overlapLat > 0 && overlapLng > 0 && area > 0 ? (overlapLat * overlapLng) / area : 0
+    if (shown > 0.35) return
+    scopeWidenedFor = key
+    const b = new W.google.maps.LatLngBounds()
+    b.extend({ lat: box.n, lng: box.e })
+    b.extend({ lat: box.s, lng: box.w })
+    b.extend({ lat: vn, lng: ve })
+    b.extend({ lat: vs, lng: vw })
+    try {
+      map.fitBounds(b, 64)
+      tlog('scope: widened to keep the shape in view')
+    } catch {}
+  }
+
+  // Bumped by every draw and every teardown. A geometry fetch that lands after
+  // the card it belongs to is gone — dismissed, next round, navigated away —
+  // sees a stale generation and does nothing.
+  let scopeGen = 0
+  let scopeLayers = []
+  let scopeWidenedFor = null
+
+  function removeScopeOverlay() {
+    scopeGen++
+    for (const layer of scopeLayers) {
+      try {
+        layer.setMap(null)
+      } catch {}
+    }
+    scopeLayers = []
+  }
+
+  /** Two passes over the same shape: a wide, soft violet stroke underneath and
+   * a crisp thin one on top, which reads as a faint glow around the border
+   * instead of a flat line — and keeps the edge findable where it runs over
+   * dark water or a busy coastline. Both fade up together, because a
+   * few-hundred-KB outline snapping into existence looks like a glitch. */
+  function paintScope(map, geojson) {
+    const g = W.google && W.google.maps
+    if (!g || typeof g.Data !== 'function') return false
+    const glow = new g.Data({ map })
+    scopeLayers.push(glow)
+    const main = new g.Data({ map })
+    scopeLayers.push(main)
+    // clickable:false throughout: the overlay must never swallow a click meant
+    // for the map underneath it.
+    const style = (k) => {
+      glow.setStyle({
+        clickable: false,
+        zIndex: 1,
+        fillOpacity: 0,
+        strokeColor: SCOPE_GLOW,
+        strokeOpacity: 0.5 * k,
+        strokeWeight: 7,
+      })
+      main.setStyle({
+        clickable: false,
+        zIndex: 2,
+        strokeColor: SCOPE_INK,
+        strokeOpacity: 0.95 * k,
+        strokeWeight: 2,
+        fillColor: SCOPE_INK,
+        fillOpacity: SCOPE_FILL_ALPHA * k,
+      })
+    }
+    style(0) // styled before the features land, so no default-blue first frame
+    glow.addGeoJson(geojson)
+    main.addGeoJson(geojson)
+    // Every frame of the fade is a full restyle of both layers, and a restyle
+    // costs whatever the geometry costs. Canada's coastline is two orders of
+    // magnitude heavier than Aragón's, and a fade that stutters looks worse
+    // than no fade at all — so past a point the shape simply appears.
+    if (countPoints(geojson) > FADE_POINT_LIMIT) {
+      style(1)
+      return true
+    }
+    const gen = scopeGen
+    const t0 = Date.now()
+    const FADE = 320
+    const step = () => {
+      if (gen !== scopeGen) return
+      const t = Math.min(1, (Date.now() - t0) / FADE)
+      style(t * (2 - t)) // ease-out: arrives gently rather than stopping dead
+      if (t < 1) requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+    return true
+  }
+
+  /** Draws the card's scope on the result map. Called by showCard and torn
+   * down by removeCard, so the overlay and the card share one lifetime. */
+  function drawScopeOverlay(card) {
+    try {
+      const scope = card && card.scope
+      // Older payloads have no scope at all, and that is not a failure — it
+      // simply means there is nothing to draw.
+      if (!scope || typeof scope.country !== 'string' || !scope.country) return
+      // showCard already refuses to run during ranked, but this path is async:
+      // the answer could arrive after the user has started a duel, and ranked
+      // play gets no help of any kind.
+      if (/^\/(duels|team-duels)\//.test(location.pathname)) return
+      ensureMapCapture()
+      removeScopeOverlay()
+      const gen = scopeGen
+      const key = scopeKey(scope)
+      const t0 = Date.now()
+      fetchScopeGeo(scope).then(
+        (res) => {
+          try {
+            if (gen !== scopeGen) return
+            // The card is drawn the instant the guess is graded, which can be
+            // a beat before the result map is mounted and sized; wait a short
+            // while for one to appear rather than missing it by 200ms.
+            const deadline = Date.now() + 4000
+            const tick = () => {
+              if (gen !== scopeGen) return
+              const map = pickResultMap()
+              if (!map) {
+                if (Date.now() < deadline) return setTimeout(tick, 250)
+                tlog('scope ' + key + ': no visible map to draw on')
+                return
+              }
+              try {
+                if (!paintScope(map, res.geojson)) return removeScopeOverlay()
+                tlog(
+                  'scope drawn: ' +
+                    (res.kind || '?') +
+                    ' ' +
+                    (res.label || key) +
+                    ' (' +
+                    res.geojson.features.length +
+                    ' feature(s), ' +
+                    (Date.now() - t0) +
+                    'ms)',
+                )
+                const box = scopeBounds(res.geojson)
+                if (box) widenIfOffscreen(map, box, (card.roundId || '') + ':' + key)
+              } catch (err) {
+                // A half-drawn overlay is worse than none.
+                removeScopeOverlay()
+                tlog('scope ' + key + ' draw failed: ' + (err && err.message))
+              }
+            }
+            tick()
+          } catch {}
+        },
+        (err) => tlog('scope ' + key + ': ' + ((err && err.message) || 'failed')),
+      )
+    } catch {}
+  }
+
   function removeCard() {
     document.getElementById('geocoach-card')?.remove()
+    removeScopeOverlay()
   }
 
   /** The Plonkit guide for this card: LM's footer usually links it; otherwise
@@ -446,7 +822,7 @@
     // Plonkit guide (the footer link) leaves the card exactly where it was.
     el.querySelector('.gc-close').addEventListener('click', (e) => {
       e.stopPropagation()
-      el.remove()
+      removeCard() // the scope overlay is part of the card, and leaves with it
     })
     document.body.appendChild(el)
     clampH()
@@ -454,6 +830,7 @@
       el.style.opacity = '1'
       el.style.transform = 'translateY(0)'
     })
+    drawScopeOverlay(card)
   }
 
   /** onAccepted fires only when the server actually recorded the round — a
@@ -715,6 +1092,122 @@
       .catch(() => tlogOnce('duel-fetch-err:' + id, 'duel fetch failed (network/CORS)'))
   }
 
+  // --------------------------------------------------------- backfill
+  // Live capture is best-effort by construction: the duel id has to be learned
+  // from the page's own traffic, and ranked moves most of its state over
+  // websockets, so a game can begin and end without ever naming itself over
+  // HTTP. When that happens the rounds aren't merely late — they are lost,
+  // because nothing ever knew the game existed. A scrape of the summary page
+  // has the same failure in slow motion: it captures the guesses that exist at
+  // the moment it fires, and every round played after it is never seen again.
+  //
+  // This is the second chance. GeoGuessr's own activity feed lists the games
+  // you played whatever the page did over the wire, so recent duels can be
+  // re-fetched from game-server and replayed through the normal capture path.
+  // Posting is idempotent — the server answers a round it already holds with
+  // {duplicate:true}, which suppresses the card and every downstream trigger —
+  // so a sweep that finds nothing costs a handful of requests and stays silent.
+  const DUELS_DONE_KEY = 'gc-duels-done'
+  const sweptAt = new Map()
+  const SWEEP_FLOOR = 2 * 60 * 1000 // don't re-fetch the same unfinished duel faster than this
+  function duelsDone() {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(DUELS_DONE_KEY)) || [])
+    } catch {
+      return new Set()
+    }
+  }
+  /** A finished duel is fully captured and never needs fetching again. The tail
+   * is bounded: an id only has to outlive the feed window it appears in. */
+  function markDuelDone(id) {
+    const s = duelsDone()
+    s.add(id)
+    try {
+      localStorage.setItem(DUELS_DONE_KEY, JSON.stringify([...s].slice(-200)))
+    } catch {}
+  }
+
+  /** Duel ids out of a feed response, whatever shape it arrives in. GeoGuessr
+   * nests the part that matters as a JSON *string* under `payload`, sometimes
+   * more than one level deep, so strings that look like JSON are parsed and
+   * walked too. Ids are collected twice: `strict` wants the entry to call
+   * itself a duel, `loose` takes any game id. Strict wins when it finds
+   * anything; loose is the fallback for the day the feed renames its modes. */
+  function extractDuelIds(node, strict, loose, depth) {
+    if (node == null || depth > 8) return
+    if (typeof node === 'string') {
+      const t = node.trim()
+      if (t.startsWith('{') || t.startsWith('[')) {
+        try {
+          extractDuelIds(JSON.parse(t), strict, loose, depth + 1)
+        } catch {}
+      }
+      return
+    }
+    if (Array.isArray(node)) {
+      for (const n of node) extractDuelIds(n, strict, loose, depth + 1)
+      return
+    }
+    if (typeof node !== 'object') return
+    const id = node.gameId ?? node.gameToken
+    const mode = String(node.gameMode ?? node.gameType ?? node.mode ?? node.type ?? '')
+    if (typeof id === 'string' && /^[0-9a-f]{24}$/.test(id)) {
+      loose.add(id)
+      if (/duel/i.test(mode)) strict.add(id)
+    }
+    for (const k of Object.keys(node)) extractDuelIds(node[k], strict, loose, depth + 1)
+  }
+
+  async function sweepRecentDuels(reason) {
+    // handleDuelState drops every round without it, so a sweep before the
+    // profile resolves would burn the feed window for nothing. Skip; the next
+    // sweep runs with an id.
+    if (!myId) {
+      resolveMyId()
+      tlogOnce('sweep-nomyid', 'sweep skipped: myId unresolved')
+      return
+    }
+    let feed
+    try {
+      const res = await fetch('https://www.geoguessr.com/api/v4/feed/private', { credentials: 'include' })
+      if (!res.ok) {
+        tlogOnce('sweep-feed:' + res.status, 'feed → ' + res.status)
+        return
+      }
+      feed = await res.json()
+    } catch {
+      tlogOnce('sweep-feed-err', 'feed unreachable')
+      return
+    }
+    const strict = new Set()
+    const loose = new Set()
+    extractDuelIds(feed, strict, loose, 0)
+    const ids = [...(strict.size ? strict : loose)]
+    tlog('sweep(' + reason + '): feed → ' + strict.size + ' duel / ' + loose.size + ' game ids')
+    const done = duelsDone()
+    const now = Date.now()
+    const todo = ids.filter((id) => !done.has(id) && now - (sweptAt.get(id) || 0) > SWEEP_FLOOR).slice(0, 10)
+    if (!todo.length) return
+    for (const id of todo) {
+      sweptAt.set(id, Date.now())
+      try {
+        const r = await fetch('https://game-server.geoguessr.com/api/duels/' + id, { credentials: 'include' })
+        if (!r.ok) {
+          tlogOnce('sweep-duel:' + id + ':' + r.status, 'sweep ' + id + ' → ' + r.status)
+          continue
+        }
+        const d = await r.json()
+        tlog('sweep: replaying ' + id)
+        handleDuelState(d)
+        // Only a finished duel is safe to retire — retiring one mid-game would
+        // freeze its capture at whatever rounds had been played.
+        if (/finish|ended|complete/i.test(String(d.status ?? d.state ?? ''))) markDuelDone(id)
+      } catch {
+        tlogOnce('sweep-duel-err:' + id, 'sweep ' + id + ' failed')
+      }
+    }
+  }
+
   // ------------------------------------------------------------- capture
   // Passive interception of the page's own traffic. The old 4s poller is gone
   // for cause: a bare GET on /api/v3/games/<token> SERVES the next round, so
@@ -869,6 +1362,9 @@
    * stops the menu re-mount from repeating the game-finished rebuild. */
   async function rebuildSilently(reason) {
     if (rebuilding) return
+    // Leaving a game is the moment a just-finished duel becomes fetchable and
+    // the moment its rounds are most likely to be missing.
+    sweepRecentDuels('arrival')
     const last = Number(localStorage.getItem('gc-last-rebuild') || 0)
     if (reason !== 'game finished' && Date.now() - last < 3 * 60 * 1000) return
     rebuilding = true
@@ -939,7 +1435,12 @@
 
   function init() {
     resolveMyId()
+    ensureMapCapture() // no-op behind the loader's wrap; the safety net for a hot-reloaded body
     setInterval(pollDuel, 10000)
+    // The backfill runs on a slow clock on purpose: it exists to repair what
+    // live capture missed, and what it missed is still there five minutes later.
+    setTimeout(() => sweepRecentDuels('startup'), 8000)
+    setInterval(() => sweepRecentDuels('heartbeat'), 5 * 60 * 1000)
     setInterval(shipTlog, 10000)
     // The last round's card outlives both removal triggers: "Show results"
     // keeps the /game/<token> path and serves no new round, so the card sat

@@ -38,3 +38,14 @@ coach/rounds/
 coach/catalog/
 coach/.last-coached
 coach/.quizzed.json
+
+# Natural Earth boundary data — sources are 52MB, slices rebuild in seconds
+# via `node coach/geo/build.mjs`
+coach/geo/src/
+coach/geo/admin0/
+coach/geo/admin1/
+coach/geo/merged/
+coach/geo/index.json
+
+# wrangler's local dev state (local D1, build temp)
+cloud/.wrangler/

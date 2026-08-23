@@ -17,7 +17,9 @@ import { createServer } from 'node:http'
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gzipSync } from 'node:zlib'
 import { saveRoundTiles } from './pano.mjs'
+import { countryShape, geoReady, regionShapes } from './geo/resolve.mjs'
 import {
   buildDeck,
   deckSummary,
@@ -356,6 +358,87 @@ async function inMetaScope(metaName, guessRegion) {
 }
 
 /**
+ * Resolved scope boundaries, keyed by the query that produced them and held as
+ * finished response bytes. The deck replays the same few dozen metas, so the
+ * second round on a meta should cost nothing; the cap keeps a long session
+ * from pinning every country's coastline in memory at once. "We have no shape
+ * for this" is cached the same way — a country that is missing today is
+ * missing for the whole session, and re-deciding that per round is waste.
+ */
+const scopeGeoCache = new Map()
+const SCOPE_GEO_LIMIT = 50
+const SCOPE_GEO_MAX_REGIONS = 40
+const scopeGeoMissing = new Set()
+const scopeGeoUnmerged = new Set()
+
+/** One scope query, resolved to the exact bytes to send back (both encodings,
+ * since which one goes out depends on the request). */
+function buildScopeGeo(cc, regions) {
+  const bytes = (status, obj) => {
+    const json = Buffer.from(JSON.stringify(obj))
+    return { status, json, gzip: gzipSync(json) }
+  }
+
+  const shape = countryShape(cc)
+  // Natural Earth carries no admin0 for some of the small territories the
+  // geocoder still names — Christmas Island, Réunion — and a failed geocode
+  // asks for shapes like ZZ. Nothing is broken and a retry will not help, so
+  // this is "no such shape" rather than the "not ready" above: the client
+  // drops the overlay for this round and moves on. Logged once per code, so a
+  // gap that IS fixable stays visible without a line every round.
+  if (!shape) {
+    if (!scopeGeoMissing.has(cc)) {
+      scopeGeoMissing.add(cc)
+      console.log(`[coach] scope-geo: no boundary on file for ${cc} — no overlay for rounds there`)
+    }
+    return bytes(404, { ok: false, kind: 'none', country: cc, error: `no boundary on file for ${cc}` })
+  }
+
+  const feature = (name, geometry) => ({ type: 'Feature', properties: { name }, geometry })
+  let kind = 'country'
+  let names = [shape.name]
+  let features = [feature(shape.name, shape.geometry)]
+  if (regions.length) {
+    const { matched, missing } = regionShapes(cc, regions)
+    // Only a scope that resolves to *nothing* is worth a line here. Entries
+    // deliberately list several spellings of the same subdivision — the
+    // geocoder's English name beside the local one — so individual names going
+    // unmatched is the normal case, not a fault. Whether every entry still
+    // covers the ground it means to is coach/geo/audit.mjs's job.
+    if (!matched.length)
+      console.warn(
+        `[coach] scope-geo: no ${cc} subdivision matches ${missing.join(', ')} — falling back to the country outline; check coach/scope-regions.json`,
+      )
+    // Partial scopes draw a border the meta does not actually have, which
+    // teaches the wrong thing. Falling back to the whole country is merely
+    // vague, so anything short of one match takes the country outline.
+    if (matched.length) {
+      kind = 'region'
+      names = matched.map((f) => f.name)
+      features = matched.map((f) => feature(f.name, f.geometry))
+      // regionShapes collapses a known multi-region scope to one dissolved
+      // feature; more than one here means build.mjs has no merge for this set,
+      // and the overlay will show a stroke along every shared border. Almost
+      // always the same cause: scope-regions.json gained an entry and the
+      // slices were never rebuilt.
+      if (features.length > 1 && !scopeGeoUnmerged.has(cc + '|' + names.join('|'))) {
+        scopeGeoUnmerged.add(cc + '|' + names.join('|'))
+        console.warn(
+          `[coach] scope-geo: no dissolved shape for ${cc} ${names.join(' + ')} — internal borders will show; run: node coach/geo/build.mjs`,
+        )
+      }
+    }
+  }
+  const shown = names.slice(0, 3).join(', ')
+  const label =
+    kind === 'country'
+      ? shape.name
+      : `${shown}${names.length > 3 ? ` +${names.length - 3} more` : ''}, ${shape.name}`
+
+  return bytes(200, { ok: true, kind, country: cc, label, names, geojson: { type: 'FeatureCollection', features } })
+}
+
+/**
  * Pre-grade snapshots for rating overrides, keyed by round id. The card UI
  * pre-selects the inferred FSRS rating; tapping a different button POSTs
  * /rate, which restores this snapshot and re-grades with the explicit rating
@@ -414,9 +497,13 @@ async function handleRound(payload) {
   // guessing the twin still means the clue was read correctly. Telling the
   // twins apart is a different skill; don't grade it here.
   const twins = metaName ? LOOKALIKE_METAS[metaName] : null
-  const correctCountry = guessed
-    ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
-    : false
+  // "??" is the geocoder failing, not a country. Comparing two failures marks
+  // every round of an outage correct — a silently wrong grade that feeds FSRS
+  // and the profile — so an unknown answer grades as no-guess instead.
+  const correctCountry =
+    guessed && answer.code !== '??' && guessed.code !== '??'
+      ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
+      : false
   const distanceKm = guess ? haversineKm(location, guess) : null
   // Scope-gated correctness drives the FSRS grade and the card's verdict:
   // the right country outside a region-scoped meta's subdivisions means the
@@ -518,6 +605,19 @@ async function handleRound(payload) {
       return writeFile(join(dir, 'dossier.json'), JSON.stringify(dossier, null, 2))
     })
     .catch((err) => console.error(`[coach] tiles failed for ${id}:`, err))
+  // Which area the post-round map should highlight. Only the *identity* of the
+  // area travels with the card: the boundary itself is a few hundred KB of
+  // coastline, which the cloud Worker could not carry at all, so the client
+  // takes this and asks /api/scope-geo over the LAN for the shape. Null
+  // regions means the meta is countrywide — the same file that decides
+  // whether a guess was in scope decides what gets drawn.
+  // A scope on the card is a promise the client can draw something, so when
+  // the geocoder failed (countryOf answers "??") there is no area to promise
+  // and the whole field goes null — better to say nothing than to send the
+  // client after a shape that cannot exist.
+  const scopedTo = round.metaName ? ((await loadScopeRegions())[round.metaName] ?? null) : null
+  const scope = /^[A-Z]{2}$/.test(cc ?? '') ? { country: cc, regions: scopedTo } : null
+
   return {
     ok: true,
     id,
@@ -529,6 +629,7 @@ async function handleRound(payload) {
         ? {
             metaName: round.metaName,
             correct: correctScope,
+            scope,
             note: meta.note ?? null,
             images: meta.images ?? [],
             footer: meta.footer ?? null,
@@ -708,6 +809,58 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ok: true }))
+    return
+  }
+  // The shape behind the card's `scope`. The Worker names the area; the
+  // boundary is served from here because a country outline runs to hundreds of
+  // kilobytes and this machine is on the same LAN as the browser that draws it.
+  //   /api/scope-geo?country=ES[&regions=Cataluña|Aragón]
+  if (req.method === 'GET' && urlPath === '/api/scope-geo') {
+    const params = new URL(req.url, 'http://localhost').searchParams
+    const country = (params.get('country') ?? '').trim()
+    const regions = (params.get('regions') ?? '')
+      .split('|')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      // A scope is a handful of subdivisions; anything longer is a malformed
+      // query, not a country's worth of real work to do.
+      .slice(0, SCOPE_GEO_MAX_REGIONS)
+
+    const fail = (code, error) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error }))
+    }
+    if (!/^[A-Za-z]{2}$/.test(country)) return fail(400, 'country must be an ISO 3166-1 alpha-2 code')
+    // Slices are gitignored and built separately, so a fresh clone legitimately
+    // has none. That is a "not yet", not a failure — the overlay just stays off.
+    if (!geoReady()) return fail(503, 'boundary slices not built — run: node coach/geo/build.mjs')
+
+    const cc = country.toUpperCase()
+    // Cached as finished bytes, not objects: the same meta comes round again
+    // within a session, and re-serialising a megabyte of coordinates is the
+    // whole cost of this endpoint.
+    const key = `${cc}|${regions.join('|')}`
+    let hit = scopeGeoCache.get(key)
+    if (!hit) {
+      hit = buildScopeGeo(cc, regions)
+      scopeGeoCache.set(key, hit)
+      while (scopeGeoCache.size > SCOPE_GEO_LIMIT) scopeGeoCache.delete(scopeGeoCache.keys().next().value)
+    }
+
+    // Coastlines gzip to roughly a third of their size, and the client is a
+    // browser, so it always asks — but honour the header rather than assume it.
+    const wantsGzip = /\bgzip\b/i.test(req.headers['accept-encoding'] ?? '')
+    const body = wantsGzip ? hit.gzip : hit.json
+    res.writeHead(hit.status, {
+      'Content-Type': 'application/json',
+      'Content-Length': body.length,
+      // Borders do not move, so a shape is good for the day. A miss is not
+      // cached in the browser at all: the slices are rebuilt from this repo,
+      // and a country that gains a boundary today should draw today.
+      'Cache-Control': hit.status === 200 ? 'max-age=86400' : 'no-store',
+      ...(wantsGzip ? { 'Content-Encoding': 'gzip' } : {}),
+    })
+    res.end(body)
     return
   }
   // The just-in-time deck: what to test right now, as GeoGuessr locations.

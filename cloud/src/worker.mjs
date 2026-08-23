@@ -470,9 +470,13 @@ async function handleRound(env, user, payload, ctx) {
     : lm
   const metaName = metaKeyOf(meta?.country, meta?.metaName ?? meta?.name) ?? null
   const twins = metaName ? LOOKALIKE_METAS[metaName] : null
-  const correctCountry = guessed
-    ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
-    : false
+  // "??" is the geocoder failing, not a country. Comparing two failures marks
+  // every round of an outage correct — a silently wrong grade that feeds FSRS
+  // and the profile — so an unknown answer grades as no-guess instead.
+  const correctCountry =
+    guessed && answer.code !== '??' && guessed.code !== '??'
+      ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
+      : false
   const distanceKm = guess ? haversineKm(location, guess) : null
   const correctScope =
     correctCountry && (!metaName || inMetaScope(metaName, guessed?.region))
@@ -543,6 +547,18 @@ async function handleRound(env, user, payload, ctx) {
   if (ctx) ctx.waitUntil(write)
   else await write
 
+  // The area the post-round map should highlight — identity only. Boundary
+  // geometry is far too big to bundle into a Worker, so the client takes this
+  // and fetches the shape from the Mac's /api/scope-geo over the LAN. Null
+  // regions means countrywide, straight from the same curated file that
+  // decided whether the guess was in scope.
+  // A scope on the card is a promise the client can draw something, so when
+  // the geocoder failed (countryOf answers "??") there is no area to promise
+  // and the whole field goes null — better to say nothing than to send the
+  // client after a shape that cannot exist.
+  const scopedTo = metaName ? (SCOPE_REGIONS[metaName] ?? null) : null
+  const scope = /^[A-Z]{2}$/.test(cc ?? '') ? { country: cc, regions: scopedTo } : null
+
   return {
     ok: true,
     id,
@@ -552,6 +568,7 @@ async function handleRound(env, user, payload, ctx) {
         ? {
             metaName,
             correct: correctScope,
+            scope,
             note: meta.note ?? null,
             images: meta.images ?? [],
             footer: meta.footer ?? null,

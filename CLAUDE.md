@@ -42,6 +42,12 @@ Everything is offline; the brief's only network calls are the round fetch and an
 elevation lookup. If `coach/plonkit/` is empty, regenerate it:
 `node coach/plonkit/scrape.mjs` (~10 min, ~500MB; snapshot is gitignored).
 
+The result-map overlay draws its boundaries from Natural Earth. If `coach/geo/`
+has no slices: `node coach/geo/fetch.mjs` then `node coach/geo/build.mjs`
+(52MB download, seconds to build; both the sources and the slices are
+gitignored). `node coach/geo/audit.mjs` checks that every meta scope and every
+country played still resolves to a shape.
+
 ## Constraints
 
 Commits use the home identity (Ethan Greene <ethan@greene.nz>), **no DEV- ticket
