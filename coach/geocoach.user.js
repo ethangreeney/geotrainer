@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.8.0
+// @version      2.8.1
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -99,7 +99,7 @@
     }).catch(viaGM)
   }
 
-  tlog('body 2.8.0 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
+  tlog('body 2.8.1 up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
    * server still gets every round so pano dossiers keep building at home.
@@ -260,11 +260,15 @@
     })
   }
 
-  /** Re-arms the loader's constructor wrap. The loader owns this in practice —
-   * it runs at document-start, long before the map is built — but a body
-   * hot-reloaded mid-session (and a legacy direct install with no loader) has
-   * no wrap of its own, and would otherwise capture nothing until the tab is
-   * reloaded. Idempotent: an already-wrapped constructor is left alone. */
+  /** Arms the constructor wrap that feeds `__geocoachMaps`. The loader carries
+   * the same hook and gets there first when it is current, but the body cannot
+   * assume that: a loader is installed once and only updates when Tampermonkey
+   * decides to, while the body reloads on every page. So this stands on its own —
+   * an install still running an older loader, a body hot-reloaded mid-session, a
+   * legacy direct install with no loader at all. Idempotent against the loader's
+   * copy: the two share `__geocoachMapWrap`, so an already-wrapped constructor
+   * comes back as the same proxy rather than being wrapped twice and buffering
+   * every map twice. */
   function ensureMapCapture() {
     try {
       const buf = W.__geocoachMaps || (W.__geocoachMaps = [])
@@ -292,12 +296,11 @@
         wrapped.set(proxy, proxy)
         return proxy
       }
-      const maps = W.google && W.google.maps
-      if (!maps) return
       // Mirrors the loader: cover both the namespace constructor and the
       // importLibrary handout, since either can be the one the page uses.
-      const orig = maps.importLibrary
-      if (typeof orig === 'function' && !orig.__geocoachWrapped) {
+      const hookImportLibrary = (maps) => {
+        const orig = maps.importLibrary
+        if (typeof orig !== 'function' || orig.__geocoachWrapped) return
         const patched = function () {
           const pr = orig.apply(this, arguments)
           if (!pr || typeof pr.then !== 'function') return pr
@@ -313,9 +316,69 @@
           maps.importLibrary = patched
         } catch {}
       }
-      if (typeof maps.Map !== 'function') return
-      const w = wrapCtor(maps.Map)
-      if (w !== maps.Map) maps.Map = w
+      // The namespace fills in piecemeal — `google`, then `google.maps`, then `Map`
+      // on it — and the body normally loads before any of it exists. Reading the
+      // namespace once and giving up when it is absent is the same as not hooking
+      // at all: the map is built minutes later, unwrapped, and the result screen
+      // has nothing to draw on. Every level that is missing gets an accessor that
+      // arms the next one the moment it is assigned.
+      const hookMaps = (maps) => {
+        if (!maps || typeof maps !== 'object') return
+        hookImportLibrary(maps)
+        // `importLibrary` is sometimes bolted on a tick after the namespace object
+        // itself exists; one late re-check catches that without polling.
+        if (!maps.__geocoachLateChecked) {
+          maps.__geocoachLateChecked = true
+          setTimeout(() => hookImportLibrary(maps), 0)
+        }
+        if (typeof maps.Map === 'function') {
+          const w = wrapCtor(maps.Map)
+          if (w !== maps.Map) {
+            try {
+              maps.Map = w
+            } catch {}
+          }
+          return
+        }
+        let val
+        try {
+          Object.defineProperty(maps, 'Map', {
+            configurable: true,
+            enumerable: true,
+            get: () => val,
+            set: (v) => (val = wrapCtor(v)),
+          })
+        } catch {}
+      }
+      const hookGoogle = (g) => {
+        if (!g || typeof g !== 'object') return
+        if (g.maps) return hookMaps(g.maps)
+        let val
+        try {
+          Object.defineProperty(g, 'maps', {
+            configurable: true,
+            enumerable: true,
+            get: () => val,
+            set: (v) => {
+              val = v
+              hookMaps(v)
+            },
+          })
+        } catch {}
+      }
+      if (W.google) hookGoogle(W.google)
+      else {
+        let val
+        Object.defineProperty(W, 'google', {
+          configurable: true,
+          enumerable: true,
+          get: () => val,
+          set: (v) => {
+            val = v
+            hookGoogle(v)
+          },
+        })
+      }
     } catch {}
   }
 
@@ -1435,7 +1498,7 @@
 
   function init() {
     resolveMyId()
-    ensureMapCapture() // no-op behind the loader's wrap; the safety net for a hot-reloaded body
+    ensureMapCapture() // before Google Maps loads, so the result map is built through our wrap
     setInterval(pollDuel, 10000)
     // The backfill runs on a slow clock on purpose: it exists to repair what
     // live capture missed, and what it missed is still there five minutes later.
