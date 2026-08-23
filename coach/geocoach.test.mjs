@@ -623,9 +623,14 @@ describe('caching', () => {
     await settle()
     expect(env.dataLayers).toHaveLength(0)
     asleep = false
+    // Two of those requests are the first draw: a wire error is retried once
+    // before it is believed, because a sleeping Mac and a dropped packet look
+    // the same from here and only one of them is worth losing an overlay over.
+    expect(env.requests).toHaveLength(2)
+    asleep = false
     env.api.drawScopeOverlay({ roundId: 'r2', scope: SCOPE })
     await settle()
-    expect(env.requests).toHaveLength(2)
+    expect(env.requests).toHaveLength(3)
     expect(env.dataLayers).toHaveLength(2)
   })
 })
@@ -659,7 +664,10 @@ describe('failure is silent and total', () => {
     await settle()
     expect(env.requests).toHaveLength(0)
     expect(env.dataLayers).toHaveLength(0)
-    expect(env.tlogLines).toEqual([]) // an older payload is not a fault
+    // A card that names a meta and carries no area is the server failing to
+    // place the round, and it is the one shape of this that says so: an older
+    // payload has no meta either and stays quiet.
+    expect(env.tlogLines).toEqual(['scope: no area on the card for Sweden: yellow-topped poles'])
   })
 
   it('draws nothing on a Maps API with no Data class', async () => {
@@ -1131,16 +1139,18 @@ describe('detail follows the zoom', () => {
   })
 })
 
-// The finest rung is not the shape, it is a window on the shape. Canada's
-// coastline at full detail is nine hundred thousand points and was the reason
-// the overlay used to refuse detail to exactly the countries that needed it
-// most; cut to the visible map it is two thousand, whatever the country.
+// The two finer rungs are not the shape, they are a window on the shape.
+// Canada's coastline at full detail is nine hundred thousand points and was the
+// reason the overlay used to refuse detail to exactly the countries that needed
+// it most; cut to the visible map it is two thousand, whatever the country —
+// and a point on screen is held twice and reprojected on every frame, so that
+// count is the frame rate during a zoom.
 describe('the finest rung is a window on the shape', () => {
   const VIEW = { north: 44, south: 43, east: -79, west: -80 }
 
-  it('grows the view by half a screen on every side', () => {
+  it('grows the view by a quarter of a screen on every side', () => {
     const { api } = makeEnv()
-    expect(api.padBox({ n: 44, s: 43, e: -79, w: -80 })).toEqual({ n: 44.5, s: 42.5, e: -78.5, w: -80.5 })
+    expect(api.padBox({ n: 44, s: 43, e: -79, w: -80 })).toEqual({ n: 44.25, s: 42.75, e: -78.75, w: -80.25 })
     // A view wide enough that cutting saves nothing is refused: the whole
     // shape is both the cheaper answer and the simpler one.
     expect(api.padBox({ n: 60, s: -60, e: 100, w: -100 })).toBe(null)
@@ -1164,7 +1174,7 @@ describe('the finest rung is a window on the shape', () => {
     env.zoomTo(11)
     await settle()
     const fine = urlsOf(env).find((u) => /lod=2/.test(u))
-    expect(fine).toContain('box=-80.5,42.5,-78.5,44.5')
+    expect(fine).toContain('box=-80.25,42.75,-78.75,44.25')
     expect(env.tlogLines.join(' ')).toMatch(/cut to the visible map/)
   })
 
@@ -1190,7 +1200,7 @@ describe('the finest rung is a window on the shape', () => {
     env.panTo({ north: 46, south: 45, east: -76, west: -77 })
     await settle()
     expect(urlsOf(env)).toHaveLength(asked + 1)
-    expect(urlsOf(env).pop()).toContain('box=-77.5,44.5,-75.5,46.5')
+    expect(urlsOf(env).pop()).toContain('box=-77.25,44.75,-75.75,46.25')
   })
 
   it('puts the whole shape back when the user zooms out again', async () => {

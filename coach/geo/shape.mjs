@@ -292,6 +292,69 @@ export function hitTester(ring) {
   }
 }
 
+/** How far apart two torn ends may be and still be the same corner. Sixty
+ * metres is the largest real mismatch in the source; a kilometre leaves room
+ * for coarser data without being able to bridge a strait. */
+const STITCH_MAX_DEG = 0.01
+
+/**
+ * Repairs an outline that cancellation tore.
+ *
+ * Cancelling a shared border is an exact-match test, and two neighbours only
+ * match exactly where they were digitised from the same line. OpenStreetMap's
+ * Canada is nearly all like that — but at nine places along Hudson Bay and
+ * Ungava, Quebec and Nunavut trace the same coast from surveys that disagree in
+ * the fourth decimal, sixty metres apart. Nine edges therefore fail to cancel
+ * as pairs and instead leave nine gaps, which turns the mainland outline from
+ * one closed ring into ten open chains. The walk below then runs off the end of
+ * a chain and closes it with a straight line — the chord across northern Quebec
+ * that drew a triangle over Ungava Bay.
+ *
+ * A gap announces itself: the vertex a chain stops at has an edge arriving and
+ * none leaving, and the vertex the next chain starts at has one leaving and
+ * none arriving. So pair them up — nearest first, and only across a distance
+ * too small to be a real coastline feature — and the chains close back into the
+ * ring they were. Anything left unpaired is a genuine hole in the source, and
+ * saying so at build time beats drawing a chord and hoping nobody looks.
+ */
+function stitchGaps(from, balance, point) {
+  const tails = [] // an edge arrives and none leaves — a chain stops here
+  const heads = [] // an edge leaves and none arrives — a chain starts here
+  for (const [id, d] of balance) {
+    for (let i = 0; i < -d; i++) tails.push(id)
+    for (let i = 0; i < d; i++) heads.push(id)
+  }
+  if (!tails.length) return 0
+  const pairs = []
+  for (const t of tails)
+    for (const h of heads) {
+      if (t === h) continue
+      const dx = point[t][0] - point[h][0]
+      const dy = point[t][1] - point[h][1]
+      const d = Math.hypot(dx, dy)
+      if (d <= STITCH_MAX_DEG) pairs.push({ t, h, d })
+    }
+  pairs.sort((a, b) => a.d - b.d)
+  const usedT = new Set()
+  const usedH = new Set()
+  let stitched = 0
+  for (const p of pairs) {
+    if (usedT.has(p.t) || usedH.has(p.h)) continue
+    usedT.add(p.t)
+    usedH.add(p.h)
+    let list = from.get(p.t)
+    if (!list) from.set(p.t, (list = []))
+    list.push(p.h)
+    stitched++
+  }
+  const left = tails.length - stitched
+  if (left)
+    console.warn(
+      `[geo] dissolve: ${left} of ${tails.length} torn ends had no partner within ${STITCH_MAX_DEG}° — the outline will close them with a straight line`,
+    )
+  return stitched
+}
+
 /**
  * Merges neighbouring features into one outline with no internal borders.
  *
@@ -366,13 +429,19 @@ export function dissolve(geoms) {
   // neighbours share — and drops out. What survives is the outline of the
   // union, still head-to-tail.
   const from = new Map()
+  // How many edges leave a vertex minus how many arrive. On a closed outline
+  // every vertex balances; the ones that do not are where the outline is torn.
+  const balance = new Map()
   for (const [a, ends] of out)
     for (const b of ends) {
       if (out.get(b)?.has(a)) continue
       let list = from.get(a)
       if (!list) from.set(a, (list = []))
       list.push(b)
+      balance.set(a, (balance.get(a) ?? 0) + 1)
+      balance.set(b, (balance.get(b) ?? 0) - 1)
     }
+  stitchGaps(from, balance, point)
 
   const rings = []
   // A walk can visit each surviving edge at most once, so the edge count is the

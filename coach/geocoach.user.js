@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.12.0
+// @version      2.13.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.12.0'
+  const BODY_VERSION = '2.13.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -247,12 +247,21 @@
     return 2
   }
 
-  /** The rung that is drawn as a window on the shape rather than the shape.
-   * It has to be: the finest rung of Canada is nine hundred thousand points,
-   * and the reason the overlay used to refuse that detail to precisely the
-   * countries that needed it most. Cut to the visible map it is two thousand,
-   * whatever the country. */
-  const FINE_LOD = 2
+  /** The rung from which the shape is drawn as a window on itself rather than
+   * whole. It has to be: the finest rung of Canada is nine hundred thousand
+   * points, and the reason the overlay used to refuse that detail to precisely
+   * the countries that needed it most. Cut to the visible map it is two
+   * thousand, whatever the country.
+   *
+   * The middle rung joined it because of what a point costs once it is on
+   * screen. Every vertex is held twice — a wide soft stroke under a crisp one —
+   * and Google reprojects both on every frame of a zoom, so the frame rate is a
+   * straight function of the point count. Canada's middle rung whole is a
+   * hundred and fifteen thousand points, i.e. two hundred and thirty thousand
+   * reprojections per frame, which is exactly the stutter that showed up on a
+   * Canada round. Windowed it is a few thousand and the zoom is smooth, and
+   * nothing is lost: the part of the shape being cut away is off-screen. */
+  const FINE_LOD = 1
 
   /** Stroke weights in *pixels*, and a pixel does not mean the same thing at
    * every zoom. A 7px glow traces a national border handsomely at z9; at z4 it
@@ -365,12 +374,18 @@
     return b && b.n > b.s && b.e > b.w ? b : null
   }
 
-  /** The window actually requested: the view grown by half its own size on
-   * every side, so a small pan or a zoom step lands inside geometry already in
-   * hand and only real travel goes back to the server. Refused for a view wide
-   * enough that cutting it saves nothing — at that width the whole shape is
-   * the cheaper answer as well as the simpler one. */
-  const SCOPE_CLIP_PAD = 0.5
+  /** The window actually requested: the view grown by a quarter of its own
+   * size on every side, so a small pan or a zoom step lands inside geometry already
+   * in hand and only real travel goes back to the server. Refused for a view
+   * wide enough that cutting it saves nothing — at that width the whole shape
+   * is the cheaper answer as well as the simpler one.
+   *
+   * A quarter rather than a half is the cheaper half of the same trade: the pad
+   * applies on both axes, so half asks for four times the area of the view and
+   * a quarter for two and a quarter. Points are frame time — see FINE_LOD — and
+   * a pan far enough to leave the smaller margin is far enough to be worth a
+   * request. */
+  const SCOPE_CLIP_PAD = 0.25
   function padBox(view) {
     if (!view) return null
     const dy = (view.n - view.s) * SCOPE_CLIP_PAD
@@ -625,14 +640,21 @@
         resolve(j)
       }
       if (typeof GM_xmlhttpRequest === 'function') {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url,
-          timeout: 8000,
-          onload: (r) => (r.status === 200 ? parsed(r.responseText) : reject(new Error('scope-geo ' + r.status))),
-          onerror: () => reject(new Error('server unreachable')),
-          ontimeout: () => reject(new Error('timed out')),
-        })
+        // One retry, and only for the two failures that are about the wire
+        // rather than the answer: a Mac that was still waking, a Wi-Fi hiccup
+        // between the gaming PC and the LAN. Those cost a round its overlay for
+        // no reason, and they cost nothing to ask again about. A 4xx or a
+        // shapeless 200 is a real answer and is not retried.
+        const ask = (retries) =>
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url,
+            timeout: 8000,
+            onload: (r) => (r.status === 200 ? parsed(r.responseText) : reject(new Error('scope-geo ' + r.status))),
+            onerror: () => (retries ? ask(retries - 1) : reject(new Error('server unreachable'))),
+            ontimeout: () => (retries ? ask(retries - 1) : reject(new Error('timed out'))),
+          })
+        ask(1)
       } else {
         // Only reachable on a direct install without the GM grant, where the
         // browser blocks https→http anyway — i.e. straight down the silent path.
@@ -1358,9 +1380,9 @@
 
   /** Detail follows the camera.
    *
-   * The coarse rungs are the whole shape, because at that zoom the whole shape
-   * is what is on screen. The finest rung is a window: the visible map grown by
-   * half a screen in each direction, cut server-side, so the cost of drawing a
+   * The coarsest rung is the whole shape, because at that zoom the whole shape
+   * is what is on screen. The finer two are a window: the visible map grown by
+   * a quarter in each direction, cut server-side, so the cost of drawing a
    * coastline properly is set by the size of the map and not by the size of the
    * country. Panning out of that window fetches the next one; zooming back out
    * puts the whole shape back, which is free, because it has been in memory
@@ -1471,7 +1493,13 @@
     const t0 = Date.now()
     let looks = 0
     const tick = () => {
-      if (gen !== scopeGen) return
+      if (gen !== scopeGen) {
+        // The overlay was torn down while it was still looking for a map: the
+        // next round started, or the card was closed. Common and correct — but
+        // indistinguishable from a bug in a log that says nothing.
+        if (looks) tlog('scope: gave up looking for a map after ' + looks + ' looks — the round had moved on')
+        return
+      }
       looks++
       const map = pickResultMap()
       if (map) {
@@ -1507,7 +1535,13 @@
       const scope = card && card.scope
       // Older payloads have no scope at all, and that is not a failure — it
       // simply means there is nothing to draw.
-      if (!scope || typeof scope.country !== 'string' || !scope.country) return
+      if (!scope || typeof scope.country !== 'string' || !scope.country) {
+        // Not a failure on old payloads, which carry no scope at all — but on a
+        // current one it means the server had no country for the round, and
+        // that is worth a line rather than an overlay that never appears.
+        if (card && card.metaName) tlog('scope: no area on the card for ' + card.metaName)
+        return
+      }
       // showCard already refuses to run during ranked, but this path is async:
       // the answer could arrive after the user has started a duel, and ranked
       // play gets no help of any kind.
@@ -1520,16 +1554,21 @@
       scopeScope = scope
       const t0 = Date.now()
       const arrived = (res, source) => {
-        if (gen !== scopeGen) return
+        if (gen !== scopeGen) return tlog('scope ' + key + ': the round ended before the shape arrived')
         // Before the paint, and before the map even has to exist: the box is
         // what a held fitBounds is waiting on, and every millisecond of that
-        // hold is one GeoGuessr's framing is late by.
-        offerScopeBox(boxOf(res))
+        // hold is one GeoGuessr's framing is late by. Its own try: a camera
+        // that cannot be aimed is no reason to skip drawing the outline.
+        try {
+          offerScopeBox(boxOf(res))
+        } catch (err) {
+          tlog('scope ' + key + ': camera box failed — ' + ((err && err.message) || 'unknown'))
+        }
         const lod = typeof res.lod === 'number' ? res.lod : 0
         waitForResultMap(gen, (map, waited) => {
           const fade = countPoints(res.geojson) <= FADE_POINT_LIMIT
           const pair = paintScope(map, res.geojson, fade ? 0 : 1)
-          if (!pair) return
+          if (!pair) return tlog('scope ' + key + ': google.maps.Data is not there to draw with')
           adoptScopePair(map, pair)
           scopeGeojson = res.geojson
           scopeLod = lod
@@ -1874,7 +1913,7 @@
     // Success is silent — the card (or its absence) is the signal. Only
     // failures toast, since those need acting on.
     const accepted = (j) => {
-      tlog('post ' + key + ' accepted after ' + (Date.now() - tPost) + 'ms' + (j && j.duplicate ? ' (duplicate)' : j && j.card ? ' (card)' : ' (no card)') + (j && j.timings ? ' server=' + JSON.stringify(j.timings) : ''))
+      tlog('post ' + key + ' accepted after ' + (Date.now() - tPost) + 'ms' + (j && j.duplicate ? ' (duplicate)' : j && j.card ? (j.card.scope ? ' (card, scope ' + j.card.scope.country + ')' : ' (card, NO SCOPE)') : ' (no card)') + (j && j.timings ? ' server=' + JSON.stringify(j.timings) : ''))
       if (j && j.duplicate) return
       if (j) showCard(j.card)
       if (onAccepted) onAccepted()

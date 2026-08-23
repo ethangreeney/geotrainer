@@ -387,7 +387,7 @@ const SCOPE_GEO_MAX_REGIONS = 40
  * detail than it asked for: it notices the point count did not go up, keeps
  * what it has, and stops asking for that rung this round.
  */
-const SCOPE_GEO_MAX_POINTS = 120_000
+const SCOPE_GEO_MAX_POINTS = 12_000
 /** And a ceiling on the cache itself, since these are now sometimes megabytes
  * rather than always kilobytes: fifty of Canada would be the whole process. */
 const SCOPE_GEO_CACHE_BYTES = 64 * 1024 * 1024
@@ -481,10 +481,12 @@ function buildScopeGeo(cc, regions, lod, clip) {
     // itself is fine, so answer with the whole of it and let the client frame.
     if (!features.length) return buildScopeGeo(cc, regions, lod, null)
   }
-  // Too much to draw at this rung — answer with the next one down. Only the
-  // whole-country shapes ever trip this; a region scope is a fraction of a
-  // country and lands well inside the budget even in the largest of them, and
-  // a clipped window never comes close.
+  // Too much to draw at this rung — answer with the next one down. The budget
+  // is not about bandwidth: every point the client is given is held twice, in a
+  // glow layer and a line layer, and reprojected on every frame of a zoom. A
+  // shape that arrives whole and detailed is a shape that drops frames, so the
+  // ceiling is set where a zoom still runs smoothly and detail is bought back
+  // by narrowing the window instead of coarsening the outline.
   let points = 0
   for (const f of features)
     for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates)
