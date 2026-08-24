@@ -55,7 +55,8 @@ export function loadPack(buffer) {
   const headLen = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)
   const head = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + headLen)))
   const r = new Reader(bytes, 4 + headLen)
-  const places = head.places.map(([code, name]) => ({ code, name }))
+  // A subdivision carries every spelling it is known by; a country carries one.
+  const places = head.places.map(([code, name, names]) => ({ code, name, names: names ?? [name] }))
   const features = head.features.map((placeIndex) => {
     const ringCount = r.uint()
     const rings = []

@@ -23,7 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import SCOPE_REGIONS from '../scope-regions.json' with { type: 'json' }
-import { countryCode } from './resolve.mjs'
+import { countryCode, norm } from './resolve.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const PACK_DIR = join(HERE, 'pack')
@@ -70,7 +70,7 @@ function encode(entries, kind) {
     const key = meta.code + '\u0000' + meta.name
     if (!seen.has(key)) {
       seen.set(key, places.length)
-      places.push([meta.code, meta.name])
+      places.push(meta.names ? [meta.code, meta.name, meta.names] : [meta.code, meta.name])
     }
     for (const rings of polygonsOf(geometry)) {
       features.push(seen.get(key))
@@ -123,11 +123,29 @@ export function scopedCountries() {
   return [...codes].sort()
 }
 
+/** Every spelling a scope might be written in, so the pack can carry the
+ * subdivision under the name the card uses. */
+const scopeSpellings = new Set(
+  Object.values(SCOPE_REGIONS)
+    .filter(Array.isArray)
+    .flat()
+    .map(norm),
+)
+
+/** Subdivisions travel with all their spellings, because the one a scope is
+ * written against is not always the one geoBoundaries uses: it spells South
+ * Africa's Northern Cape "Nothern Cape", and a scope saying "Northern Cape"
+ * graded every correct guess in the province out of scope for as long as the
+ * pack carried that one name alone. The scope's own spelling leads, so a
+ * dossier names the province the way the card does. */
 function regions() {
   const out = []
   for (const code of scopedCountries()) {
-    for (const f of readSlice('admin1', REGION_LOD, code + '.json') ?? [])
-      out.push({ meta: { code, name: f.name }, geometry: f.geometry })
+    for (const f of readSlice('admin1', REGION_LOD, code + '.json') ?? []) {
+      const names = f.names?.length ? f.names : [f.name]
+      const name = names.find((n) => scopeSpellings.has(norm(n))) ?? f.name
+      out.push({ meta: { code, name, names }, geometry: f.geometry })
+    }
   }
   return out
 }

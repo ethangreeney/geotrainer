@@ -80,11 +80,11 @@ const normRegion = (s) =>
     .replace(/[^a-z]+/g, ' ')
     .trim()
 
-function inMetaScope(metaName, guessRegion) {
+function inMetaScope(metaName, guessRegions) {
   const scopedTo = SCOPE_REGIONS[metaName]
-  if (!scopedTo || !guessRegion) return true
-  const got = normRegion(guessRegion)
-  return scopedTo.some((r) => normRegion(r) === got)
+  const spellings = (guessRegions ?? []).filter(Boolean).map(normRegion)
+  if (!scopedTo || !spellings.length) return true
+  return scopedTo.some((r) => spellings.includes(normRegion(r)))
 }
 
 // Reverse geocoding is offline: the boundary packs are bundled (see
@@ -106,11 +106,16 @@ const boundaries = () => {
 function countryOf(lat, lng) {
   const { country, region } = boundaries()
   const hit = locate(country, lat, lng)
-  if (!hit) return { code: '??', name: 'unknown', region: '', locality: '' }
+  if (!hit) return { code: '??', name: 'unknown', region: '', regionNames: [], locality: '' }
+  const sub = locate(region, lat, lng)
   return {
     code: hit.code,
     name: hit.name,
-    region: locate(region, lat, lng)?.name ?? '',
+    region: sub?.name ?? '',
+    // Every spelling the boundary knows, because a scope is written in one of
+    // them and the round only records the first. Stripped before the round is
+    // stored: it is scaffolding for the grade, not part of the history.
+    regionNames: sub?.names ?? [],
     locality: '',
   }
 }
@@ -133,11 +138,12 @@ function geoGrade(location, guess, metaName) {
     guessed && answer.code !== '??' && guessed.code !== '??'
       ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
       : false
+  const place = ({ regionNames, ...rest }) => rest
   return {
-    answer,
-    guessed,
+    answer: place(answer),
+    guessed: guessed && place(guessed),
     correctCountry,
-    correctScope: correctCountry && (!metaName || inMetaScope(metaName, guessed?.region)),
+    correctScope: correctCountry && (!metaName || inMetaScope(metaName, guessed?.regionNames)),
     distanceKm: guess ? haversineKm(location, guess) : null,
   }
 }

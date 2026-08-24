@@ -186,14 +186,23 @@ function boundaries() {
 function countryOf(lat, lng) {
   const { country, region } = boundaries()
   const hit = country && locate(country, lat, lng)
-  if (!hit) return { code: '??', name: 'unknown', region: '', locality: '' }
+  if (!hit) return { code: '??', name: 'unknown', region: '', regionNames: [], locality: '' }
+  const sub = region && locate(region, lat, lng)
   return {
     code: hit.code,
     name: hit.name,
-    region: (region && locate(region, lat, lng)?.name) || '',
+    region: sub?.name || '',
+    // Every spelling the boundary knows. A scope is written in one of them and
+    // the round records only the first, so the grade reads this and the stored
+    // round drops it.
+    regionNames: sub?.names ?? [],
     locality: '',
   }
 }
+
+/** A located point as a round stores it — the spelling list is grading
+ * scaffolding and never becomes history. */
+const place = ({ regionNames, ...rest }) => rest
 
 
 /** The intended meta for this location, when the map is a Learnable Meta map. */
@@ -358,11 +367,11 @@ const normRegion = (s) =>
 
 /** True when the guess satisfies the meta's scope (which, for most metas, is
  * simply "anywhere" — the caller has already checked the country). */
-async function inMetaScope(metaName, guessRegion) {
+async function inMetaScope(metaName, guessRegions) {
   const scopedTo = (await loadScopeRegions())[metaName]
-  if (!scopedTo || !guessRegion) return true
-  const got = normRegion(guessRegion)
-  return scopedTo.some((r) => normRegion(r) === got)
+  const spellings = (guessRegions ?? []).filter(Boolean).map(normRegion)
+  if (!scopedTo || !spellings.length) return true
+  return scopedTo.some((r) => spellings.includes(normRegion(r)))
 }
 
 /**
@@ -658,7 +667,7 @@ async function handleRound(payload) {
   // country was deduced but the meta wasn't read. Country-level stats and
   // confusions keep using plain correctCountry.
   const correctScope =
-    correctCountry && (!metaName || (await inMetaScope(metaName, guessed?.region)))
+    correctCountry && (!metaName || (await inMetaScope(metaName, guessed?.regionNames)))
 
   const round = {
     id,
@@ -668,8 +677,8 @@ async function handleRound(payload) {
     roundNumber,
     score: score ?? null,
     panoId: location.panoId ?? null,
-    answer: { ...answer, lat: location.lat, lng: location.lng },
-    guess: guessed ? { ...guessed, lat: guess.lat, lng: guess.lng } : null,
+    answer: { ...place(answer), lat: location.lat, lng: location.lng },
+    guess: guessed ? { ...place(guessed), lat: guess.lat, lng: guess.lng } : null,
     correctCountry,
     correctScope,
     distanceKm,

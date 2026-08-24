@@ -852,4 +852,41 @@ describe('offline reverse geocoding', () => {
     // Nothing is carried for countries no meta is scoped to.
     expect(locate(regions, 48.8566, 2.3522)).toBe(null)
   })
+
+  /**
+   * A scope is a list of subdivision names, and grading is a string match
+   * against what the pack calls the ground the guess landed on. The two
+   * datasets disagree about spelling — geoBoundaries writes South Africa's
+   * Northern Cape as "Nothern Cape" — so a pack carrying one name per shape
+   * graded every correct guess inside those provinces out of scope, silently,
+   * and only for the handful of metas whose scope happened to be spelled the
+   * other way. The pack now carries every spelling; this is the check that it
+   * still covers every scope we have written.
+   */
+  it.runIf(built && !!regions)('answers to every spelling a scope is written in', () => {
+    const known = new Set(regions.features.flatMap((f) => f.names).map(normRegion))
+    const scopes = JSON.parse(readFileSync(join(HERE, '..', 'scope-regions.json'), 'utf8'))
+    const ungradeable = Object.entries(scopes)
+      .filter(([, named]) => Array.isArray(named) && !named.some((n) => known.has(normRegion(n))))
+      .map(([meta]) => meta)
+    expect(ungradeable, 'metas whose scope no shape answers to').toEqual([])
+  })
+
+  it.runIf(built && !!regions)('knows the province under the name its scope uses', () => {
+    expect(locate(regions, -28.45, 21.25)?.names).toContain('Northern Cape')
+    expect(locate(regions, 43.36, -5.84)?.names).toContain('Asturias')
+  })
 })
+
+/** The grader's own normaliser, copied rather than imported: it lives in the
+ * Worker, which cannot be loaded here. Drift between the two shows up as this
+ * suite passing while a round grades wrong, so keep them identical. */
+const normRegion = (s) =>
+  s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/đ/g, 'd')
+    .replace(/\b(prefecture|province|region|state|district|county|governorate|oblast)\b/g, '')
+    .replace(/[^a-z]+/g, ' ')
+    .trim()
