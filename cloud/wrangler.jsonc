@@ -18,9 +18,11 @@
   },
   // The userscript (and its loader) are served from GET /geocoach.user.js and
   // /geocoach.body.js with the caller's credentials baked in, so both bundle
-  // as text.
+  // as text. The boundary packs (coach/geo/pack/, built by coach/geo/pack.mjs)
+  // ride along as ArrayBuffers so reverse geocoding needs no network call.
   "rules": [
-    { "type": "Text", "globs": ["**/*.user.js", "**/*.loader.js"], "fallthrough": true }
+    { "type": "Text", "globs": ["**/*.user.js", "**/*.loader.js"], "fallthrough": true },
+    { "type": "Data", "globs": ["**/*.bin"], "fallthrough": true }
   ],
   // Re-enable once R2 is switched on for the account (dashboard > R2, one-time
   // terms acceptance), then: wrangler r2 bucket create geocoach && wrangler deploy

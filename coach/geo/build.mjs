@@ -525,3 +525,9 @@ for (const lod of LODS) {
       `${(bytes.get(lod.id) / 2 ** 20).toFixed(1)} MB on disk`
   )
 }
+
+// The slices are what the overlay draws; the packs are what the round pipeline
+// reverse-geocodes against. Building them here means the two can never drift —
+// a rebuild that left a stale pack behind would grade rounds against the old
+// boundaries without saying so.
+await import('./pack.mjs').then((m) => m.writePacks())

@@ -15,6 +15,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { loadPack, locate } from './locate.mjs'
 import {
   DROP_TOLS,
   LODS,
@@ -792,5 +793,63 @@ describe.skipIf(!existsSync(SRC))('against the Natural Earth source', () => {
       const raw = { type: f.geometry.type, coordinates: f.geometry.coordinates }
       if (area(raw) > 1) expect(area(out) / area(raw), f.properties.NAME).toBeCloseTo(1, 3)
     }
+  })
+})
+
+/**
+ * The offline reverse geocoder. Skips without a built pack, like the rest of
+ * the built half.
+ *
+ * The cases worth pinning are the ones that used to go wrong, not the easy
+ * middles: a point on the far side of a land border from a much larger
+ * neighbour (the failure that marks a correct answer wrong), a small territory
+ * drawn inside the sovereign that also covers it, and a shoreline point that a
+ * simplified outline leaves in the water.
+ */
+describe('offline reverse geocoding', () => {
+  const packPath = join(HERE, 'pack', 'admin0.bin')
+  const regionPath = join(HERE, 'pack', 'admin1.bin')
+  const built = existsSync(packPath)
+  const pack = built ? loadPack(readFileSync(packPath)) : null
+  const regions = built && existsSync(regionPath) ? loadPack(readFileSync(regionPath)) : null
+  const at = (lat, lng) => locate(pack, lat, lng)?.code ?? '??'
+
+  it.runIf(built)('places ordinary points in their country', () => {
+    expect(at(-0.1807, -78.4678)).toBe('EC') // Quito
+    expect(at(-33.9755, 25.6059)).toBe('ZA') // Gqeberha
+    expect(at(-25.2708, 152.2147)).toBe('AU') // Maryborough, Queensland
+    expect(at(35.6762, 139.6503)).toBe('JP') // Tokyo
+    expect(at(64.1466, -21.9426)).toBe('IS') // Reykjavik
+  })
+
+  it.runIf(built)('does not hand a border town to the larger neighbour', () => {
+    expect(at(68.4453, 22.4772)).toBe('FI') // Kilpisjarvi arm, Sweden a ridge away
+    expect(at(16.5795, 104.7475)).toBe('LA') // Mekong bank, Thailand across the water
+    expect(at(42.3314, -83.0458)).toBe('US') // Detroit, and Windsor 1km across
+    expect(at(42.3149, -83.0364)).toBe('CA') // the river, on the other side
+    expect(at(43.7309, 7.4209)).toBe('MC') // Monaco, wholly inside France
+  })
+
+  it.runIf(built)('prefers the smaller claim where shapes nest', () => {
+    expect(at(18.3474, -64.7103)).toBe('VI') // US Virgin Islands, not the BVI
+    expect(at(22.3193, 114.1694)).toBe('HK') // Hong Kong, not mainland China
+  })
+
+  it.runIf(built)('pulls shoreline points back onto the land they belong to', () => {
+    // Toronto's waterfront and a Gulf-of-St-Lawrence shore both fall outside a
+    // simplified outline; both are unambiguously Canada.
+    expect(at(43.6407, -79.3875)).toBe('CA')
+    expect(at(50.0236, -66.8667)).toBe('CA')
+  })
+
+  it.runIf(built)('leaves open ocean unresolved rather than guessing', () => {
+    expect(at(0, -140)).toBe('??') // middle of the Pacific
+  })
+
+  it.runIf(built && !!regions)('names the subdivision for scoped countries', () => {
+    expect(locate(regions, -33.8688, 151.2093)?.name).toBe('New South Wales')
+    expect(locate(regions, 37.7749, -122.4194)?.name).toBe('California')
+    // Nothing is carried for countries no meta is scoped to.
+    expect(locate(regions, 48.8566, 2.3522)).toBe(null)
   })
 })

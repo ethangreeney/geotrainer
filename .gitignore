@@ -46,6 +46,9 @@ coach/geo/admin0/
 coach/geo/admin1/
 coach/geo/merged/
 coach/geo/index.json
+# ...and the packed boundaries the round pipeline geocodes against, rebuilt by
+# coach/geo/pack.mjs (build.mjs runs it)
+coach/geo/pack/
 
 # wrangler's local dev state (local D1, build temp)
 cloud/.wrangler/

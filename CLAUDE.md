@@ -43,11 +43,14 @@ elevation lookup. If `coach/plonkit/` is empty, regenerate it:
 `node coach/plonkit/scrape.mjs` (~10 min, ~500MB; snapshot is gitignored).
 
 The result-map overlay draws its boundaries from geoBoundaries (OSM), with
-Natural Earth as the naming layer and the fallback. If `coach/geo/`
-has no slices: `node coach/geo/fetch.mjs` then `node coach/geo/build.mjs`
-(~10 min, ~650MB download, ~30s to build; both the sources and the slices are
-gitignored). `node coach/geo/audit.mjs` checks that every meta scope and every
-country played still resolves to a shape.
+Natural Earth as the naming layer and the fallback. The same shapes are packed
+into `coach/geo/pack/` and are how a round's country is resolved — reverse
+geocoding is offline, no API and no key, in the Worker and on the laptop alike.
+If `coach/geo/` has no slices: `node coach/geo/fetch.mjs` then
+`node coach/geo/build.mjs` (~10 min, ~650MB download, ~30s to build; sources,
+slices and packs are all gitignored, and build.mjs writes the packs itself).
+`node coach/geo/audit.mjs` checks that every meta scope and every country
+played still resolves to a shape.
 
 ## Constraints
 

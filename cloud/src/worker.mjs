@@ -20,6 +20,11 @@ import {
   ratingNameFor,
 } from '../../coach/scheduler.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
+import { loadPack, locate } from '../../coach/geo/locate.mjs'
+// Boundary packs, built by coach/geo/pack.mjs from the same geoBoundaries
+// slices the result-map overlay draws.
+import COUNTRY_PACK from '../../coach/geo/pack/admin0.bin'
+import REGION_PACK from '../../coach/geo/pack/admin1.bin'
 // The userscript source, bundled as text (see the "rules" entry in
 // wrangler.jsonc) so GET /geocoach.user.js can stamp a user's credentials in.
 // The loader is what Tampermonkey installs; it fetches the body fresh on every
@@ -82,33 +87,58 @@ function inMetaScope(metaName, guessRegion) {
   return scopedTo.some((r) => normRegion(r) === got)
 }
 
-// Geocode cache lives for the isolate's lifetime — keyed finely enough to
-// never go stale. Catalogs are bundled (CATALOGS above), so no cache needed.
-const geocodeCache = new Map()
-
-async function loadCatalogs() {
-  return CATALOGS
+// Reverse geocoding is offline: the boundary packs are bundled (see
+// wrangler.jsonc) and decoded once per isolate, so a round never depends on a
+// third-party lookup. It used to — BigDataCloud's free endpoint is browser-only
+// and answers a Worker with 402, which is why every round captured here
+// recorded itself as "??". Catalogs are bundled too (CATALOGS above).
+let packs = null
+const boundaries = () => {
+  packs ??= { country: loadPack(COUNTRY_PACK), region: loadPack(REGION_PACK) }
+  return packs
 }
 
-async function countryOf(lat, lng) {
-  const key = `${lat.toFixed(2)},${lng.toFixed(2)}`
-  if (geocodeCache.has(key)) return geocodeCache.get(key)
-  try {
-    const res = await fetch(
-      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`,
-      { signal: AbortSignal.timeout(8000) },
-    )
-    const data = await res.json()
-    const out = {
-      code: data.countryCode || '??',
-      name: data.countryName || 'unknown',
-      region: data.principalSubdivision || '',
-      locality: data.locality || '',
-    }
-    geocodeCache.set(key, out)
-    return out
-  } catch {
-    return { code: '??', name: 'unknown', region: '', locality: '' }
+/** The country and subdivision a point falls in. Subdivisions are only carried
+ * for the countries some meta is scoped to, so `region` is empty everywhere
+ * else — which is what inMetaScope already treats as "no reason to doubt it".
+ * `locality` has no offline source and is no longer reported; nothing grades
+ * on it. */
+function countryOf(lat, lng) {
+  const { country, region } = boundaries()
+  const hit = locate(country, lat, lng)
+  if (!hit) return { code: '??', name: 'unknown', region: '', locality: '' }
+  return {
+    code: hit.code,
+    name: hit.name,
+    region: locate(region, lat, lng)?.name ?? '',
+    locality: '',
+  }
+}
+
+/**
+ * The geo half of a round's grade, from coordinates alone. Capture and the
+ * repair endpoint both go through here so a rebuilt round is graded exactly as
+ * a fresh one is — the two drifting apart is how a repair quietly invents
+ * history that never happened.
+ *
+ * "??" is the boundary lookup finding nothing, not a country. Comparing two
+ * unknowns would mark the round correct, so an unresolved answer grades as if
+ * there were no guess at all.
+ */
+function geoGrade(location, guess, metaName) {
+  const answer = countryOf(location.lat, location.lng)
+  const guessed = guess ? countryOf(guess.lat, guess.lng) : null
+  const twins = metaName ? LOOKALIKE_METAS[metaName] : null
+  const correctCountry =
+    guessed && answer.code !== '??' && guessed.code !== '??'
+      ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
+      : false
+  return {
+    answer,
+    guessed,
+    correctCountry,
+    correctScope: correctCountry && (!metaName || inMetaScope(metaName, guessed?.region)),
+    distanceKm: guess ? haversineKm(location, guess) : null,
   }
 }
 
@@ -429,10 +459,11 @@ async function handleRound(env, user, payload, ctx) {
   const id = `${Date.now()}_r${roundNumber ?? 0}`
 
   // Catalog hit tells us the real LM mapId up front — one LM call, never the
-  // doomed one against the played trainer map. Everything the response needs —
-  // dup-check, rate-limit, both geocodes, LM meta, user state — rides one
+  // doomed one against the played trainer map. Everything the response needs
+  // from elsewhere — dup-check, rate-limit, LM meta, user state — rides one
   // parallel block, so the whole read side costs a single slowest-leg wait
-  // instead of a chain of serial D1 round trips.
+  // instead of a chain of serial D1 round trips. Both geocodes sit outside it:
+  // they are local polygon tests now, not round trips.
   const catalogHit = source !== 'duel' ? catalogLocation(location.panoId) : null
   const lmMapId = catalogHit ? catalogHit.mapId : mapId
   const timed = {}
@@ -440,7 +471,7 @@ async function handleRound(env, user, payload, ctx) {
     const from = Date.now()
     return Promise.resolve(p).then((v) => ((timed[name] = since(from)), v))
   }
-  const [prior, overLimit, answer, guessed, lm, state] = await Promise.all([
+  const [prior, overLimit, lm, state] = await Promise.all([
     lap(
       'dup',
       env.DB.prepare('SELECT id, ts FROM rounds WHERE user_id = ? AND dup_key = ?')
@@ -448,8 +479,6 @@ async function handleRound(env, user, payload, ctx) {
         .first(),
     ),
     lap('limit', overRoundLimit(env, user.id)),
-    lap('geoAnswer', countryOf(location.lat, location.lng)),
-    guess ? lap('geoGuess', countryOf(guess.lat, guess.lng)) : null,
     lmMapId && source !== 'duel' && location.panoId
       ? lap('lm', lmMeta(env, lmMapId, location.panoId, ctx))
       : null,
@@ -469,17 +498,11 @@ async function handleRound(env, user, payload, ctx) {
       }
     : lm
   const metaName = metaKeyOf(meta?.country, meta?.metaName ?? meta?.name) ?? null
-  const twins = metaName ? LOOKALIKE_METAS[metaName] : null
-  // "??" is the geocoder failing, not a country. Comparing two failures marks
-  // every round of an outage correct — a silently wrong grade that feeds FSRS
-  // and the profile — so an unknown answer grades as no-guess instead.
-  const correctCountry =
-    guessed && answer.code !== '??' && guessed.code !== '??'
-      ? guessed.code === answer.code || !!(twins && twins.has(guessed.code) && twins.has(answer.code))
-      : false
-  const distanceKm = guess ? haversineKm(location, guess) : null
-  const correctScope =
-    correctCountry && (!metaName || inMetaScope(metaName, guessed?.region))
+  const { answer, guessed, correctCountry, correctScope, distanceKm } = geoGrade(
+    location,
+    guess,
+    metaName,
+  )
 
   const round = {
     id,
@@ -678,6 +701,7 @@ const json = (obj, status = 200) =>
 const AUTHED_PATHS = new Set([
   '/round',
   '/rate',
+  '/regeocode',
   '/prewarm',
   '/deck',
   '/status',
@@ -714,6 +738,107 @@ async function overRoundLimit(env, userId) {
     .bind(userId, since)
     .first()
   return (row?.n ?? 0) > 800
+}
+
+/**
+ * Repairs rounds whose country never resolved, and rebuilds the tallies that
+ * were computed from them.
+ *
+ * Every round captured while the old network geocoder was failing recorded
+ * "??" for both the answer and the guess, which graded as a miss however good
+ * the guess was — a correct call on Ecuador went into the history as wrong.
+ * The coordinates were always stored, so the grade can simply be recomputed
+ * from them now that the lookup is local.
+ *
+ * The country and confusion tallies are rebuilt from every round rather than
+ * patched, since they are pure sums over the rounds and a patch would carry
+ * forward whatever the outage already put in them. Meta stats are rebuilt the
+ * same way, in time order, because `streak` depends on it. The FSRS cards are
+ * deliberately left alone: a card's state is the path its reviews took, not a
+ * sum, and replaying it would be inventing a review history rather than
+ * correcting one. Scheduling re-converges on its own as the metas come up
+ * again.
+ */
+async function handleRegeocode(env, user, { dryRun = false } = {}) {
+  const rows = await env.DB.prepare('SELECT id, json FROM rounds WHERE user_id = ? ORDER BY ts')
+    .bind(user.id)
+    .all()
+
+  const repaired = []
+  const rounds = []
+  for (const row of rows.results ?? []) {
+    let round
+    try {
+      round = JSON.parse(row.json)
+    } catch {
+      continue // A corrupt row is not something a re-geocode can rescue.
+    }
+    const before = round.answer?.code
+    if (before === '??' && Number.isFinite(round.answer?.lat)) {
+      const graded = geoGrade(round.answer, round.guess, round.metaName ?? null)
+      round.answer = { ...graded.answer, lat: round.answer.lat, lng: round.answer.lng }
+      if (round.guess && graded.guessed)
+        round.guess = { ...graded.guessed, lat: round.guess.lat, lng: round.guess.lng }
+      round.correctCountry = graded.correctCountry
+      round.correctScope = graded.correctScope
+      round.distanceKm = graded.distanceKm ?? round.distanceKm
+      if (round.answer.code !== '??') repaired.push(round)
+    }
+    rounds.push(round)
+  }
+
+  const countries = {}
+  const confusions = {}
+  const metas = {}
+  for (const round of rounds) {
+    const cc = round.answer?.code
+    if (!cc) continue
+    const tally = (countries[cc] ??= { seen: 0, correctCountry: 0 })
+    tally.seen += 1
+    if (round.correctCountry) tally.correctCountry += 1
+    if (round.guess && !round.correctCountry) {
+      const pair = `${cc}>${round.guess.code}`
+      confusions[pair] = (confusions[pair] ?? 0) + 1
+    }
+    if (round.metaName) {
+      const m = (metas[round.metaName] ??= { seen: 0, correct: 0, streak: 0 })
+      m.seen += 1
+      if (round.correctScope) {
+        m.correct += 1
+        m.streak += 1
+      } else {
+        m.streak = 0
+      }
+    }
+  }
+
+  const summary = {
+    ok: true,
+    rounds: rounds.length,
+    repaired: repaired.length,
+    stillUnknown: rounds.filter((r) => r.answer?.code === '??').length,
+    nowCorrect: repaired.filter((r) => r.correctCountry).length,
+    countries: Object.fromEntries(
+      Object.entries(countries)
+        .sort((a, b) => b[1].seen - a[1].seen)
+        .slice(0, 15),
+    ),
+  }
+  if (dryRun) return summary
+
+  // D1 caps how much one batch may carry, so the updates go in chunks. The
+  // state write goes last, after every round it summarises has landed.
+  for (let i = 0; i < repaired.length; i += 50) {
+    await env.DB.batch(
+      repaired.slice(i, i + 50).map((round) =>
+        env.DB.prepare('UPDATE rounds SET answer_code = ?, json = ? WHERE user_id = ? AND id = ?')
+          .bind(round.answer.code, JSON.stringify(round), user.id, round.id),
+      ),
+    )
+  }
+  const state = await loadUserState(env, user.id)
+  await saveUserState(env, user.id, { ...state, countries, confusions, metas })
+  return summary
 }
 
 export default {
@@ -788,6 +913,14 @@ export default {
           if (lmMapId) ctx.waitUntil(lmMeta(env, lmMapId, panoId, ctx).catch(() => {}))
         }
         return json({ ok: true })
+      }
+
+      // Maintenance: re-grade rounds the old network geocoder left as "??".
+      // Authenticated like everything else and scoped to the caller's own
+      // rounds, so it can be run again the next time the boundary data moves.
+      if (request.method === 'POST' && path === '/regeocode') {
+        const body = await request.json().catch(() => ({}))
+        return json(await handleRegeocode(env, user, body))
       }
 
       if (request.method === 'POST' && path === '/rate') {

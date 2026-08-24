@@ -4,7 +4,7 @@
  *
  * Deliberately makes NO LLM API calls: the coaching intelligence is the
  * Claude Code session watching coach/rounds/. This process only does plumbing:
- *   - reverse-geocodes the answer and the guess (BigDataCloud, free, no key)
+ *   - reverse-geocodes the answer and the guess against bundled boundaries
  *   - fetches street-view tiles for the round's panorama (public tile CDN, no key)
  *   - asks Learnable Meta for the round's intended meta, when the map has one
  *   - embeds the Plonk It clues for both countries from the app's own data
@@ -12,7 +12,7 @@
  *
  * Run:  node coach/server.mjs     (listens on 127.0.0.1:5177)
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -20,6 +20,8 @@ import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { saveRoundTiles } from './pano.mjs'
 import { countryCode, countryShape, geoReady, lodFor, regionShapes } from './geo/resolve.mjs'
+import { loadPack, locate } from './geo/locate.mjs'
+import { COUNTRY_PACK, REGION_PACK } from './geo/pack.mjs'
 import { clipGeometry } from './geo/shape.mjs'
 import {
   buildDeck,
@@ -165,26 +167,31 @@ async function metaFromCatalogs(panoId) {
   return null
 }
 
-const geocodeCache = new Map()
-async function countryOf(lat, lng) {
-  const key = `${lat.toFixed(2)},${lng.toFixed(2)}`
-  if (geocodeCache.has(key)) return geocodeCache.get(key)
-  try {
-    const res = await fetch(
-      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`,
-      { signal: AbortSignal.timeout(8000) },
-    )
-    const data = await res.json()
-    const out = {
-      code: data.countryCode || '??',
-      name: data.countryName || 'unknown',
-      region: data.principalSubdivision || '',
-      locality: data.locality || '',
+// Reverse geocoding is offline, from the same boundary packs the Worker
+// bundles. It used to call BigDataCloud; their free endpoint is browser-only
+// and answers a server with 402 (and bans the IP), so every lookup here was
+// one outage away from recording the round as "??".
+let packs = null
+function boundaries() {
+  if (!packs) {
+    packs = {
+      country: existsSync(COUNTRY_PACK) ? loadPack(readFileSync(COUNTRY_PACK)) : null,
+      region: existsSync(REGION_PACK) ? loadPack(readFileSync(REGION_PACK)) : null,
     }
-    geocodeCache.set(key, out)
-    return out
-  } catch {
-    return { code: '??', name: 'unknown', region: '', locality: '' }
+    if (!packs.country) console.warn('no boundary pack — run: node coach/geo/pack.mjs')
+  }
+  return packs
+}
+
+function countryOf(lat, lng) {
+  const { country, region } = boundaries()
+  const hit = country && locate(country, lat, lng)
+  if (!hit) return { code: '??', name: 'unknown', region: '', locality: '' }
+  return {
+    code: hit.code,
+    name: hit.name,
+    region: (region && locate(region, lat, lng)?.name) || '',
+    locality: '',
   }
 }
 
