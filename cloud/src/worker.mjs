@@ -352,7 +352,7 @@ function countryName(code, fromRounds) {
 async function buildDashboard(env, user) {
   const now = new Date()
   const state = await loadUserState(env, user.id)
-  const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs(env)), now)
+  const summary = deckSummary(state.deckCards, toLadder(CATALOGS), now)
   const introduced = Object.keys(state.deckCards).length
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
@@ -929,14 +929,12 @@ export default {
       }
 
       if (request.method === 'GET' && path === '/deck') {
-        const catalogs = await loadCatalogs(env)
-        if (!catalogs.length) return json({ error: 'no catalogs uploaded yet' }, 503)
         const state = await loadUserState(env, user.id)
         const now = new Date()
-        const deck = buildDeck(state.deckCards, toLadder(catalogs), { minNew: 5, minSize: 18 }, now)
+        const deck = buildDeck(state.deckCards, toLadder(CATALOGS), { minNew: 5, minSize: 18 }, now)
 
         // Up to 4 locations per chosen meta, so one or two games sweep the deck.
-        const byMap = new Map(catalogs.map((c) => [c.mapId, c]))
+        const byMap = new Map(CATALOGS.map((c) => [c.mapId, c]))
         const usedPanos = new Set()
         const customCoordinates = []
         const prewarm = []
@@ -984,7 +982,7 @@ export default {
 
       if (request.method === 'GET' && path === '/status') {
         const state = await loadUserState(env, user.id)
-        const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs(env)), new Date())
+        const summary = deckSummary(state.deckCards, toLadder(CATALOGS), new Date())
         return json({ ...summary, trainerMapId: user.config.trainerMapId ?? null })
       }
 

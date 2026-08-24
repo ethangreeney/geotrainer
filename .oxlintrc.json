@@ -4,5 +4,12 @@
   "rules": {
     "react/rules-of-hooks": "error",
     "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
+  },
+  "overrides": [
+    {
+      "files": ["cloud/src/**/*.mjs", "coach/**/*.mjs"],
+      "env": { "node": true, "browser": true, "es2024": true },
+      "rules": { "no-undef": "error" }
+    }
+  ]
 }

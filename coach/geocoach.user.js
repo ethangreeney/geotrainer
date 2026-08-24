@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.13.1
+// @version      2.13.2
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.13.1'
+  const BODY_VERSION = '2.13.2'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -2478,7 +2478,8 @@
     rebuilding = true
     try {
       const deck = await serverGet('/deck')
-      if (!deck.customCoordinates || deck.customCoordinates.length < 5) return
+      if (!deck.customCoordinates || deck.customCoordinates.length < 5)
+        return tlog('rebuild (' + reason + '): the deck came back too small to publish')
       let mapId = deck.trainerMapId
       let created = false
       if (!mapId) {
@@ -2516,10 +2517,11 @@
         registerTrainerMap(mapId)
       }
       localStorage.setItem('gc-last-rebuild', String(Date.now()))
-      // Silent by design: rebuilds are routine housekeeping. Only failures
-      // (the catch below / server toasts) deserve attention.
-      console.log(`[geocoach] deck rebuilt (${reason}): ${deck.summary.due} due, ${deck.summary.introduced} new`)
+      // Silent on screen — rebuilds are routine housekeeping — but never silent
+      // in the log: a rebuild that stops happening is invisible otherwise.
+      tlog('rebuild (' + reason + '): map published — ' + deck.summary.due + ' due, ' + deck.summary.introduced + ' new')
     } catch (err) {
+      tlog('rebuild (' + reason + ') FAILED: ' + ((err && err.message) || err))
       console.error('[geocoach] auto-rebuild failed', err)
     } finally {
       rebuilding = false
