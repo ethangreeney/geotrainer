@@ -1,0 +1,59 @@
+<!-- The unfurl card for og:image, rendered to site/public/og.jpg.
+
+     Authored on a 1200x1200 canvas with the 1200x630 card centred because the
+     only SVG rasteriser on hand is macOS QuickLook, which scales any source to
+     a square thumbnail — handed the card at its own aspect ratio it rendered
+     it 1.9x too large and cropped the sides off. Square in, square out, then
+     crop the middle band back down:
+
+       qlmanage -t -s 1200 -o . site/og-card.svg
+       sips -c 630 1200 og-card.svg.png --out og.png
+       sips -s format jpeg -s formatOptions 80 og.png --out site/public/og.jpg
+
+     JPEG rather than PNG: it is a full-bleed gradient, and PNG made it 800KB
+     against 107KB for the same picture. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.55" y2="1">
+      <stop offset="0" stop-color="#231449"/>
+      <stop offset="0.55" stop-color="#160d33"/>
+      <stop offset="1" stop-color="#0d0722"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.16" cy="0.12" r="0.75">
+      <stop offset="0" stop-color="#a3e961" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#a3e961" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#3a2570"/>
+      <stop offset="1" stop-color="#1e1244"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="1200" fill="#0d0722"/>
+  <g transform="translate(0,285)">
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <!-- masthead: the same chip-and-benchmark mark the site wears -->
+  <g transform="translate(72,66)">
+    <rect width="52" height="52" rx="13" fill="url(#chip)"/>
+    <rect x="0.6" y="0.6" width="50.8" height="50.8" rx="12.4" fill="none" stroke="#ffffff" stroke-opacity="0.16"/>
+    <g transform="translate(26,26)" stroke="#a3e961" stroke-width="3.2" fill="none" stroke-linecap="round">
+      <circle cx="0" cy="0" r="9.5"/>
+      <path d="M0 -17v4M0 13v4M-17 0h4M13 0h4"/>
+    </g>
+    <circle cx="26" cy="26" r="3.8" fill="#a3e961"/>
+    <text x="72" y="35" font-family="Helvetica Neue, Helvetica, Arial" font-size="26" font-weight="700" letter-spacing="5" fill="#efeafd">GEOCOACH</text>
+  </g>
+
+  <text x="72" y="268" font-family="Helvetica Neue, Helvetica, Arial" font-size="70" font-weight="700" fill="#ffffff">A tutor decides what you</text>
+  <text x="72" y="348" font-family="Helvetica Neue, Helvetica, Arial" font-size="70" font-weight="700" fill="#ffffff">work on next, and explains</text>
+  <text x="72" y="428" font-family="Helvetica Neue, Helvetica, Arial" font-size="70" font-weight="700" fill="#ffffff">what you got wrong.</text>
+
+  <text x="72" y="500" font-family="Helvetica Neue, Helvetica, Arial" font-size="30" fill="#b9aee0">Spaced repetition for GeoGuessr. Free, and it plugs into the game you play.</text>
+
+  <rect x="72" y="546" width="1056" height="1" fill="#ffffff" fill-opacity="0.1"/>
+  <text x="72" y="588" font-family="Menlo, monospace" font-size="21" letter-spacing="1.5" fill="#8e82bb">geofsrs.pages.dev</text>
+  <text x="1128" y="588" text-anchor="end" font-family="Menlo, monospace" font-size="21" letter-spacing="1.5" fill="#8e82bb">NOT AFFILIATED WITH GEOGUESSR</text>
+  </g>
+</svg>

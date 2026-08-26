@@ -7,6 +7,7 @@ import {
   getToken,
   type CountryStat,
   type DashboardData,
+  type HeldPoint,
   type RoundStat,
   type WeakMeta,
 } from '../api'
@@ -45,12 +46,6 @@ function whenNext(ts: string | null) {
   return `on ${new Date(ts).toLocaleDateString([], { month: 'long', day: 'numeric' })}`
 }
 
-/** Every round has a real fix behind it, so set it as one: 41.1496° N 8.6109° W */
-function fix([lat, lng]: [number, number]) {
-  const d = (v: number, pos: string, neg: string) => `${Math.abs(v).toFixed(3)}° ${v >= 0 ? pos : neg}`
-  return `${d(lat, 'N', 'S')} ${d(lng, 'E', 'W')}`
-}
-
 /** The geocoder hands back names like "Philippines (the)". Nobody says that. */
 const clean = (n: string) => n.replace(/\s*\(the\)$/i, '')
 
@@ -61,15 +56,195 @@ function splitMeta(name: string) {
 }
 
 /* ==========================================================================
-   Figures. Both are hand-drawn SVG on theme.css's validated ramps: the
-   diverging amber<->blue scale for "how right am I here", the lime ordinal
-   ramp for anything that is just a quantity.
+   Figures. All hand-drawn SVG on theme.css's validated ramps: the diverging
+   amber<->blue scale for "how right am I here", the lime ordinal ramp for
+   anything that is just a quantity.
    ========================================================================== */
 
 /** Accuracy buckets, cold (wrong) to warm (right), around the 50% midpoint. */
 const DV = ['var(--d1)', 'var(--d2)', 'var(--d3)', 'var(--d4)', 'var(--d5)', 'var(--d6)', 'var(--d7)']
 const bucket = (acc: number) =>
   acc < 0.2 ? 0 : acc < 0.35 ? 1 : acc < 0.45 ? 2 : acc < 0.55 ? 3 : acc < 0.7 ? 4 : acc < 0.85 ? 5 : 6
+
+/**
+ * Ticks a person would actually draw: 0, then round steps up to the cap.
+ *
+ * The old chart labelled 0 / half / top, which on a 370-clue deck printed
+ * "185" as the middle gridline. Nobody reads a chart in halves of 370.
+ */
+function niceStep(span: number) {
+  const raw = Math.max(span / 4, 1)
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)))
+  return [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) ?? 10 * mag
+}
+
+function ticksTo(top: number) {
+  const step = niceStep(top)
+  const out: number[] = []
+  for (let v = 0; v <= top + 1e-6; v += step) out.push(v)
+  return out
+}
+
+/**
+ * The top of the y-axis: zero to one round step above the highest reading,
+ * never past the size of the deck.
+ *
+ * Scaling to the whole 370-clue deck instead put the line in the bottom third
+ * with two thirds of the box empty, which flattened the only thing the chart
+ * is for. The count of clues still sits in the headline directly above, so
+ * nothing is lost by not repeating the denominator here.
+ */
+function ceilingFor(series: HeldPoint[], total: number) {
+  const peak = Math.max(...series.map((p) => p.held), 1)
+  const step = niceStep(peak)
+  return Math.min(Math.max(total, 1), Math.ceil((peak + step * 0.35) / step) * step)
+}
+
+const day = (t: string) => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' })
+
+/**
+ * The headline number, plotted. One quantity over time, so: an area, one hue —
+ * the top step of theme.css's validated lime ordinal ramp — and no legend,
+ * because the heading above it already names the only series there is.
+ *
+ * A brand-new account has one reading. A single point joined to nothing used to
+ * be hidden entirely (the section was gated at two points), which meant the
+ * chart appeared out of nowhere on the second day; now one point draws as one
+ * point, on a full axis, with its value beside it.
+ */
+function Climb({ series, total }: { series: HeldPoint[]; total: number }) {
+  const [box, W] = useWidth()
+  const [at, setAt] = useState<number | null>(null)
+  const x0 = 44
+  const y0 = 10
+  const h = 168
+  /* The right gutter is the end label's, so the current value never sits on
+     top of the line that produced it. */
+  const gutter = 62
+  const H = y0 + h + 26
+  const w = Math.max(60, W - x0 - gutter)
+  const top = ceilingFor(series, total)
+  const lone = series.length < 2
+  const last = series[series.length - 1]
+  /* A single reading sits at the START of the axis, not the end: the empty
+     half of the box is the days that have not happened yet, and the one date
+     label has to be under the one point that carries it. */
+  const sx = (i: number) => (lone ? x0 : x0 + (i / (series.length - 1)) * w)
+  const sy = (v: number) => y0 + h - (Math.min(v, top) / top) * h
+  const line = series.map((p, i) => `${i === 0 ? 'M' : 'L'}${sx(i)} ${sy(p.held)}`).join(' ')
+
+  const pick = (e: React.PointerEvent<SVGRectElement>) => {
+    if (lone) return setAt(0)
+    const x = e.nativeEvent.offsetX
+    const i = Math.round(((x - x0) / w) * (series.length - 1))
+    setAt(Math.min(series.length - 1, Math.max(0, i)))
+  }
+  const shown = at === null ? null : series[at]
+
+  return (
+    <div className="fig" ref={box}>
+      {W > 0 && (
+        <svg
+          className="chart"
+          width={W}
+          height={H}
+          viewBox={`0 0 ${W} ${H}`}
+          role="img"
+          aria-label={`Clues held at ninety per cent recall, ${day(series[0].t)} to ${day(last.t)}: ${
+            series[0].held
+          } rising to ${last.held} of ${total}.`}
+        >
+          {ticksTo(top).map((t) => (
+            <g key={t}>
+              <line className="gridline" x1={x0} x2={x0 + w} y1={sy(t)} y2={sy(t)} />
+              <text className="tick" x={x0 - 9} y={sy(t) + 3.5} textAnchor="end">
+                {t.toLocaleString()}
+              </text>
+            </g>
+          ))}
+
+          {/* A wash under the line, not a block. A flat 12% fill on this plane
+              came out as a grey slab with a hard top edge that competed with
+              the line bounding it; fading it to nothing at the baseline keeps
+              the same ~10% of ink and lets it read as an amount. */}
+          {!lone && (
+            <>
+              <defs>
+                <linearGradient id="climbWash" x1="0" y1={y0} x2="0" y2={y0 + h} gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stopColor="var(--o4)" stopOpacity={0.24} />
+                  <stop offset="100%" stopColor="var(--o4)" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <path
+                d={`${line} L${sx(series.length - 1)} ${y0 + h} L${x0} ${y0 + h} Z`}
+                fill="url(#climbWash)"
+              />
+              <path d={line} fill="none" stroke="var(--o4)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+            </>
+          )}
+
+          {shown && !lone && (
+            <>
+              <line className="crosshair" x1={sx(at!)} x2={sx(at!)} y1={y0} y2={y0 + h} />
+              <circle cx={sx(at!)} cy={sy(shown.held)} r={4} fill="var(--o4)" stroke="var(--plane)" strokeWidth={2} />
+            </>
+          )}
+
+          {/* The end marker wears a ring in the surface colour so it stays a
+              disc where it crosses the axis or the gridline behind it. */}
+          <circle cx={sx(series.length - 1)} cy={sy(last.held)} r={4.5} fill="var(--o4)"
+            stroke="var(--plane)" strokeWidth={2} />
+          <text className="endLabel" x={sx(series.length - 1) + 11} y={sy(last.held) + 4}>
+            {last.held.toLocaleString()}
+          </text>
+
+          <line className="axis" x1={x0} x2={x0 + w} y1={y0 + h} y2={y0 + h} />
+          <text className="tick" x={x0} y={y0 + h + 17}>
+            {day(series[0].t)}
+          </text>
+          {!lone && (
+            <text className="tick" x={x0 + w} y={y0 + h + 17} textAnchor="end">
+              {day(last.t)}
+            </text>
+          )}
+
+          <rect className="hit" x={x0} y={y0} width={w} height={h}
+            onPointerMove={pick} onPointerLeave={() => setAt(null)} />
+        </svg>
+      )}
+
+      {shown && (
+        <div
+          className="figTip"
+          style={{ left: Math.min(Math.max(sx(at!), 62), Math.max(W - 62, 62)), top: sy(shown.held) - 14 }}
+        >
+          <span className="h">{day(shown.t)}</span>
+          <span className="v">{shown.held.toLocaleString()} held</span>
+        </div>
+      )}
+
+      {/* The figure is a picture; this is the same numbers as text, for anyone
+          who cannot hover one. */}
+      <table className="sr">
+        <caption>Clues held at 90% recall, by date</caption>
+        <thead>
+          <tr>
+            <th scope="col">Date</th>
+            <th scope="col">Clues held</th>
+          </tr>
+        </thead>
+        <tbody>
+          {series.map((p) => (
+            <tr key={p.t}>
+              <td>{day(p.t)}</td>
+              <td>{p.held.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 function Countries({ rows }: { rows: CountryStat[] }) {
   const [box, W] = useWidth()
@@ -193,8 +368,8 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
   )
 }
 
-/** One slipping clue as a log row: thumbnail, name, hit rate, lapses. */
-function Slip({ m }: { m: WeakMeta }) {
+/** One clue worth another look: thumbnail, name, hit rate so far. */
+function Work({ m }: { m: WeakMeta }) {
   const { country, clue } = splitMeta(m.metaName)
   const pct = m.seen > 0 ? Math.round((m.correct / m.seen) * 100) : 0
   const inner = (
@@ -212,10 +387,6 @@ function Slip({ m }: { m: WeakMeta }) {
         <span className="pc mono">{pct}%</span>
         <span className="meter warm">
           <i style={{ width: `${pct}%` }} />
-        </span>
-        <span className="tally">
-          {m.correct}/{m.seen}
-          {m.lapses > 0 && ` · ${m.lapses} lapsed`}
         </span>
       </span>
     </>
@@ -260,17 +431,69 @@ export default function Dashboard() {
     [data],
   )
 
+  /* Signing out of a passwordless account is not signing out — it is throwing
+     the account away, because the link in localStorage is the only credential
+     that exists and nothing else can reissue it. One unguarded click sat
+     between a player and every round they had ever graded. So the control asks
+     first, and it asks with the link on screen and a copy button next to it:
+     the answer to "are you sure" is only useful if you can act on it. */
+  const [leaving, setLeaving] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const signin = `${window.location.origin}/app?token=${getToken() ?? ''}`
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(signin)
+      setCopied(true)
+    } catch {
+      /* clipboard refused: the link is on screen to select by hand */
+    }
+  }
+
   const signOut = () => {
     clearToken()
     navigate('/')
   }
 
-  if (error || !data) {
+  /* A dashboard is one network round trip behind a blank page, and on a slow
+     connection the blank page was all there was. This is the shape of the
+     answer, held while the answer is still in flight, so nothing jumps when it
+     lands. */
+  if (!data && !error) {
     return (
       <>
         <Mast />
         <div className="shell">
-          <p className="loading">{error ?? 'Reading your deck…'}</p>
+          <p className="sr" role="status">
+            Loading your dashboard…
+          </p>
+          <div className="skelHold" aria-hidden>
+            <div className="skel t" />
+            <div className="skel t" style={{ width: '58%' }} />
+            <div className="skel bar" />
+            <div className="skel p" style={{ width: '76%' }} />
+            <div className="skel key" />
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  /* api.ts has already turned the status code into a sentence a person can act
+     on, so the job here is only to make it look like a state and not like a
+     crash — and to offer the retry, because most of these are transient. */
+  if (!data) {
+    return (
+      <>
+        <Mast />
+        <div className="shell">
+          <div className="panel blown" role="alert">
+            <h1>That didn’t load.</h1>
+            <p>{error}</p>
+            <button className="btn" onClick={() => location.reload()}>
+              Try again
+            </button>
+          </div>
         </div>
       </>
     )
@@ -280,234 +503,292 @@ export default function Dashboard() {
   const empty = totals.rounds === 0
   const pct = totals.correctPct === null ? null : Math.round(totals.correctPct)
   const next = whenNext(deck.nextDue)
-  const last = recent[0] ?? null
   const log = recent.slice(0, 16)
   const seenShare = deck.total > 0 ? (deck.introduced / deck.total) * 100 : 0
+
+  /* TEMPORARY. The Worker learned to send progress{} after this view learned to
+     draw it; until that ships, stand in the count of clues holding solid, which
+     is the nearest thing the old payload carries. Delete this line — not the
+     code around it — once /api/dashboard always answers with progress. */
+  const progress = data.progress ?? { held: metas.solid, total: deck.total, series: [] as HeldPoint[] }
+  const held = Math.min(progress.held, progress.total)
+  const heldShare = progress.total > 0 ? (held / progress.total) * 100 : 0
 
   return (
     <>
       <Mast>
         <span className="who">{data.name}</span>
-        <button className="quiet" onClick={signOut}>
+        <button className="quiet" onClick={() => setLeaving(true)}>
           Sign out
         </button>
       </Mast>
 
       <div className="shell">
-        <div className="strip">
-          <span>
-            Deck <b>{deck.introduced.toLocaleString()}</b> / {deck.total.toLocaleString()} clues
-          </span>
-          {last && (
-            <>
-              <span className="sep">/</span>
-              <span>
-                Last fix <b>{fix(last.to)}</b> · {ago(last.ts)}
-              </span>
-            </>
-          )}
-          <span className="sep">/</span>
-          <span>Read {ago(data.generatedAt)}</span>
-        </div>
-
-        {empty ? (
-          <div className="panel cta" style={{ marginTop: 26 }}>
-            <div>
-              <h3>No rounds captured yet.</h3>
-              <p>Play one game with the userscript running and this console fills in.</p>
+        {leaving && (
+          <section className="panel leave">
+            <h2>This link is the whole of your account.</h2>
+            <p>
+              There is no password to reset and no email to recover from, so signing out on the only browser that
+              holds this link ends the account behind it. Save it first.
+            </p>
+            <div className="linkbox">
+              <code>{signin}</code>
+              <button onClick={copyLink}>{copied ? 'Copied' : 'Copy'}</button>
             </div>
-            <Link to="/start" className="btn">
-              Finish setup <span className="arr">→</span>
-            </Link>
-          </div>
+            <div className="leaveCta">
+              <button className="btn" onClick={() => setLeaving(false)}>
+                Stay signed in
+              </button>
+              <button className="quiet" onClick={signOut}>
+                Sign out anyway
+              </button>
+            </div>
+          </section>
+        )}
+        {empty ? (
+          /* The first screen everyone who signs up sees, and it has to read as
+             a starting line rather than as a scoreline of nought. Same hero as
+             the played-in console — same number, same rail, same sentence —
+             because it is the same measure, only at the start of it. */
+          <section className="hold">
+            <p className="kicker">Starting line</p>
+            <h1>
+              <b>0</b> of {deck.total.toLocaleString()} clues held at 90%
+            </h1>
+            <div
+              className="holdBar at0"
+              role="img"
+              aria-label={`None of the ${deck.total} clues in your deck are held yet`}
+            >
+              <i style={{ width: '0%' }} />
+            </div>
+            <p className="say">
+              Every clue in the deck starts here. One round played with the userscript running moves this number, and
+              it keeps moving on its own after that.
+            </p>
+
+            <div className="holdCta">
+              <Link to="/start" className="btn big">
+                Finish setup <span className="arr">→</span>
+              </Link>
+              <span className="hint">Two minutes, and only once.</span>
+            </div>
+
+            <ol className="beats">
+              <li>
+                <span className="no">01</span>
+                <span>
+                  <b>Play GeoGuessr as usual.</b> The userscript captures each round as it ends. Nothing to press, no
+                  second app to keep open.
+                </span>
+              </li>
+              <li>
+                <span className="no">02</span>
+                <span>
+                  <b>Your pin is the grade.</b> Clues you called right get pushed months out; the ones you missed come
+                  back within days.
+                </span>
+              </li>
+              <li>
+                <span className="no">03</span>
+                <span>
+                  <b>The map rebuilds itself.</b> Your trainer map is republished after every game, so the next round is
+                  already the one you needed.
+                </span>
+              </li>
+            </ol>
+          </section>
         ) : (
           <>
-            <div className="dashHead">
-              <div>
-                <h1>
-                  {deck.due === 0
-                    ? 'Nothing is due right now.'
-                    : `${deck.due} clue${deck.due === 1 ? '' : 's'} ${deck.due === 1 ? 'is' : 'are'} ready for review.`}
-                </h1>
-                <p className="say">
-                  {deck.due > 0
-                    ? 'They come back as locations in your next rounds, so the thing to do now is play.'
-                    : next
-                      ? `Your next review lands ${next}. Play anyway and new clues join the deck.`
-                      : 'Play a few rounds and new clues will join the deck.'}
-                </p>
+            {/* The whole page in one figure: how much of the world you can
+                actually call right now. Everything else is behind Details. */}
+            <section className="hold">
+              <h1>
+                <b>{held.toLocaleString()}</b> of {progress.total.toLocaleString()} clues held at 90%
+              </h1>
+              <div className="holdBar" role="img"
+                aria-label={`${held} of ${progress.total} clues held at ninety per cent recall`}>
+                <i style={{ width: `${heldShare}%` }} />
               </div>
-              <a className="btn" href="https://www.geoguessr.com/" target="_blank" rel="noreferrer">
+              <p className="say">
+                Clues you would get right if they came up this minute. It falls again when you stop playing.
+              </p>
+
+              <a className="btn big" href="https://www.geoguessr.com/" target="_blank" rel="noreferrer">
                 Play a round <span className="arr">→</span>
               </a>
-            </div>
 
-            <div className="grid">
-              <div className="panel c12">
-                <div className="body flush">
-                  <div className="kpis">
-                    <div className={'kpi' + (deck.due > 0 ? ' hot' : '')}>
-                      <div className="k">Due now</div>
-                      <div className="v">{deck.due.toLocaleString()}</div>
-                      <div className="sub">{next ? `next ${next}` : 'nothing queued'}</div>
-                    </div>
-                    <div className="kpi">
-                      <div className="k">Rounds played</div>
-                      <div className="v">{totals.rounds.toLocaleString()}</div>
-                      <div className="sub">{last ? ago(last.ts) : '—'}</div>
-                    </div>
-                    <div className="kpi">
-                      <div className="k">Country right</div>
-                      <div className="v">{pct === null ? '—' : `${pct}%`}</div>
-                      <div className="sub">{byRounds.length} countries</div>
-                    </div>
-                    <div className="kpi cool">
-                      <div className="k">Holding solid</div>
-                      <div className="v">
-                        {metas.solid.toLocaleString()} <u>/ {metas.total.toLocaleString()}</u>
+              <p className="upNext">
+                {deck.due > 0
+                  ? `${deck.due.toLocaleString()} due now${next ? ` · next one back ${next}` : ''}`
+                  : next
+                    ? `Nothing due · next one back ${next}`
+                    : 'Nothing due yet'}
+              </p>
+            </section>
+
+            {progress.series.length >= 1 && (
+              <section className="climb">
+                <h2>Held at 90%, over time</h2>
+                <Climb series={progress.series} total={progress.total} />
+                {progress.series.length === 1 && (
+                  <p className="hint">One reading so far. The line joins up once you have played on a second day.</p>
+                )}
+              </section>
+            )}
+
+            {/* Everything the console used to open with, one click away. */}
+            <details className="more">
+              <summary>Details</summary>
+
+              <div className="grid">
+                <div className="col c5">
+                  <div className="panel">
+                    <header>
+                      <h2>Deck</h2>
+                      <span className="note">
+                        <b>{deck.introduced.toLocaleString()}</b> of {deck.total.toLocaleString()} introduced
+                      </span>
+                    </header>
+                    <div className="body">
+                      <div className="stack" aria-hidden>
+                        <i style={{ width: `${seenShare}%`, background: 'var(--o3)' }} />
+                        <i style={{ width: `${100 - seenShare}%`, background: 'var(--nodata)' }} />
                       </div>
-                      <div className="sub">clues you keep calling</div>
-                    </div>
-                    <div className="kpi">
-                      <div className="k">Bedding in</div>
-                      <div className="v">{deck.learning.toLocaleString()}</div>
-                      <div className="sub">still short intervals</div>
-                    </div>
-                    <div className="kpi">
-                      <div className="k">Not yet seen</div>
-                      <div className="v">{deck.unseen.toLocaleString()}</div>
-                      <div className="sub">waiting in the deck</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Two stacked columns rather than two rows of pairs: a short panel
-                  no longer has to stretch to a tall neighbour's height. */}
-              <div className="col c5">
-              <div className="panel">
-                <header>
-                  <h2>Deck</h2>
-                  <span className="note">
-                    <b>{deck.introduced.toLocaleString()}</b> of {deck.total.toLocaleString()} introduced
-                  </span>
-                </header>
-                <div className="body">
-                  <div className="stack" aria-hidden>
-                    <i style={{ width: `${seenShare}%`, background: 'var(--o3)' }} />
-                    <i style={{ width: `${100 - seenShare}%`, background: 'var(--nodata)' }} />
-                  </div>
-                  <div className="legend">
-                    <span>
-                      <i style={{ background: 'var(--o3)' }} /> Introduced
-                    </span>
-                    <span>
-                      <i style={{ background: 'var(--nodata)' }} /> Not yet seen
-                    </span>
-                  </div>
-                  <div className="tbl dk" style={{ marginTop: 12 }}>
-                    {[
-                      { k: 'Due now', v: deck.due, of: deck.introduced, warm: true },
-                      { k: 'Bedding in', v: deck.learning, of: deck.introduced, warm: true },
-                      { k: 'Holding solid', v: metas.solid, of: metas.total, warm: false },
-                      { k: 'Shaky', v: metas.shaky, of: metas.total, warm: true },
-                      { k: 'Not yet seen', v: deck.unseen, of: deck.total, warm: false },
-                    ].map((r) => (
-                      <div className="r" key={r.k}>
-                        <span className="nm">{r.k}</span>
-                        <span className={'meter' + (r.warm ? ' warm' : '')}>
-                          <i style={{ width: `${r.of > 0 ? Math.min(100, (r.v / r.of) * 100) : 0}%` }} />
+                      <div className="legend">
+                        <span>
+                          <i style={{ background: 'var(--o3)' }} /> Introduced
                         </span>
-                        <span className="num rt">{r.v.toLocaleString()}</span>
+                        <span>
+                          <i style={{ background: 'var(--nodata)' }} /> Not yet seen
+                        </span>
                       </div>
-                    ))}
+                      <div className="tbl dk" style={{ marginTop: 12 }}>
+                        {[
+                          { k: 'Due now', v: deck.due, of: deck.introduced, warm: true },
+                          { k: 'Bedding in', v: deck.learning, of: deck.introduced, warm: true },
+                          { k: 'Holding solid', v: metas.solid, of: metas.total, warm: false },
+                          { k: 'Not yet seen', v: deck.unseen, of: deck.total, warm: false },
+                        ].map((r) => (
+                          <div className="r" key={r.k}>
+                            <span className="nm">{r.k}</span>
+                            <span className={'meter' + (r.warm ? ' warm' : '')}>
+                              <i style={{ width: `${r.of > 0 ? Math.min(100, (r.v / r.of) * 100) : 0}%` }} />
+                            </span>
+                            <span className="num rt">{r.v.toLocaleString()}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                  <p className="hint" style={{ marginTop: 12 }}>
-                    {next ? `Next clue comes back ${next}.` : 'Nothing scheduled yet.'}
-                  </p>
-                </div>
-              </div>
 
-              <div className="panel">
-                <header>
-                  <h2>Where you play</h2>
-                  <span className="note">rounds, shaded by hit rate</span>
-                </header>
-                <div className="body">
-                  {byRounds.length === 0 ? <p className="empty">No countries yet.</p> : <Countries rows={byRounds} />}
+                  <div className="panel">
+                    <header>
+                      <h2>Where you play</h2>
+                      <span className="note">rounds, shaded by hit rate</span>
+                    </header>
+                    <div className="body">
+                      {byRounds.length === 0 ? <p className="empty">No countries yet.</p> : <Countries rows={byRounds} />}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              </div>
 
-              <div className="col c7">
-              <div className="panel">
-                <header>
-                  <h2>Slipping</h2>
-                  <span className="note">
-                    weakest <b>{Math.min(metas.weakest.length, 6)}</b> of {metas.total.toLocaleString()}
-                  </span>
-                </header>
-                <div className="body flush">
-                  {metas.weakest.length === 0 ? (
-                    <p className="empty">Nothing is slipping right now.</p>
-                  ) : (
-                    <div className="wks">
-                      {metas.weakest.slice(0, 6).map((m) => (
-                        <Slip key={m.metaName} m={m} />
+                <div className="col c7">
+                  <div className="panel">
+                    <header>
+                      <h2>Rounds</h2>
+                      <span className="note">
+                        <b>{totals.rounds.toLocaleString()}</b> played
+                      </span>
+                    </header>
+                    <div className="body">
+                      <div className="tbl dk">
+                        <div className="r">
+                          <span className="nm">Country called right</span>
+                          <span className="meter">
+                            <i style={{ width: `${pct ?? 0}%` }} />
+                          </span>
+                          <span className="num rt">{pct === null ? '—' : `${pct}%`}</span>
+                        </div>
+                        <div className="r">
+                          <span className="nm">Countries played</span>
+                          <span />
+                          <span className="num rt">{byRounds.length}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="panel">
+                    <header>
+                      <h2>Recent scores</h2>
+                      <span className="note">last {Math.min(recent.length, 24)} rounds</span>
+                    </header>
+                    <div className="body">
+                      <Scores rounds={recent} />
+                    </div>
+                  </div>
+
+                </div>
+
+                <div className="panel c12">
+                  <header>
+                    <h2>Round log</h2>
+                    <span className="note">last {log.length}</span>
+                  </header>
+                  <div className="body flush">
+                    <div className="log">
+                      <div className="r head" aria-hidden>
+                        <span />
+                        <span>Location</span>
+                        <span>Clue</span>
+                        <span className="rt">Distance</span>
+                        <span className="rt">When</span>
+                      </div>
+                      {log.map((r) => (
+                        <div className="r" key={r.id}>
+                          {/* A glyph, not a coloured disc. Right and wrong used
+                              to be carried by hue alone, with the words shut
+                              inside a title attribute only a mouse could reach. */}
+                          <span className={'mk ' + (r.correct ? 'ok' : 'no')}>
+                            <span aria-hidden>{r.correct ? '✓' : '✕'}</span>
+                            <span className="sr">
+                              {r.correct ? 'Country called right' : 'Country called wrong'}
+                            </span>
+                          </span>
+                          <span className="place">
+                            {r.country ? clean(r.country) : 'Unknown'}
+                            {!r.correct && r.guessCountry && <s> — read as {clean(r.guessCountry)}</s>}
+                          </span>
+                          <span className="clue">{r.metaName ?? '—'}</span>
+                          <span className="num rt">
+                            {r.distanceKm === null ? '—' : `${Math.round(r.distanceKm).toLocaleString()} km`}
+                          </span>
+                          <span className="num rt">{ago(r.ts)}</span>
+                        </div>
                       ))}
                     </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="panel">
-                <header>
-                  <h2>Recent scores</h2>
-                  <span className="note">last {Math.min(recent.length, 24)} rounds</span>
-                </header>
-                <div className="body">
-                  <Scores rounds={recent} />
-                </div>
-              </div>
-              </div>
-
-              <div className="panel c12">
-                <header>
-                  <h2>Round log</h2>
-                  <span className="note">last {log.length}</span>
-                </header>
-                <div className="body flush">
-                  <div className="log">
-                    <div className="r head" aria-hidden>
-                      <span />
-                      <span>Location</span>
-                      <span>Clue</span>
-                      <span>Fix</span>
-                      <span className="rt">Distance</span>
-                      <span className="rt">When</span>
-                    </div>
-                    {log.map((r) => (
-                      <div className="r" key={r.id}>
-                        <span
-                          className={'dot ' + (r.correct ? 'ok' : 'no')}
-                          title={r.correct ? 'Country called right' : 'Country called wrong'}
-                        />
-                        <span className="place">
-                          {r.country ? clean(r.country) : 'Unknown'}
-                          {!r.correct && r.guessCountry && <s> — read as {clean(r.guessCountry)}</s>}
-                        </span>
-                        <span className="clue">{r.metaName ?? '—'}</span>
-                        <span className="num">{fix(r.to)}</span>
-                        <span className="num rt">
-                          {r.distanceKm === null ? '—' : `${Math.round(r.distanceKm).toLocaleString()} km`}
-                        </span>
-                        <span className="num rt">{ago(r.ts)}</span>
-                      </div>
-                    ))}
                   </div>
                 </div>
+
+                {/* Last thing on the page on purpose. A clue the deck has not
+                    got into you yet is a thing to practise, not a scoreline. */}
+                {metas.weakest.length > 0 && (
+                  <div className="panel c12">
+                    <header>
+                      <h2>Worth another look</h2>
+                      <span className="note">clues the deck will bring back first</span>
+                    </header>
+                    <div className="body flush">
+                      <div className="wks">
+                        {metas.weakest.slice(0, 6).map((m) => (
+                          <Work key={m.metaName} m={m} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
+            </details>
           </>
         )}
       </div>

@@ -1,0 +1,31 @@
+{
+  "name": "geocoach-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for GeoCoach — coaches the GeoGuessr rounds you actually played, imagery and all.",
+  "type": "module",
+  "bin": {
+    "geocoach-mcp": "server.mjs"
+  },
+  "main": "server.mjs",
+  "files": [
+    "server.mjs",
+    "src",
+    "data",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "geoguessr",
+    "geocoach"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "jpeg-js": "^0.4.4",
+    "zod": "^4.4.3"
+  }
+}

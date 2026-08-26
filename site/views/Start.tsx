@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { Foot, Link, Mast, navigate } from '../router'
-import { ApiError, clearToken, fetchDashboard, fetchMe, getToken, installUrl, setToken, signup } from '../api'
+import {
+  accountUrl,
+  ApiError,
+  arrivedByLink,
+  clearToken,
+  type DeadTokenCause,
+  fetchDashboard,
+  fetchMe,
+  getToken,
+  installUrl,
+  readToken,
+  setToken,
+  signup,
+  takeDeadToken,
+} from '../api'
 
 /* Steps 2 and 3 happen inside the browser, where the server cannot see them.
    The visitor tells us, and we remember it so they come back to the right place. */
@@ -40,6 +54,17 @@ function detectBrowser(): string | null {
   if (/Firefox\/|FxiOS\//.test(ua)) return 'firefox'
   if (/Chrome\/|Chromium\/|CriOS\//.test(ua)) return 'chrome'
   if (/Safari\//.test(ua)) return 'safari'
+  return null
+}
+
+/* The one sentence that keeps a rejected token from looking like an account
+   that never existed. Shared, because both places that discover a dead token
+   end up on this page: this view's own check, and the dashboard's — which
+   clears the token and redirects here, leaving `takeDeadToken` as the only
+   surviving trace of what happened. */
+function deadTokenNote(cause: DeadTokenCause | null): string | null {
+  if (cause === 'link') return 'That account link is no longer valid — GeoCoach does not know that token.'
+  if (cause === 'device') return 'The account saved in this browser is no longer valid.'
   return null
 }
 
@@ -98,26 +123,60 @@ export default function Start() {
   const [account, setAccount] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<'account' | 'install' | null>(null)
   const [captured, setCaptured] = useState(false)
   const [checking, setChecking] = useState(() => !!getToken())
+  /* Why step 1 is offering a fresh account to somebody who had one. Silence
+     here was the worst failure on the page: a stale link cleared the token and
+     dropped you on "Create your account", so the honest reading was that your
+     account had never existed. */
+  const [lost, setLost] = useState<string | null>(() => deadTokenNote(takeDeadToken()))
+  /* A returning visitor's token could not be checked — the Worker is down, or
+     the connection is. Distinct from `lost`, because the account is fine and
+     making a second one would strand the first. */
+  const [unreachable, setUnreachable] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [paste, setPaste] = useState('')
+  const [pasteError, setPasteError] = useState<string | null>(null)
   const [tmDone, setTmDone] = useState(() => readFlag(TM_KEY))
   const [usDone, setUsDone] = useState(() => readFlag(US_KEY))
-  const [openStep, setOpenStep] = useState<number | null>(null)
+  /* Open on step 1, always. The account link lives in there, it is the only
+     copy of a credential that cannot be reset, and it used to sit folded away
+     behind a "Show" the eye slides straight past. */
+  const [openStep, setOpenStep] = useState<number | null>(1)
   const [browser] = useState(detectBrowser)
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  /* Focus the name field without letting the browser scroll it into view.
+     Plain autoFocus did both, and the field sits ~190px down the page, so
+     every arrival at /start opened already scrolled past the headline — and
+     past the "that account link is no longer valid" notice, which is the one
+     line a person coming back on a dead link has to see. */
+  const focusName = (el: HTMLInputElement | null) => el?.focus({ preventScroll: true })
 
   /* returning visitor: confirm the token still works and learn their name */
   useEffect(() => {
     if (!token) return
+    setUnreachable(false)
     fetchMe()
-      .then((me) => setAccount(me.name))
+      .then((me) => {
+        setAccount(me.name)
+        setLost(null)
+      })
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) {
           clearToken()
           setTok(null)
           setAccount(null)
+          // takeDeadToken both reads the reason and consumes the flag that the
+          // 401 just set, so it cannot resurface on a later visit to this page.
+          setLost(deadTokenNote(takeDeadToken() ?? (arrivedByLink() ? 'link' : 'device')))
+          return
         }
+        /* Anything else is our end, not theirs. Leave the token where it is:
+           it is very probably still good, and clearing it here would destroy
+           an account because a deploy took thirty seconds. */
+        setUnreachable(true)
       })
       .finally(() => setChecking(false))
   }, [token])
@@ -153,7 +212,8 @@ export default function Start() {
       setToken(res.token)
       setTok(res.token)
       setAccount(res.name)
-      setOpenStep(1) // keep the private link in view the moment it exists
+      setLost(null)
+      setOpenStep(1) // keep the account link in view the moment it exists
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.')
     } finally {
@@ -161,18 +221,57 @@ export default function Start() {
     }
   }
 
-  const link = token ? installUrl(token) : null
-
-  const copy = async () => {
-    if (!link) return
+  /* Somebody arriving with a link they saved, on a machine that has never seen
+     it. Stored and then verified rather than the other way round, because
+     fetchMe reads the token out of storage — and put back the way it was if it
+     turns out not to be an account, so a typo cannot log you out of the one
+     you were already signed in to. */
+  const restore = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (restoring) return
+    const candidate = readToken(paste)
+    if (!candidate) {
+      setPasteError('That does not look like a GeoCoach link. Paste the whole link, or the 32-character token from it.')
+      return
+    }
+    setPasteError(null)
+    setRestoring(true)
+    const previous = getToken()
+    setToken(candidate)
     try {
-      await navigator.clipboard.writeText(link)
+      const me = await fetchMe()
+      setTok(candidate)
+      setAccount(me.name)
+      setLost(null)
+      setPaste('')
+    } catch (err) {
+      if (previous) setToken(previous)
+      else clearToken()
+      setPasteError(
+        err instanceof ApiError && err.status === 401
+          ? 'GeoCoach does not know that token. Check you pasted the whole link.'
+          : err instanceof Error
+            ? err.message
+            : 'Could not check that link.',
+      )
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  const link = token ? installUrl(token) : null
+  const signin = token ? accountUrl(token) : null
+
+  const copy = async (which: 'account' | 'install', text: string | null) => {
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
     } catch {
       return
     }
-    setCopied(true)
+    setCopied(which)
     clearTimeout(copyTimer.current)
-    copyTimer.current = setTimeout(() => setCopied(false), 1800)
+    copyTimer.current = setTimeout(() => setCopied(null), 1800)
   }
 
   /* A captured round proves every earlier step happened, whatever storage says. */
@@ -239,15 +338,39 @@ export default function Start() {
             </>
           ) : (
             <>
-              <h1>Pick a name and play.</h1>
+              {/* Three headlines, because the page means three different things
+                  depending on where you stand in it. "Two more minutes" read as
+                  a lie on step 4, where nothing is left to set up and the only
+                  remaining move is to go and play. */}
+              <h1>
+                {!account
+                  ? 'Pick a name and play.'
+                  : current === 3
+                    ? `Everything is installed, ${account}.`
+                    : `Two more minutes, ${account}.`}
+              </h1>
               <p className="lede">
-                There is no password and no email. Your account is a private link, so the link is the one thing worth
-                keeping safe.
+                {current === 3
+                  ? 'Play a round of GeoGuessr and GeoCoach picks it up. Nothing else to set up.'
+                  : 'There is no password and no email. Your account is a private link, so the link is the one thing worth keeping safe.'}
               </p>
-              <p className="hint" style={{ marginTop: 10 }}>
-                Four steps. The last one is playing a game.
-              </p>
+              {current < 3 && (
+                <p className="hint" style={{ marginTop: 10 }}>
+                  Four steps. The last one is playing a game. Tampermonkey is a desktop browser extension, so do this on
+                  the computer you play on.
+                </p>
+              )}
             </>
+          )}
+
+          {/* The account is fine and unreachable, which is not the same story
+              as a dead token — and it must not read as one, or somebody makes
+              a second account and abandons the first. */}
+          {unreachable && (
+            <p className="err" style={{ marginTop: 16 }}>
+              Could not reach GeoCoach to check your account. Your link is still saved on this device — try reloading in
+              a minute.
+            </p>
           )}
 
           <ol className="stepList">
@@ -262,30 +385,71 @@ export default function Start() {
                 <p>Checking your account…</p>
               ) : !account ? (
                 <>
+                  {lost && <p className="err">{lost}</p>}
                   <p>Any name will do. It only labels your own dashboard.</p>
                   <form onSubmit={submit}>
                     <input
+                      ref={focusName}
                       className="field"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       placeholder="Your name"
                       maxLength={40}
                       autoComplete="off"
-                      autoFocus
                     />
                     <button className="btn" type="submit" disabled={busy || !name.trim()}>
                       {busy ? 'Creating…' : 'Create my account'}
                     </button>
                   </form>
                   {error && <p className="err">{error}</p>}
+
+                  {/* The way back in. Without it, a person on a second machine
+                      — or in the same browser after a cleared cache — had
+                      nowhere to put the link they had carefully saved, and the
+                      only button on the page made them a second account. */}
+                  <details className="others" style={{ marginTop: 18 }}>
+                    <summary>Already have an account?</summary>
+                    <div>
+                      <p className="hint">Paste the account link you saved, and this device is signed back in.</p>
+                      <form onSubmit={restore}>
+                        <input
+                          className="field"
+                          value={paste}
+                          onChange={(e) => {
+                            setPaste(e.target.value)
+                            setPasteError(null)
+                          }}
+                          placeholder="https://geofsrs.pages.dev/app?token=…"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <button className="btn" type="submit" disabled={restoring || !paste.trim()}>
+                          {restoring ? 'Checking…' : 'Sign back in'}
+                        </button>
+                      </form>
+                      {pasteError && <p className="err">{pasteError}</p>}
+                    </div>
+                  </details>
                 </>
               ) : (
                 <>
-                  <p>This link is your account. It signs you in and it carries your data.</p>
+                  {/* The account link, not the install link. They were the
+                      same box once, which meant the sentence "this link signs
+                      you in" sat under a URL that does nothing of the sort —
+                      opening it hands Tampermonkey a script. */}
+                  <p>
+                    Save this link now. It is the whole of your account: no password to reset, no email to recover
+                    from, so if you lose it the deck behind it is gone.
+                  </p>
                   <div className="linkbox">
-                    <code>{link}</code>
-                    <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+                    <code>{signin}</code>
+                    <button onClick={() => copy('account', signin)}>
+                      {copied === 'account' ? 'Copied' : 'Copy'}
+                    </button>
                   </div>
+                  <p className="hint">
+                    Bookmark it, or mail it to yourself. Opening it on any browser signs that browser in.
+                  </p>
                   <p className="warn">Anyone with this link has your account. Do not post it or share it.</p>
                 </>
               )}
@@ -306,6 +470,7 @@ export default function Start() {
                   ))}
                 </div>
               </details>
+              <p className="hint">Already have it? Skip straight on.</p>
               <button className="confirm" onClick={confirmTm}>
                 Done, next <span className="arr">→</span>
               </button>
@@ -324,6 +489,13 @@ export default function Start() {
                   <a className="btn wide" href={link} target="_blank" rel="noreferrer">
                     Install GeoCoach <span className="arr">→</span>
                   </a>
+                  {/* A page of raw JavaScript is what this link looks like when
+                      Tampermonkey is not there to intercept it, and it is a
+                      genuinely alarming thing to be shown with no warning. */}
+                  <p className="hint">
+                    If a wall of code opens instead, Tampermonkey is not running yet — finish step 2 and click this
+                    again. This link carries your token, so it is as private as your account link.
+                  </p>
                   {!done[2] && (
                     <button className="confirm" onClick={confirmUs}>
                       Done, next <span className="arr">→</span>

@@ -1,27 +1,20 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Foot, Link, Mast } from '../router'
 import { fetchStats, getToken, type PublicStats } from '../api'
-import Pano from '../Pano'
 
 /* --------------------------------------------------------------------------
-   The whole page hangs off one round: 2026-08-17, round 1, a single-track
-   road above Portree on Skye. I guessed Wales and missed by 484 km. The
-   panorama behind the fold is that round's own capture, the card over it is
-   that round's own card, and the sign that gives it away is in the
-   photograph — drag right and you will find it.
+   One claim, stated once: a tutor decides what you work on next and explains
+   what you got wrong. The page is the problem, then those two things, then the
+   only real evidence there is — 605 rounds of my own log — and the setup steps.
 
-   Nothing here is a mock-up, which is the only reason the page is this short.
+   The second half is honest about not shipping yet. That is deliberate: the
+   coached explanation runs on one laptop through a CLI, and saying otherwise
+   on a public page would be a lie.
    -------------------------------------------------------------------------- */
+
 const ROUND = {
-  pano: '/skye.jpg',
-  yaw: -2.86, /* facing down the road; the sign is 141° behind your right shoulder */
-  pitch: -0.19,
   meta: 'United Kingdom: Scottish passing place signs',
   note: 'These ‘Passing Place’ signs are unique to Scotland.',
-  where: 'Portree, Skye',
-  guess: 'Wales',
-  km: 484,
-  score: 3595,
 }
 
 const KEYS = ['Again', 'Hard', 'Good', 'Easy'] as const
@@ -60,35 +53,11 @@ function Card() {
   )
 }
 
-/* What became of that one round, carrying its own numbers. */
-const BEATS = [
-  {
-    t: '+0s',
-    h: 'The round ends',
-    p: (
-      <>
-        GeoGuessr scores it {ROUND.score.toLocaleString()}. GeoCoach reads the rest: {ROUND.where}, my pin in{' '}
-        {ROUND.guess}, {ROUND.km} km out, and the clue the location was chosen for.
-      </>
-    ),
-  },
-  {
-    t: '+0.4s',
-    h: 'The card lands',
-    p: (
-      <>
-        Passing place signs. I did not know it, so it grades itself <b>Again</b> unless I say otherwise.
-      </>
-    ),
-  },
-  {
-    t: 'next game',
-    h: 'The map is rebuilt',
-    p: <>That clue goes to the front of my trainer map. Everything else is re-dated behind it.</>,
-  },
-]
-
-/* 605 rounds of my own log; the README carries the same table. */
+/* 605 rounds of my own log; the README carries the same table. One quantity —
+   how often the country was called right — across three ordered classes, so
+   the fills are three steps of theme.css's validated single-hue lime ramp,
+   darkest at the low end. The number is printed beside every bar, so the
+   colour is a second reading of the value and never the only one. */
 const RECALL = [
   { k: 'First time ever', pct: 16, n: '35 / 216', c: 'var(--o2)' },
   { k: 'Second time', pct: 37, n: '46 / 126', c: 'var(--o3)' },
@@ -98,20 +67,6 @@ const RECALL = [
 export default function Landing() {
   const [stats, setStats] = useState<PublicStats | null>(null)
   const [hasAccount] = useState(() => !!getToken())
-  const [dragged, setDragged] = useState(false)
-  const onFirstDrag = useCallback(() => setDragged(true), [])
-
-  /* The masthead is a floating overlay while the photograph is behind it, and
-     a solid bar the moment anything scrolls under it. */
-  useEffect(() => {
-    const sync = () => document.body.classList.toggle('atTop', scrollY < 40)
-    sync()
-    addEventListener('scroll', sync, { passive: true })
-    return () => {
-      removeEventListener('scroll', sync)
-      document.body.classList.remove('atTop')
-    }
-  }, [])
 
   useEffect(() => {
     fetchStats()
@@ -132,57 +87,80 @@ export default function Landing() {
         </Link>
       </Mast>
 
-      <section className="stage">
-        <Pano src={ROUND.pano} yaw={ROUND.yaw} pitch={ROUND.pitch} onFirstDrag={onFirstDrag} />
-        <div className="stageVeil" aria-hidden />
+      <div className="shell">
+        <section className="top">
+          <p className="kicker">Spaced repetition for GeoGuessr</p>
+          <h1>A tutor decides what you work on next, and explains what you got wrong.</h1>
+          <p className="lede">
+            Most GeoGuessr tools do neither. GeoCoach is a spaced-repetition trainer that plugs into the game you
+            already play.
+          </p>
+          <div className="topCta">
+            <Link to="/start" className="btn big">
+              Get started <span className="arr">→</span>
+            </Link>
+            <span className="hint">Free. Two minutes. No email.</span>
+          </div>
 
-        <div className="shell stageIn">
-          <div className="stageCopy">
-            <p className="slug">
-              <span className="dot" aria-hidden /> Round 1 · {ROUND.where} · guessed {ROUND.guess}, {ROUND.km} km off
-            </p>
-            <h1>This is a flashcard.</h1>
-            <p className="lede">
-              <span>Every round you play is one.</span>
-              <span>Where your pin lands is the grade.</span>
-            </p>
-            <div className="heroCta">
-              <Link to="/start" className="btn big">
-                Get started <span className="arr">→</span>
-              </Link>
-              <span className="hint">Free. Two minutes.</span>
+          {/* The hero is one column, and this rail is what gives it a bottom
+              edge across the full width of the page — without it the right
+              half reads as a hole where a photograph used to be. Both figures
+              are live from /api/stats; nothing here is illustrative. */}
+          <dl className="rail">
+            <div className="lead">
+              <dt>GeoCoach so far</dt>
+              <dd className="said">Counted off the rounds the trainer has actually graded.</dd>
+            </div>
+            <div>
+              <dt>Rounds graded</dt>
+              <dd className={stats ? undefined : 'wait'}>{stats ? stats.rounds.toLocaleString() : ' '}</dd>
+            </div>
+            <div>
+              <dt>Clues tracked</dt>
+              <dd className={stats ? undefined : 'wait'}>{stats ? stats.metasTracked.toLocaleString() : ' '}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section className="sec">
+          <h2 className="secTitle">The problem</h2>
+          <p className="fine">
+            A meta map is a fixed list. It shows you the same clues in the same order however well you already know
+            them, so most of your practice goes on things you have. And when you do miss, the game tells you how many
+            kilometres out you were and nothing else.
+          </p>
+        </section>
+
+        <section className="sec">
+          <h2 className="secTitle">One — it decides what you practise</h2>
+          <div className="two">
+            <div>
+              <p className="fine">
+                Every round you play is a flashcard. Where your pin lands is the grade. After each game the trainer map
+                is rebuilt so the clues you are weakest at come round soonest, and the ones you have proved you know are
+                pushed months out.
+              </p>
+              <p className="fine">
+                You keep playing normal GeoGuessr. The deck is the map you play on, so nothing extra has to be revised.
+              </p>
+            </div>
+            <div className="twoFig">
+              <Card />
+              <p className="hint">The card the userscript shows when a round ends.</p>
             </div>
           </div>
-          <div className="stageCard">
-            <Card />
-          </div>
-        </div>
+        </section>
 
-        <div className="stageFoot">
-          <span className={'grab' + (dragged ? ' off' : '')}>
-            <svg viewBox="0 0 24 24" aria-hidden>
-              <path d="M7 9 4 12l3 3M17 9l3 3-3 3M4.6 12h14.8" />
-            </svg>
-            Drag — the sign is behind you
-          </span>
-          <span className="tally mono">
-            {stats ? `${stats.rounds.toLocaleString()} rounds graded · ${stats.metasTracked} clues tracked` : ''}
-          </span>
-        </div>
-      </section>
-
-      <div className="shell">
         <section className="sec">
-          <h2 className="secTitle">What happened to that round</h2>
-          <ol className="beats">
-            {BEATS.map((b) => (
-              <li key={b.h}>
-                <span className="mono when">{b.t}</span>
-                <h3>{b.h}</h3>
-                <p>{b.p}</p>
-              </li>
-            ))}
-          </ol>
+          <h2 className="secTitle">Two — it explains what you missed</h2>
+          <p className="fine">
+            The round&rsquo;s own imagery is pulled back up and read to you: what was actually in the picture, and which
+            clues separate the country it was from the country you said.
+          </p>
+          <p className="notYet">
+            Not available yet. This part runs on my own laptop through a command line — there is nothing for you to
+            install.
+          </p>
         </section>
 
         <section className="sec">
@@ -191,7 +169,7 @@ export default function Landing() {
             {RECALL.map((r) => (
               <div className="rr" key={r.k}>
                 <span className="rk">{r.k}</span>
-                <span className="rbar">
+                <span className="rbar" aria-hidden>
                   <i style={{ width: `${r.pct}%`, background: r.c }} />
                 </span>
                 <b className="rp mono">{r.pct}%</b>
@@ -207,7 +185,7 @@ export default function Landing() {
 
         <section className="sec last">
           <h2 className="secTitle">Getting set up</h2>
-          <p className="fine wide">
+          <p className="fine">
             Install{' '}
             <a className="inl" href="https://www.tampermonkey.net/" target="_blank" rel="noreferrer">
               Tampermonkey

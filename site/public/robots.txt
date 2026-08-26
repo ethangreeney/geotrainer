@@ -1,0 +1,7 @@
+# Without this file the Worker's SPA fallback answered /robots.txt with the
+# index page, so every crawler that asked got HTML where it expected rules.
+#
+# /app is a person's own console, reached with a token in the query string. It
+# has nothing on it worth indexing and every reason not to be crawled.
+User-agent: *
+Disallow: /app

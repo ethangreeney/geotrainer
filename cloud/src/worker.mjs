@@ -1158,6 +1158,11 @@ const isApiPath = (path) =>
   path.startsWith('/plonkit/') ||
   path.startsWith('/rounds/')
 
+/** Every path the client router draws a page for; site/App.tsx holds the same
+ * list and the two have to agree. A trailing slash is the same page. */
+const KNOWN_PAGES = new Set(['/', '/start', '/app'])
+const isKnownPage = (path) => KNOWN_PAGES.has(path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path)
+
 /** The public site (dist-site/), with an index.html fallback so client-routed
  * pages survive a hard refresh. Absent binding = API-only deploy. */
 async function serveStatic(request, env, url) {
@@ -1169,7 +1174,13 @@ async function serveStatic(request, env, url) {
   if (!wantsHtml) return res
   // Fetch "/" rather than "/index.html": the assets layer 308-redirects the
   // latter back to "/", which would strip the client route from the URL.
-  return env.ASSETS.fetch(new Request(`${url.origin}/`, request))
+  const shell = await env.ASSETS.fetch(new Request(`${url.origin}/`, request))
+  // The shell is the right body for an unknown path too — the client router
+  // renders its own not-found page from it — but not with a 200 on it. A
+  // mistyped URL answering 200 meant crawlers indexed junk paths as real
+  // pages and link checkers reported a site with no broken links at all.
+  if (isKnownPage(url.pathname)) return shell
+  return new Response(shell.body, { status: 404, headers: shell.headers })
 }
 
 /** A day's worth of rounds is ~50; 800 is a wall for runaway clients only. */
@@ -1377,7 +1388,22 @@ export default {
     if (!isApiPath(path)) return serveStatic(request, env, url)
 
     const user = await authUser(env, request, url)
-    if (!user) return json({ ok: false, error: 'missing or unknown token' }, 401)
+    if (!user) {
+      // The script paths are the one place a person, rather than a program,
+      // reads a 401 — they got here by clicking an install link that had gone
+      // stale, and `{"ok":false,"error":"missing or unknown token"}` in a
+      // Tampermonkey error pane tells them nothing about what to do next.
+      if (path === '/geocoach.user.js' || path === '/geocoach.body.js')
+        return new Response(
+          `// This GeoCoach install link is no longer valid.\n` +
+            `// Open ${url.origin}/start to get a working one.\n`,
+          {
+            status: 401,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...CORS },
+          },
+        )
+      return json({ ok: false, error: 'missing or unknown token' }, 401)
+    }
 
     try {
       if (request.method === 'POST' && path === '/round') {
@@ -1544,9 +1570,18 @@ export default {
         (path === '/geocoach.user.js' || path === '/geocoach.body.js')
       ) {
         const raw = path === '/geocoach.user.js' ? LOADER_SRC : USERSCRIPT_SRC
+        // @updateURL and @downloadURL are committed pointing at the laptop's
+        // own server, which is right for the laptop and wrong for everybody
+        // else: a stranger's install checked http://127.0.0.1:5177 for updates
+        // forever, on a machine with nothing listening there, so the loader
+        // could never be upgraded once it was installed. Repointed at whatever
+        // origin actually served it, token and all, exactly as the install
+        // link was.
+        const selfUrl = `${url.origin}/geocoach.user.js?token=${encodeURIComponent(user.token)}`
         const src = raw
           .replace("'__CLOUD_URL__'", JSON.stringify(url.origin))
           .replace("'__CLOUD_TOKEN__'", JSON.stringify(user.token))
+          .replaceAll('http://127.0.0.1:5177/geocoach.user.js', selfUrl)
           .replace(
             '// @connect      127.0.0.1',
             `// @connect      127.0.0.1\n// @connect      ${url.hostname}`,

@@ -27,6 +27,9 @@ import { beforeAll, describe, expect, it } from 'vitest'
  */
 const ROOT = new URL('..', import.meta.url).pathname
 
+/** The one account the in-memory D1 knows about; the runner below binds it too. */
+const TOKEN = 'test-token-0123456789abcdef'
+
 describe('worker source', () => {
   it('references no name that does not exist', () => {
     let out = ''
@@ -91,7 +94,7 @@ import { readFileSync } from 'node:fs'
 import worker from ${JSON.stringify(join(ROOT, 'cloud/src/worker.mjs'))}
 
 const ROOT = ${JSON.stringify(ROOT)}
-const TOKEN = 'test-token-0123456789abcdef'
+const TOKEN = ${JSON.stringify(TOKEN)}
 
 // Nothing in this suite is allowed to touch the network. The only route that
 // would is the deck's Learnable Meta pre-warm, which is fire-and-forget and
@@ -153,11 +156,24 @@ function makeDB(state, rounds = []) {
 
 const ctx = { waitUntil: () => {} }
 
-async function call(path, { headers = {}, state = null, rounds = [] } = {}) {
+/** The static-asset binding, as the Worker uses it: anything not in the map is
+ * a 404, which is what makes the SPA fallback run. */
+function makeAssets(files = { '/': '<!doctype html><title>GeoCoach</title>' }) {
+  return {
+    async fetch(request) {
+      const body = files[new URL(request.url).pathname]
+      return body === undefined
+        ? new Response('not found', { status: 404 })
+        : new Response(body, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+    },
+  }
+}
+
+async function call(path, { headers = {}, state = null, rounds = [], assets = null, keepText = false } = {}) {
   const db = makeDB(state ?? { countries: {}, confusions: {}, metas: {}, deckCards: {}, lastDeck: null }, rounds)
   const res = await worker.fetch(
     new Request('https://geocoach.example' + path, { headers }),
-    { DB: db },
+    assets ? { DB: db, ASSETS: assets } : { DB: db },
     ctx,
   )
   const buf = new Uint8Array(await res.arrayBuffer())
@@ -176,6 +192,11 @@ async function call(path, { headers = {}, state = null, rounds = [] } = {}) {
     status: res.status,
     encoding,
     bytes: buf.length,
+    contentType: res.headers.get('Content-Type'),
+    // Opt-in: most of these responses are geometry, and shipping megabytes of
+    // coordinates back through stdout to assert on three of them would not be
+    // a trade worth making.
+    text: keepText ? text : null,
     cacheControl: res.headers.get('Cache-Control'),
     vary: res.headers.get('Vary'),
     cors: {
@@ -326,6 +347,19 @@ const out = {
   dashFresh: await call('/api/dashboard', { headers: auth }),
   dashHistory: await call('/api/dashboard', { headers: auth, state: playedState(dueNames.slice(0, 4)), rounds: history(dueNames.slice(0, 4)) }),
   dashNoToken: await call('/api/dashboard'),
+  loader: await call('/geocoach.user.js', { headers: auth, keepText: true }),
+  loaderByQuery: await call('/geocoach.user.js?token=' + TOKEN, { keepText: true }),
+  body: await call('/geocoach.body.js', { headers: auth, keepText: true }),
+  loaderStaleToken: await call('/geocoach.user.js?token=deadbeef', { keepText: true }),
+  page: await call('/start', { headers: { Accept: 'text/html' }, assets: makeAssets(), keepText: true }),
+  pageSlash: await call('/start/', { headers: { Accept: 'text/html' }, assets: makeAssets(), keepText: true }),
+  pageRoot: await call('/', { headers: { Accept: 'text/html' }, assets: makeAssets(), keepText: true }),
+  pageUnknown: await call('/no-such-page', { headers: { Accept: 'text/html' }, assets: makeAssets(), keepText: true }),
+  asset: await call('/robots.txt', {
+    headers: { Accept: 'text/html' },
+    assets: makeAssets({ '/': '<!doctype html>', '/robots.txt': 'User-agent: *' }),
+    keepText: true,
+  }),
 }
 
 // The preflight goes through the Worker's OPTIONS short-circuit, which never
@@ -649,5 +683,88 @@ describe('GET /api/dashboard', () => {
     for (let i = 1; i < series.length; i += 1)
       expect(new Date(series[i].t).getTime()).toBeGreaterThan(new Date(series[i - 1].t).getTime())
     for (const point of series) expect(point.held).toBeLessThanOrEqual(R.dashHistory.body.progress.total)
+  })
+})
+
+/* -------------------------------------------------------------------------
+ * The install link, and the pages around it.
+ * ---------------------------------------------------------------------- */
+
+describe('GET /geocoach.user.js', () => {
+  it('serves the loader as a script Tampermonkey will offer to install', () => {
+    expect(R.loader.status).toBe(200)
+    expect(R.loader.contentType).toMatch(/^application\/javascript/)
+    expect(R.loader.text.startsWith('// ==UserScript==')).toBe(true)
+    // Templated per caller, so it must never be cached anywhere.
+    expect(R.loader.cacheControl).toBe('no-store')
+  })
+
+  it('takes the token from the query string, which is how the link is clicked', () => {
+    // The install link is followed by a browser navigation; there is no place
+    // to put an Authorization header on one.
+    expect(R.loaderByQuery.status).toBe(200)
+    expect(R.loaderByQuery.text).toBe(R.loader.text)
+  })
+
+  it('bakes in the serving origin and the caller\'s own token', () => {
+    // JSON.stringify does the substitution, so the placeholder's single
+    // quotes come back double.
+    expect(R.loader.text).toContain('const CLOUD_URL = "https://geocoach.example"')
+    expect(R.loader.text).toContain('const CLOUD_TOKEN = ' + JSON.stringify(TOKEN))
+    expect(R.loader.text).toContain('// @connect      geocoach.example')
+  })
+
+  it('points its update check at the host that served it, not at a laptop', () => {
+    // The committed source aims @updateURL and @downloadURL at
+    // http://127.0.0.1:5177 — right for the machine this was written on, and a
+    // dead address on every other machine, which left a stranger's install
+    // unable to ever pick up a new loader.
+    expect(R.loader.text).not.toContain('127.0.0.1:5177/geocoach.user.js')
+    for (const tag of ['@updateURL', '@downloadURL'])
+      expect(R.loader.text).toMatch(
+        new RegExp(tag + '\\s+https://geocoach\\.example/geocoach\\.user\\.js\\?token=' + TOKEN),
+      )
+    // The body it pulls on every page load still tries the local server first;
+    // only the metadata URLs move.
+    expect(R.loader.text).toContain("const LOCAL = 'http://127.0.0.1:5177'")
+  })
+
+  it('serves the body the loader asks for on the same terms', () => {
+    expect(R.body.status).toBe(200)
+    expect(R.body.contentType).toMatch(/^application\/javascript/)
+    expect(R.body.text).toContain('const CLOUD_URL = "https://geocoach.example"')
+  })
+
+  it('answers a stale install link in words, not in JSON', () => {
+    // This 401 is read by a person in a Tampermonkey pane, having clicked a
+    // link that expired. {"ok":false,"error":"missing or unknown token"} told
+    // them nothing they could act on.
+    expect(R.loaderStaleToken.status).toBe(401)
+    expect(R.loaderStaleToken.contentType).toMatch(/^text\/plain/)
+    expect(R.loaderStaleToken.text).toContain('/start')
+  })
+})
+
+describe('the static site', () => {
+  it('hands a client route the shell, so a hard refresh works', () => {
+    expect(R.page.status).toBe(200)
+    expect(R.page.text).toContain('GeoCoach')
+    // A trailing slash is the same page — links come back from chat clients
+    // wearing one.
+    expect(R.pageSlash.status).toBe(200)
+    expect(R.pageRoot.status).toBe(200)
+  })
+
+  it('serves a real file rather than the shell', () => {
+    expect(R.asset.status).toBe(200)
+    expect(R.asset.text).toBe('User-agent: *')
+  })
+
+  it('answers an unknown path 404, with the shell to render it', () => {
+    // The body still has to be the app: the client router draws its own
+    // not-found page. Only the status was wrong, and a 200 on every mistyped
+    // URL is what makes a link checker report a site with nothing broken.
+    expect(R.pageUnknown.status).toBe(404)
+    expect(R.pageUnknown.text).toContain('GeoCoach')
   })
 })
