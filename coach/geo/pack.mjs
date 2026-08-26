@@ -1,7 +1,9 @@
 /**
- * Packs the boundary slices into two binaries the round pipeline can carry:
+ * Packs the boundary slices into three binaries the round pipeline can carry:
  * one for countries, one for the subdivisions that meta scopes are written
- * against. locate.mjs reads them; the Worker bundles them at deploy time.
+ * against, and one for the scopes that span several subdivisions at once.
+ * locate.mjs reads the first two; outline.mjs reads all three; the Worker
+ * bundles them at deploy time.
  *
  *   node coach/geo/pack.mjs      (after build.mjs; ~2s, writes coach/geo/pack/)
  *
@@ -29,9 +31,13 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const PACK_DIR = join(HERE, 'pack')
 export const COUNTRY_PACK = join(PACK_DIR, 'admin0.bin')
 export const REGION_PACK = join(PACK_DIR, 'admin1.bin')
+export const MERGED_PACK = join(PACK_DIR, 'merged.bin')
 
 const COUNTRY_LOD = 'l1'
 const REGION_LOD = 'l0'
+// The dissolved shapes ride at the same rung as the subdivisions they are made
+// of: a merge is only ever drawn where its parts would have been.
+const MERGED_LOD = 'l0'
 // 1/2000° ≈ 55m — finer than either rung's own simplification, so quantising
 // costs nothing, and coarse enough that most deltas stay inside one byte.
 const SCALE = 2000
@@ -150,7 +156,34 @@ function regions() {
   return out
 }
 
-/** Both packs, written next to the slices they came from. Called by build.mjs
+/**
+ * The scopes that cover several subdivisions at once, already dissolved by
+ * build.mjs into a single outline with the internal borders taken out. Drawn
+ * from their parts instead, a scope like Paraná + Santa Catarina + Rio Grande
+ * do Sul shows a stroke along every shared border — a line through the middle
+ * of the highlight, which reads as a rendering fault rather than as
+ * information.
+ *
+ * A merge is looked up by the set of subdivisions it covers, so the names it
+ * covers travel in the place table's alias slot — normalised through `norm`,
+ * because that lookup has to survive the accents, the administrative nouns and
+ * the case that separate "Paraná" on a card from "Parana" in geoBoundaries.
+ * The display name (with the accents, joined by +) stays in the name slot,
+ * which is what the overlay's label is built from.
+ */
+function merges() {
+  const dir = join(HERE, 'merged', MERGED_LOD)
+  const out = []
+  for (const file of existsSync(dir) ? readdirSync(dir).sort() : []) {
+    if (!file.endsWith('.json')) continue
+    const code = file.slice(0, -5)
+    for (const m of Object.values(readSlice('merged', MERGED_LOD, file) ?? {}))
+      out.push({ meta: { code, name: m.name, names: m.names.map(norm) }, geometry: m.geometry })
+  }
+  return out
+}
+
+/** All three packs, written next to the slices they came from. Called by build.mjs
  * so a rebuild can never leave a stale pack behind, and runnable on its own
  * when only the packing changed. */
 export function writePacks() {
@@ -158,6 +191,7 @@ export function writePacks() {
   for (const [label, path, entries, kind] of [
     ['countries', COUNTRY_PACK, countries(), 'admin0'],
     ['subdivisions', REGION_PACK, regions(), 'admin1'],
+    ['dissolved scopes', MERGED_PACK, merges(), 'merged'],
   ]) {
     const buf = encode(entries, kind)
     writeFileSync(path, buf)

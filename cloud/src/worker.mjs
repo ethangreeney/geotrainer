@@ -14,17 +14,29 @@
  * demo state. Zero LLM calls, as everywhere in this system.
  */
 import {
-  buildDeck,
   deckSummary,
   gradeRound,
   ratingNameFor,
+  retrievabilityOf,
 } from '../../coach/scheduler.mjs'
+import { buildRankedDeck, deckSizeFor, metaKeyOf } from '../../coach/deck.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
 import { loadPack, locate } from '../../coach/geo/locate.mjs'
+// The result-map overlay's geometry. Both modules are pure — no `node:`
+// anything, no fs, no network — which is the whole reason they are modules
+// rather than inlined halves of coach/server.mjs: the laptop and the Worker
+// draw the same outline because they run the same code, not because two
+// implementations were kept in step by hand.
+import { loadMergedPack, norm, scopeOutline } from '../../coach/geo/outline.mjs'
+import { LODS, clipGeometry, countVertices, simplifyAt } from '../../coach/geo/shape.mjs'
 // Boundary packs, built by coach/geo/pack.mjs from the same geoBoundaries
 // slices the result-map overlay draws.
 import COUNTRY_PACK from '../../coach/geo/pack/admin0.bin'
 import REGION_PACK from '../../coach/geo/pack/admin1.bin'
+// The dissolved multi-region scopes, so "Paraná + Santa Catarina + Rio Grande
+// do Sul" draws as one outline instead of three with their shared borders
+// stroked down the middle.
+import MERGED_PACK from '../../coach/geo/pack/merged.bin'
 // The userscript source, bundled as text (see the "rules" entry in
 // wrangler.jsonc) so GET /geocoach.user.js can stamp a user's credentials in.
 // The loader is what Tampermonkey installs; it fetches the body fresh on every
@@ -41,7 +53,6 @@ import CATALOG_WORLD from '../../coach/catalog/66fda2e27e08dc03b5bb3d6e.json'
 
 const CATALOGS = [CATALOG_BASICS, CATALOG_BEGINNER, CATALOG_INTERMEDIATE, CATALOG_WORLD]
 
-const metaKeyOf = (country, name) => (name ? (country ? `${country}: ${name}` : name) : null)
 
 /** Metas whose physical design is shared across countries: any country in the
  * set is a correct read. Codes are the uppercase ISO codes countryOf returns. */
@@ -238,6 +249,310 @@ async function metaImage(env, metaName) {
   }
 }
 
+// ---------- scope outlines ----------
+
+/**
+ * The shape the result map highlights behind a card's scope.
+ *
+ * This used to be served only by coach/server.mjs, which meant the overlay was
+ * exactly as awake as that laptop: a Brazil round recently drew no outline at
+ * all because the lid was shut. The Worker has been carrying the boundary
+ * packs all along to reverse-geocode rounds, so the geometry was already
+ * sitting next to it — the only thing missing was a way to ask. These routes
+ * are that, and they are the primary path now; the laptop is the fallback.
+ *
+ * Response-compatible with the laptop's, field for field, so a client switches
+ * by changing its base URL and nothing else.
+ */
+
+/** The merged pack is wanted by this route and by nothing else, so it is
+ * decoded apart from boundaries() rather than inside it: a round's reverse
+ * geocode has no use for dissolved shapes and should not pay to decode them. */
+let mergedPack = null
+function outlinePacks() {
+  const { country, region } = boundaries()
+  mergedPack ??= loadMergedPack(MERGED_PACK)
+  return { country, region, merged: mergedPack }
+}
+
+/** A scope is a handful of subdivisions; anything longer is a malformed query,
+ * not a country's worth of real work to do. The laptop's ceiling, unchanged. */
+const SCOPE_GEO_MAX_REGIONS = 40
+
+/**
+ * The point budget, and why the cloud needs one at all.
+ *
+ * The laptop serves pre-simplified slices, one directory per rung of the
+ * ladder. The packs carry a single rung — the geocoder's full 1/2000°
+ * resolution — because reverse geocoding wants precision, not thrift. Handed
+ * straight to the browser that is Canada: 258,842 points and 4.6MB, which is
+ * not a bandwidth problem so much as a frame-rate one. Every point the overlay
+ * is given is held twice, in a glow layer and a line layer, and reprojected on
+ * every frame of a zoom.
+ *
+ * So the same 12,000 the laptop uses, reached the same way: thin at a rung's
+ * tolerance, and if it still does not fit, take the rung below. What does the
+ * thinning is coach/geo/shape.mjs — the very simplifier that built the
+ * laptop's slices, so a shape thinned here and the same shape read off disk
+ * there are the same shape.
+ */
+const SCOPE_GEO_MAX_POINTS = 12_000
+
+/**
+ * Past the bottom of the ladder, the tolerance keeps going.
+ *
+ * LOD 0 is sized for a zoom-5 map and Canada still lands at 25,007 points
+ * there, twice the budget, with no rung left to step down to. Rather than give
+ * up and send it — which is what a bare `lod > 0` guard would do — the
+ * tolerance is quadrupled until the budget is met. Canada settles at 0.08°:
+ * the Arctic islands drop out (shape.mjs's own rule, a ring smaller than the
+ * line that would draw it), the mainland survives whole, and 84KB goes over
+ * the wire instead of 4.6MB.
+ *
+ * The ceiling is a stop, not a target — 4° is a shape the size of a continent
+ * having its outline described by a dozen points, and nothing real should ever
+ * reach it. It exists so a pathological input cannot spin here forever.
+ */
+const COARSEST_TOL = 4
+
+const thinAt = (features, tol) =>
+  features.map((f) => ({ ...f, geometry: simplifyAt(f.geometry, tol) })).filter((f) => f.geometry)
+
+const pointsIn = (features) => features.reduce((n, f) => n + countVertices(f.geometry), 0)
+
+const clipTo = (features, box) =>
+  features
+    .map((f) => ({ ...f, geometry: clipGeometry(f.geometry, [box.w, box.s, box.e, box.n]) }))
+    .filter((f) => f.geometry)
+
+/** `w,s,e,n` in degrees, or null for anything that is not four sane numbers
+ * describing a rectangle with area. Rounded to five decimals — about a metre —
+ * exactly as the laptop rounds it, so the two agree on what window was asked
+ * for. Copied from coach/server.mjs's parseBox. */
+function parseBox(raw) {
+  const n = String(raw ?? '')
+    .split(',')
+    .map(Number)
+  if (n.length !== 4 || n.some((v) => !Number.isFinite(v))) return null
+  const [w, s, e, no] = n.map((v) => Math.round(v * 1e5) / 1e5)
+  if (e <= w || no <= s || s < -90 || no > 90 || w < -180 || e > 180) return null
+  return { w, s, e, n: no }
+}
+
+/** Plain extent of a feature list, in raw degrees — so a country straddling the
+ * antimeridian reports the full -180..180 span rather than the narrow box the
+ * eye sees, and the client can decide what to do about that. */
+function extentOf(features) {
+  let n = -Infinity
+  let s = Infinity
+  let e = -Infinity
+  let w = Infinity
+  for (const f of features)
+    for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates)
+      for (const [x, y] of poly[0]) {
+        if (y > n) n = y
+        if (y < s) s = y
+        if (x > e) e = x
+        if (x < w) w = x
+      }
+  return n > s && e > w ? { n, s, e, w } : null
+}
+
+// Chile's outline reaches Easter Island, 3,500km out in the Pacific, and
+// France's reaches Guyane. Framing the map on the full extent of either puts
+// the country the round is actually about in one corner of an ocean. So the
+// camera gets a second box: the main mass, grown outwards from the largest
+// ring by absorbing whatever lies close to it, which keeps a coastal
+// archipelago (all of Patagonia) and drops a mid-ocean territory.
+//
+// Ported from coach/server.mjs's framingBox rather than imported, because that
+// file is the local bridge and reaches for node:fs on its first line. The
+// client prefers `frame` over `bbox`, so a cloud answer without one would
+// quietly reframe every Chile round on the Pacific.
+const FRAME_GAP = 4 // degrees of open water an outlier may sit across
+function framingBox(features) {
+  const rings = []
+  for (const f of features)
+    for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates) {
+      let n = -Infinity
+      let s = Infinity
+      let e = -Infinity
+      let w = Infinity
+      for (const [x, y] of poly[0]) {
+        if (y > n) n = y
+        if (y < s) s = y
+        if (x > e) e = x
+        if (x < w) w = x
+      }
+      if (n > s && e > w) rings.push({ n, s, e, w, a: (n - s) * (e - w) })
+    }
+  if (!rings.length) return null
+  rings.sort((a, b) => b.a - a.a)
+  const box = { n: rings[0].n, s: rings[0].s, e: rings[0].e, w: rings[0].w }
+  const taken = new Set([0])
+  for (let grew = true; grew; ) {
+    grew = false
+    for (let i = 1; i < rings.length; i++) {
+      if (taken.has(i)) continue
+      const r = rings[i]
+      const dy = Math.max(0, r.s - box.n, box.s - r.n)
+      const dx = Math.max(0, r.w - box.e, box.w - r.e)
+      if (dy > FRAME_GAP || dx > FRAME_GAP) continue
+      taken.add(i)
+      grew = true
+      if (r.n > box.n) box.n = r.n
+      if (r.s < box.s) box.s = r.s
+      if (r.e > box.e) box.e = r.e
+      if (r.w < box.w) box.w = r.w
+    }
+  }
+  return box
+}
+
+/** A rung of the ladder that this build has. Anything outside it is clamped
+ * rather than refused: the LOD is a rendering hint and the client still wants
+ * its shape drawn. */
+const lodFor = (raw) => Math.min(LODS.length - 1, Math.max(0, Math.trunc(Number(raw) || 0)))
+
+/**
+ * One scope query, resolved to the object to send back.
+ *
+ * The order of the four cases below is the whole of the behaviour, and it is
+ * outline.mjs that decides them — a missing boundary, a country outline, a
+ * dissolved region outline, or a country outline again when the named regions
+ * match nothing (a partial scope draws a border the meta does not have, which
+ * teaches the wrong thing; vague beats wrong).
+ */
+function buildScopeGeo(cc, regions, lod, clip) {
+  const outline = scopeOutline(outlinePacks(), { country: cc, regions })
+  // Nothing is broken and a retry will not help — geoBoundaries folds some
+  // small territories into their sovereign and omits others — so this is "no
+  // such shape" rather than "not ready": the client drops the overlay for this
+  // round and moves on.
+  if (!outline.ok)
+    return { status: 404, body: { ok: false, kind: 'none', country: cc, lod, error: outline.error } }
+
+  const source = outline.geojson.features
+  const sourcePoints = pointsIn(source)
+
+  // Down the ladder until the budget is met. `whole` is the untrimmed shape at
+  // whatever rung we settled on: the camera is framed on the whole scope even
+  // when only a window of it is sent, so the extents are taken before anything
+  // is cut away.
+  let served = lodFor(lod)
+  let tol = LODS[served].tol
+  let window = clip
+  let whole = thinAt(source, tol)
+  let features = window ? clipTo(whole, window) : whole
+  // The window fell entirely outside the scope — which is a real thing for a
+  // guess placed on the wrong continent. Nothing to draw there, but the shape
+  // itself is fine, so answer with the whole of it and let the client frame.
+  if (window && !features.length) {
+    window = null
+    features = whole
+  }
+  while (pointsIn(features) > SCOPE_GEO_MAX_POINTS) {
+    if (served > 0) tol = LODS[(served -= 1)].tol
+    else if (tol < COARSEST_TOL) tol *= 4
+    else break
+    whole = thinAt(source, tol)
+    features = window ? clipTo(whole, window) : whole
+    if (window && !features.length) {
+      window = null
+      features = whole
+    }
+  }
+
+  const bbox = extentOf(whole) ?? { n: 90, s: -90, e: 180, w: -180 }
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      kind: outline.kind,
+      country: cc,
+      lod: served,
+      label: outline.label,
+      names: outline.names,
+      bbox,
+      frame: framingBox(whole) ?? bbox,
+      // The window this answer covers, so the client knows when panning has
+      // taken the map past the edge of what it was given. Absent means whole.
+      clip: window ?? null,
+      // How hard the budget had to work, so an outline that looks too coarse
+      // is diagnosable from the browser's network tab rather than by guessing.
+      // The laptop has no equivalent because its rungs are pre-built; here the
+      // thinning happens per request and is worth reporting.
+      points: pointsIn(features),
+      sourcePoints,
+      tol,
+      budget: SCOPE_GEO_MAX_POINTS,
+      geojson: { type: 'FeatureCollection', features },
+    },
+  }
+}
+
+/**
+ * A country's name back to its ISO code.
+ *
+ * The catalogs know a location's country only by name, but a card's scope — and
+ * the key the client stores an outline under — is the ISO code the geocoder
+ * returned. So /api/scope-for-pano has to go that way round or the warmed shape
+ * would sit under a key the card never asks for.
+ *
+ * Two sources, because neither alone is enough: the pack carries one name per
+ * country and it is the cartographer's ("Czech Republic", "United States of
+ * America"), while Intl carries the everyday one ("Czechia", "United States").
+ * Together they resolve 93 of the 95 country names across all four catalogs;
+ * the two that miss, Christmas Island and Réunion, are exactly the territories
+ * geoBoundaries has no outline for, so there was never an overlay to warm.
+ * Matched on outline.mjs's `norm` so the spelling rules are the ones the rest
+ * of the geo layer uses. Built once per isolate.
+ */
+let codeByName = null
+function countryCodeOf(name) {
+  if (!name) return null
+  if (!codeByName) {
+    codeByName = new Map()
+    const put = (key, code) => {
+      if (key && !codeByName.has(key)) codeByName.set(key, code)
+    }
+    const codes = new Set()
+    for (const f of boundaries().country.features) {
+      codes.add(f.code)
+      put(norm(f.name), f.code)
+      for (const n of f.names ?? []) put(norm(n), f.code)
+    }
+    let display = null
+    try {
+      display = new Intl.DisplayNames(['en'], { type: 'region' })
+    } catch {
+      // No ICU region data — the pack names still carry most of the ladder.
+    }
+    if (display)
+      for (const code of codes) {
+        try {
+          const shown = display.of(code)
+          if (shown && shown !== code) put(norm(shown), code)
+        } catch {
+          // Not a region Intl knows; the pack name already covered it.
+        }
+      }
+  }
+  return codeByName.get(norm(name)) ?? null
+}
+
+/** The scope a pano will eventually be graded against, named a whole guess
+ * early. Read-only, and deliberately mute about *why* there is no answer: a
+ * pano from a map we never indexed and a country name no pack has a code for
+ * are both simply "nothing to warm", and the client treats them identically. */
+function scopeForPano(pano) {
+  const loc = catalogLocation(pano)
+  if (!loc) return null
+  const cc = countryCodeOf(loc.country)
+  if (!cc) return null
+  return { country: cc.toUpperCase(), regions: SCOPE_REGIONS[metaKeyOf(loc.country, loc.metaName)] ?? null }
+}
+
 // ---------- per-user persistence ----------
 
 const EMPTY_STATE = { countries: {}, confusions: {}, metas: {}, deckCards: {}, lastDeck: null }
@@ -353,6 +668,73 @@ function countryName(code, fromRounds) {
   }
 }
 
+/**
+ * The one number the dashboard leads with: how many clues the player is
+ * holding right now, where "holding" means FSRS puts recall at or above the
+ * retention the scheduler is actually tuned for. A clue below that line is one
+ * the deck is about to hand back, so the count is a live measure of what has
+ * stuck rather than a tally of what has been seen.
+ */
+const HELD_AT = 0.9
+const WEEK = 7 * 24 * 60 * 60 * 1000
+// Enough points to show a shape, few enough that the line stays readable and
+// the replay below stays cheap.
+const SERIES_POINTS = 26
+
+function heldCount(cards, at) {
+  let held = 0
+  for (const card of Object.values(cards)) if (retrievabilityOf(card, at) >= HELD_AT) held += 1
+  return held
+}
+
+/**
+ * The same count over time — and it cannot be read off today's card table.
+ * Evaluating a current card at a past date claims the player held a clue they
+ * had not yet seen, which draws a line that starts high and sags. So this is a
+ * replay: every round folded back in at the moment it was really played, with
+ * the count taken at each step along the way. The final point is taken from
+ * the live table instead, so the end of the line always agrees with the number
+ * printed above it.
+ */
+async function buildProgress(env, user, live, now) {
+  const rows = await env.DB.prepare(
+    `SELECT ts,
+            json_extract(json, '$.metaName') AS metaName,
+            json_extract(json, '$.rating') AS rating,
+            COALESCE(json_extract(json, '$.correctScope'), json_extract(json, '$.correctCountry')) AS correct
+       FROM rounds WHERE user_id = ? ORDER BY ts ASC`,
+  )
+    .bind(user.id)
+    .all()
+  const played = (rows?.results ?? []).filter((r) => r.metaName)
+
+  const series = []
+  if (played.length) {
+    const from = new Date(played[0].ts).getTime()
+    // Widen the bucket rather than thinning the points, so every sample is a
+    // real reading at a real date instead of a survivor of a decimation pass.
+    const span = Math.max(now.getTime() - from, WEEK)
+    const step = Math.max(WEEK, Math.ceil(span / SERIES_POINTS / WEEK) * WEEK)
+    let cards = {}
+    let mark = from + step
+    for (const r of played) {
+      const at = new Date(r.ts)
+      while (at.getTime() >= mark && series.length < SERIES_POINTS) {
+        const on = new Date(mark)
+        series.push({ t: on.toISOString(), held: heldCount(cards, on) })
+        mark += step
+      }
+      cards = gradeRound(
+        cards,
+        { metaName: r.metaName, rating: r.rating ?? undefined, correct: !!r.correct },
+        at,
+      )
+    }
+  }
+  series.push({ t: now.toISOString(), held: heldCount(live, now) })
+  return series
+}
+
 /** Everything the personal dashboard draws, in one round trip: deck health,
  * meta mastery buckets, per-country accuracy and a recent-rounds feed. */
 async function buildDashboard(env, user) {
@@ -373,7 +755,7 @@ async function buildDashboard(env, user) {
     .sort((a, b) => pct(a.correct, a.seen) - pct(b.correct, b.seen) || b.seen - a.seen)
     .slice(0, 12)
 
-  const [countRow, roundRows, weakestImages] = await Promise.all([
+  const [countRow, roundRows, weakestImages, series] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ?').bind(user.id).first(),
     env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT 300')
       .bind(user.id)
@@ -381,6 +763,7 @@ async function buildDashboard(env, user) {
     // A slipping clue is worth looking at, not just reading — so each one
     // carries the picture from its LM card.
     Promise.all(weakest.map((m) => metaImage(env, m.metaName))),
+    buildProgress(env, user, state.deckCards, now),
   ])
   const weakestWithImages = weakest.map((m, i) => ({ ...m, image: weakestImages[i] }))
 
@@ -421,6 +804,11 @@ async function buildDashboard(env, user) {
     ok: true,
     name: user.name,
     generatedAt: now.toISOString(),
+    progress: {
+      held: series[series.length - 1].held,
+      total: introduced + summary.unseen,
+      series,
+    },
     deck: {
       due: summary.due,
       learning: summary.learning,
@@ -702,6 +1090,38 @@ const json = (obj, status = 200) =>
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
 
+/**
+ * JSON with the body gzipped when the caller says it can take it.
+ *
+ * Only the overlay routes use this, and only because of what they carry: a
+ * country outline is a list of coordinates, which is about the most
+ * compressible thing there is — Canada goes 84KB → 21KB. Cloudflare would
+ * compress at the edge anyway for a browser, but the userscript reaches these
+ * through GM_xmlhttpRequest from geoguessr.com, and doing it here means the
+ * saving does not depend on which path the request took.
+ *
+ * `Vary: Accept-Encoding` because the body genuinely differs by it, and a
+ * cache that missed that would hand a gzipped body to a client that asked for
+ * plain bytes.
+ */
+async function gzipJson(request, obj, status = 200, cacheControl = 'no-store') {
+  const body = new TextEncoder().encode(JSON.stringify(obj))
+  const headers = {
+    'Content-Type': 'application/json',
+    'Cache-Control': cacheControl,
+    Vary: 'Accept-Encoding',
+    ...CORS,
+  }
+  if (!/\bgzip\b/i.test(request.headers.get('Accept-Encoding') ?? ''))
+    return new Response(body, { status, headers })
+  // Buffered rather than streamed so Content-Length is known: these responses
+  // are meant to sit in a cache, and a cache would rather not guess at a size.
+  const packed = await new Response(
+    new Response(body).body.pipeThrough(new CompressionStream('gzip')),
+  ).arrayBuffer()
+  return new Response(packed, { status, headers: { ...headers, 'Content-Encoding': 'gzip' } })
+}
+
 /** Token-gated routes. Everything else belongs to the static site, so /start
  * and /app render as pages instead of 401s. */
 const AUTHED_PATHS = new Set([
@@ -720,8 +1140,23 @@ const AUTHED_PATHS = new Set([
   '/geocoach.user.js',
   '/geocoach.body.js',
 ])
+/**
+ * API routes that carry no token.
+ *
+ * The overlay routes answer with boundary geometry and with catalog facts —
+ * where a border runs, which meta a pano teaches. None of it is anybody's, and
+ * gating it would mean an edge cache keyed per token, which is the opposite of
+ * what a shape every player asks for the same answer to wants. They are listed
+ * here so the workers.dev redirect and the SPA fallback leave them alone; the
+ * handlers themselves sit above the auth wall.
+ */
+const PUBLIC_API_PATHS = new Set(['/api/scope-geo', '/api/scope-for-pano'])
+
 const isApiPath = (path) =>
-  AUTHED_PATHS.has(path) || path.startsWith('/plonkit/') || path.startsWith('/rounds/')
+  AUTHED_PATHS.has(path) ||
+  PUBLIC_API_PATHS.has(path) ||
+  path.startsWith('/plonkit/') ||
+  path.startsWith('/rounds/')
 
 /** The public site (dist-site/), with an index.html fallback so client-routed
  * pages survive a hard refresh. Absent binding = API-only deploy. */
@@ -892,6 +1327,49 @@ export default {
         }
         return json({ ok: true, users: users?.n ?? 0, rounds: rounds?.n ?? 0, metasTracked })
       }
+
+      // The shape behind a card's `scope`, and the primary source of it — the
+      // laptop's /api/scope-geo is the fallback now, not the other way round.
+      //   /api/scope-geo?country=ES[&regions=Cataluña|Aragón][&lod=0][&box=w,s,e,n]
+      // Parameters and response are coach/server.mjs's, field for field.
+      if (request.method === 'GET' && path === '/api/scope-geo') {
+        const country = (url.searchParams.get('country') ?? '').trim()
+        if (!/^[A-Za-z]{2}$/.test(country))
+          return gzipJson(request, { ok: false, error: 'country must be an ISO 3166-1 alpha-2 code' }, 400)
+        const regions = (url.searchParams.get('regions') ?? '')
+          .split('|')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, SCOPE_GEO_MAX_REGIONS)
+        // &box=w,s,e,n asks for only the part of the shape inside that
+        // rectangle — the window the client is looking at, grown past the
+        // screen edge — so a zoomed-in map is not paying for a whole country.
+        const clip = parseBox(url.searchParams.get('box'))
+        const { status, body } = buildScopeGeo(country.toUpperCase(), regions, url.searchParams.get('lod') ?? 0, clip)
+        // Borders do not move and the packs only change on a deploy, so a
+        // shape is good for the day at the edge and in the browser alike. A
+        // miss is not cached at all: a country that gains a boundary in the
+        // next pack build should draw the moment that build ships.
+        return gzipJson(request, body, status, status === 200 ? 'public, max-age=86400, s-maxage=86400' : 'no-store')
+      }
+
+      // The same scope the card will eventually carry, named a whole guess
+      // early: the pano id is on screen the moment the round is served, so the
+      // client asks for this then and has the boundary in its store long
+      // before the card needs it.
+      //   /api/scope-for-pano?pano=<panoId>
+      if (request.method === 'GET' && path === '/api/scope-for-pano') {
+        const scope = scopeForPano((url.searchParams.get('pano') ?? '').trim())
+        // A hit is a fact about a bundled catalog and cannot change until the
+        // next deploy, so it caches; a miss might be a catalog not yet
+        // reindexed, and should be asked again.
+        return gzipJson(
+          request,
+          scope ? { ok: true, scope } : { ok: false },
+          200,
+          scope ? 'public, max-age=86400, s-maxage=86400' : 'no-store',
+        )
+      }
     } catch (err) {
       return json({ ok: false, error: String(err) }, 500)
     }
@@ -937,31 +1415,24 @@ export default {
       if (request.method === 'GET' && path === '/deck') {
         const state = await loadUserState(env, user.id)
         const now = new Date()
-        const deck = buildDeck(state.deckCards, toLadder(CATALOGS), { minNew: 5, minSize: 18 }, now)
+        const size = deckSizeFor(url.searchParams.get('n'))
+        const { customCoordinates, ranking, stats } = buildRankedDeck(
+          state.deckCards,
+          CATALOGS,
+          toLadder(CATALOGS),
+          size,
+          now,
+        )
 
-        // Up to 4 locations per chosen meta, so one or two games sweep the deck.
-        const byMap = new Map(CATALOGS.map((c) => [c.mapId, c]))
-        const usedPanos = new Set()
-        const customCoordinates = []
-        const prewarm = []
-        for (const m of deck.metas) {
-          const pool = (byMap.get(m.mapId)?.locations ?? []).filter(
-            (l) => metaKeyOf(l.country, l.metaName) === m.name && !usedPanos.has(l.panoId),
-          )
-          for (let i = pool.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1))
-            ;[pool[i], pool[j]] = [pool[j], pool[i]]
-          }
-          for (const loc of pool.slice(0, 4)) {
-            usedPanos.add(loc.panoId)
-            customCoordinates.push(loc)
-            if (loc.panoId) prewarm.push({ mapId: m.mapId, panoId: loc.panoId })
-          }
-        }
-
-        const paddingNames = deck.metas.slice(deck.metas.length - deck.stats.padding).map((m) => m.name)
-        state.lastDeck = { ts: now.toISOString(), metas: deck.metas.map((m) => m.name), padding: paddingNames }
+        // Not-yet-due metas are this deck's padding: they only appear when the
+        // queue runs out of real work, and getting one right proves nothing
+        // FSRS did not already know. Same contract buildDeck's padding had, so
+        // the grading rule in handleRound needs no change.
+        const paddingNames = ranking.filter((r) => r.kind === 'future').map((r) => r.name)
+        state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name), padding: paddingNames }
         await saveUserState(env, user.id, state)
+
+        const prewarm = ranking.filter((r) => r.panoId).map((r) => ({ mapId: r.mapId, panoId: r.panoId }))
 
         // Pre-warm the LM clue cache for every pano this deck can serve, so
         // the first play of a location never pays the ~900ms live LM fetch on
@@ -978,11 +1449,22 @@ export default {
           })(),
         )
 
+        // `summary` keeps the field names the userscript already logs, mapped
+        // onto rankDeck's counts: `introduced` was buildDeck's word for metas
+        // entering the deck for the first time, which is rankDeck's `new`.
+        const due = ranking.filter((r) => r.kind === 'due').length
+        const fresh = ranking.filter((r) => r.kind === 'new').length
         return json({
           trainerMapId: user.config.trainerMapId ?? null,
           customCoordinates,
-          summary: { due: deck.stats.due, introduced: deck.stats.introduced, unlockedTiers: deck.stats.unlockedTiers },
-          description: `Auto-generated spaced-repetition deck — ${deck.stats.due} due, ${deck.stats.introduced} new (${now.toISOString().slice(0, 16)})`,
+          summary: { due, introduced: fresh, unlockedTiers: stats.unlockedTiers },
+          // Why these, in the order that decided it. The whole point of a
+          // just-in-time deck is that the priority is what GeoGuessr draws
+          // from, so the priority has to be inspectable — from the userscript,
+          // from a debug view, from a browser tab.
+          ranking,
+          stats,
+          description: `Auto-generated spaced-repetition deck — ${due} due, ${fresh} new (${now.toISOString().slice(0, 16)})`,
         })
       }
 

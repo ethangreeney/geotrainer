@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.13.2
+// @version      2.14.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.13.2'
+  const BODY_VERSION = '2.14.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -177,17 +177,123 @@
   // One send per (game, round), whichever path notices it first.
   const sent = new Set()
 
+  // ---------------------------------------------------- the coach's servers
+  // One GET client for everything GeoCoach itself answers — the deck, the
+  // boundary shapes, the pano→scope lookup — and one list of machines to ask,
+  // in the order they are asked.
+  //
+  // The cloud is first for cause, and the cause has a date on it: a Brazil
+  // round where neither the sub-region nor the country drew, because the Mac
+  // was asleep and /api/scope-geo went nowhere. The overlay had been a LAN-only
+  // feature and behaved like one — the rounds that *did* draw that evening were
+  // drawing out of localStorage, not off a server. The Worker holds the same
+  // packs and answers the same two routes with the same JSON, so the machine
+  // that is always awake is the one asked first. The laptop stays on the list
+  // as the fallback, which is a real job: it catches a Worker that is down, and
+  // it holds shapes the Worker may not have yet while the packs are rebuilt.
+  const GEO_SOURCES = CLOUD
+    ? [
+        { base: CLOUD.url, name: 'cloud' },
+        { base: LOCAL, name: 'laptop' },
+      ]
+    : [{ base: LOCAL, name: 'laptop' }]
+
+  /** One GET, one machine, parsed JSON out.
+   *
+   * `base` picks the machine (default: the cloud when it is configured, the
+   * laptop otherwise), `timeout` the patience, and `retry` how many times a
+   * *wire* failure is worth asking again about — a status code is a real
+   * answer and is never retried, however unwelcome it is. The defaults are the
+   * deck's: one shot and a minute of patience, because a rebuild is allowed to
+   * be slow and has nowhere else to go.
+   *
+   * GM_xmlhttpRequest rather than fetch because the laptop leg is http while
+   * the page is https; the plain-fetch branch only exists for a direct install
+   * with no GM grant, where that leg is blocked by the browser anyway. */
+  function serverGet(path, opts) {
+    const { base = CLOUD ? CLOUD.url : LOCAL, timeout = 60000, retry = 0 } = opts || {}
+    const url = base + path
+    return new Promise((resolve, reject) => {
+      const parsed = (text) => {
+        try {
+          resolve(JSON.parse(text))
+        } catch {
+          reject(new Error('unreadable answer'))
+        }
+      }
+      const ask = (left) => {
+        const wire = (message) => (left > 0 ? ask(left - 1) : reject(new Error(message)))
+        if (typeof GM_xmlhttpRequest === 'function') {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url,
+            headers: { ...AUTH_HEADERS },
+            timeout,
+            onload: (r) => (r.status === 200 ? parsed(r.responseText) : reject(new Error('server ' + r.status))),
+            onerror: () => wire('server unreachable'),
+            ontimeout: () => wire('timed out'),
+          })
+        } else {
+          fetch(url, { headers: { ...AUTH_HEADERS } }).then(
+            (r) => (r.status === 200 ? r.text().then(parsed) : reject(new Error('server ' + r.status))),
+            (err) => wire((err && err.message) || 'server unreachable'),
+          )
+        }
+      }
+      ask(retry)
+    })
+  }
+
+  /** The same GET, asked of each source in turn until one gives a usable
+   * answer. Resolves { json, source }.
+   *
+   * "Usable" is the caller's test and not the HTTP status, because a source
+   * can answer perfectly and still be no help: a Worker whose packs are missing
+   * a country replies 200 with ok:false, and the entire point of keeping the
+   * laptop on the list is that it may still have that shape. So a shapeless 200
+   * retires a source exactly the way a refused connection does.
+   *
+   * Rejects only once every source has failed, and names all of them: a log
+   * line reading "timed out" leaves the reader guessing which machine timed
+   * out, which is how the Brazil round stayed a mystery for a week. */
+  function geoGet(path, timeout, usable) {
+    const why = []
+    const ask = (i) => {
+      if (i >= GEO_SOURCES.length) return Promise.reject(new Error(why.join('; ') || 'nowhere to ask'))
+      const src = GEO_SOURCES[i]
+      // The retry belongs to the last source alone: for the others, moving on
+      // to the next machine *is* the retry, and it is a better one.
+      const last = i === GEO_SOURCES.length - 1
+      return serverGet(path, { base: src.base, timeout, retry: last ? 1 : 0 })
+        .then((json) => {
+          if (!usable(json)) throw new Error('nothing usable in the answer')
+          // Falling back is a working overlay and a broken primary at the same
+          // time, and only one of those is visible on screen. Once per page
+          // load is enough to say so — the alternative is a line per round.
+          if (i > 0) tlogOnce('geo-fallback:' + src.name, 'geo: answered by the ' + src.name + ' — ' + why.join('; '))
+          return { json, source: src.name }
+        })
+        .catch((err) => {
+          why.push(src.name + ': ' + ((err && err.message) || 'failed'))
+          return ask(i + 1)
+        })
+    }
+    return ask(0)
+  }
+
   // -------------------------------------------------------- scope overlay
   // A meta is a claim about a place and the card only names it. Drawing the
   // area the clue actually covers — the answer's country, or just the admin-1
   // subdivisions when the meta is narrower than the country — onto GeoGuessr's
   // own result map puts that claim right next to where the guess landed.
   //
-  // The geometry comes from the Mac's LAN server, which is http while the page
-  // is https, so this leg goes through GM_xmlhttpRequest like every other LOCAL
-  // call in this file. The Mac being asleep is a normal condition rather than a
-  // fault: every failure below is silent and total — no overlay, no exception,
-  // card untouched — and leaves a tlog line as the only trace.
+  // The geometry comes from whichever coach server answers first (see
+  // GEO_SOURCES: the cloud, then the laptop). A sleeping Mac used to mean no
+  // overlay at all; now it only means the second-choice machine is out. Every
+  // failure below is still silent and total — no overlay, no exception, card
+  // untouched — but a *total* failure now names both machines and the reason
+  // each gave, because "server unreachable" on its own says nothing about
+  // which server.
   //
   // Three things separate "correct" from "feels instant", and each is a section
   // of its own below:
@@ -198,10 +304,14 @@
   //     place, so the camera makes one move instead of zooming in and back out;
   //   · detail rides the zoom, because a coastline nobody can see is only a
   //     download.
-  const SCOPE_GEO_URL = LOCAL + '/api/scope-geo'
+  const SCOPE_GEO_PATH = '/api/scope-geo'
   // Which area a round is about, asked by pano id at round start — the same
-  // machine, because it is the one that holds the catalogs as well as the shapes.
-  const SCOPE_FOR_PANO_URL = LOCAL + '/api/scope-for-pano'
+  // sources in the same order, because both machines hold the catalogs as well
+  // as the shapes.
+  const SCOPE_FOR_PANO_PATH = '/api/scope-for-pano'
+  // Long enough for a cold Worker or a Mac still waking, short enough that two
+  // dead sources cost the card well under the time a result screen is up.
+  const SCOPE_TIMEOUT = 8000
   // The card's own chrome, so the shape reads as GeoCoach's annotation and not
   // as something GeoGuessr drew: the panel violet for the crisp outline and the
   // tint, its muted violet for the soft glow that sits under the outline.
@@ -616,52 +726,30 @@
     const ck = scopeCacheKey(key, level, box)
     const hit = cachedScopeGeo(key, level, box)
     if (hit) return Promise.resolve(hit)
-    let url = SCOPE_GEO_URL + '?country=' + encodeURIComponent(scope.country)
+    let path = SCOPE_GEO_PATH + '?country=' + encodeURIComponent(scope.country)
     if (Array.isArray(scope.regions) && scope.regions.length)
-      url += '&regions=' + encodeURIComponent(scope.regions.join('|'))
+      path += '&regions=' + encodeURIComponent(scope.regions.join('|'))
     // Always explicit, including the level the server would default to: the
     // request URL is what shows up in a log when detail looks wrong.
-    url += '&lod=' + level
-    if (box) url += '&box=' + box
-    return new Promise((resolve, reject) => {
-      const parsed = (text) => {
-        let j = null
-        try {
-          j = JSON.parse(text)
-        } catch {}
-        // A 200 with nothing drawable is treated exactly like a failure: the
-        // only thing this code is allowed to do is draw a real shape.
-        if (!j || !j.ok || !j.geojson || !Array.isArray(j.geojson.features) || !j.geojson.features.length)
-          return reject(new Error('no geometry'))
-        rememberScopeGeo(ck, j)
-        // Off the paint path deliberately: cheap as the write is, nothing
-        // waits on it and the very next thing that happens is a draw.
-        if (level === 0 && !box) setTimeout(() => scopeStorePut(ck, text), 0)
-        resolve(j)
-      }
-      if (typeof GM_xmlhttpRequest === 'function') {
-        // One retry, and only for the two failures that are about the wire
-        // rather than the answer: a Mac that was still waking, a Wi-Fi hiccup
-        // between the gaming PC and the LAN. Those cost a round its overlay for
-        // no reason, and they cost nothing to ask again about. A 4xx or a
-        // shapeless 200 is a real answer and is not retried.
-        const ask = (retries) =>
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url,
-            timeout: 8000,
-            onload: (r) => (r.status === 200 ? parsed(r.responseText) : reject(new Error('scope-geo ' + r.status))),
-            onerror: () => (retries ? ask(retries - 1) : reject(new Error('server unreachable'))),
-            ontimeout: () => (retries ? ask(retries - 1) : reject(new Error('timed out'))),
-          })
-        ask(1)
-      } else {
-        // Only reachable on a direct install without the GM grant, where the
-        // browser blocks https→http anyway — i.e. straight down the silent path.
-        fetch(url)
-          .then((r) => (r.ok ? r.text() : Promise.reject(new Error('scope-geo ' + r.status))))
-          .then(parsed, reject)
-      }
+    path += '&lod=' + level
+    if (box) path += '&box=' + box
+    // A 200 with nothing drawable counts as that source failing, not as an
+    // answer: the only thing this code is allowed to do is draw a real shape,
+    // and the next source may still have one.
+    const drawable = (j) => !!(j && j.ok && j.geojson && Array.isArray(j.geojson.features) && j.geojson.features.length)
+    return geoGet(path, SCOPE_TIMEOUT, drawable).then(({ json, source }) => {
+      // Which machine drew this round's shape, carried on the payload so the
+      // "scope drawn" line can say so — the same trip costing 40ms or 900ms is
+      // the difference between the cloud and a laptop two rooms away, and that
+      // is invisible from the timing alone.
+      json.via = source
+      rememberScopeGeo(ck, json)
+      // Off the paint path deliberately: cheap as the write is, nothing waits
+      // on it and the very next thing that happens is a draw. Re-serialised
+      // rather than kept as the response text, which costs a millisecond on a
+      // timer and keeps the stored copy identical to the cached one.
+      if (level === 0 && !box) setTimeout(() => scopeStorePut(ck, JSON.stringify(json)), 0)
+      return json
     })
   }
 
@@ -677,40 +765,33 @@
    *
    * The pano id is all the client has that early — the card, and with it the
    * scope, does not exist yet — so the server resolves it to the same scope the
-   * card will carry. Everything here is best-effort: a sleeping Mac, a pano from
-   * a map that was never indexed, a country with no boundary on file all end the
-   * same way, with nothing warmed and nothing said. */
+   * card will carry. Everything here is best-effort: both machines down, a pano
+   * from a map that was never indexed, a country with no boundary on file all
+   * end the same way, with nothing warmed and nothing said. Deliberately the
+   * one silent path in this file: a warm nobody asked for must never be the
+   * thing that fills the log, and the card's own fetch says it far louder a
+   * minute later. */
   function warmScopeGeo(panoId) {
     // Called once per round the moment the pano is served, which makes it the
     // one place that reliably knows a new round has begun — so last round's
     // answer is dropped here, before anything can mistake it for this one's.
     scopeWarm = null
-    if (!panoId || typeof GM_xmlhttpRequest !== 'function') return
+    if (!panoId) return
     const t0 = Date.now()
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: SCOPE_FOR_PANO_URL + '?pano=' + encodeURIComponent(panoId),
-      timeout: 8000,
-      onload: (r) => {
-        let scope = null
-        try {
-          const j = JSON.parse(r.responseText)
-          if (r.status === 200 && j && j.ok && j.scope && typeof j.scope.country === 'string') scope = j.scope
-        } catch {}
-        if (!scope) return
+    const placed = (j) => !!(j && j.ok && j.scope && typeof j.scope.country === 'string')
+    geoGet(SCOPE_FOR_PANO_PATH + '?pano=' + encodeURIComponent(panoId), SCOPE_TIMEOUT, placed)
+      .then(({ json }) => {
+        const scope = json.scope
         scopeWarm = scope
         const key = scopeKey(scope)
         // Already in hand from an earlier round: the warm has done its job by
         // finding nothing left to do, and a request here would be pure waste.
         if (cachedScopeGeo(key, 0)) return
-        fetchScopeGeo(scope, 0).then(
-          () => tlog('scope: ' + key + ' warmed ahead of the round (' + (Date.now() - t0) + 'ms)'),
-          () => {},
+        return fetchScopeGeo(scope, 0).then((res) =>
+          tlog('scope: ' + key + ' warmed ahead of the round from the ' + res.via + ' (' + (Date.now() - t0) + 'ms)'),
         )
-      },
-      onerror: () => {},
-      ontimeout: () => {},
-    })
+      })
+      .catch(() => {})
   }
 
   // ----------------------------------------------------------- the maps
@@ -1609,8 +1690,11 @@
         return
       }
       fetchScopeGeo(scope, 0).then(
-        (res) => arrived(res, 'server ' + (Date.now() - t0) + 'ms'),
-        (err) => tlog('scope ' + key + ': ' + ((err && err.message) || 'failed')),
+        (res) => arrived(res, (res.via || 'server') + ' ' + (Date.now() - t0) + 'ms'),
+        // The one line that says the overlay was meant to be here and is not,
+        // naming every source that was asked and what each said. It is the only
+        // trace: nothing is toasted, and the map simply looks normal.
+        (err) => tlog('scope ' + key + ': no shape — ' + ((err && err.message) || 'failed')),
       )
     } catch {}
   }
@@ -1998,6 +2082,15 @@
       if (!loc || !guess) continue
       // The game-finished rebuild rides on the final round's ACCEPTED post, so
       // a reload's re-posted game (all duplicates) can't rebuild a third time.
+      //
+      // Kept, even though the gate in front of game creation is now what makes
+      // the deck correct. It is the belt to that gate's braces: a fetch the
+      // page swapped out from under us, a game started from a path our wrap
+      // never saw, an install still running an older body — in every one of
+      // those the gate never fires and this is the only thing keeping the map
+      // roughly current. And when the user clicks play immediately, the gate
+      // finds this rebuild still in flight and waits on it rather than starting
+      // a second one, so the common case costs one publish, not two.
       const finishTrigger =
         i + 1 === 5
           ? () => {
@@ -2375,34 +2468,196 @@
     }
   }
 
-  // ---------------------------------------------------------------- deck
-  // The trainer widget: asks the local server what is due, rebuilds the
-  // trainer map through GeoGuessr's own draft API (session cookies), and
-  // publishes it. Contract per coach/API-CONTRACTS.md: GET the draft, PUT the
-  // full object back with version+1 and new customCoordinates, then PUT
-  // /publish with an empty object — draft edits alone never go live.
-  const SERVER = 'http://127.0.0.1:5177'
+  // ------------------------------------------------- the deck, just in time
+  // GeoGuessr freezes a game's five locations when the game is created — POST
+  // /api/v3/games — and never reads the map again for the rest of it. That one
+  // fact is why every rating used to reach the game *after* next. From a real
+  // log, one evening:
+  //
+  //   01:10:06  Estonia "tee" served → rated Easy; FSRS pushed it out 81 days
+  //   01:10:44  round 5, game over
+  //   01:10:50  the next game is created   ← the five locations freeze here
+  //   01:10:53  the rebuild publishes, correctly without Estonia
+  //   01:12:22  Estonia "tee" served again
+  //
+  // Nothing was broken. FSRS was right, the publish was right, and the publish
+  // lost by three seconds. So the rebuild moves in front of the request that
+  // does the freezing: hold creation, publish, then let it go.
+  //
+  // This sits directly between the user and the button that starts their game,
+  // which sets every rule below. It holds one URL and one method. It has a
+  // deadline it cannot miss. It cannot throw into GeoGuessr's call, and it
+  // cannot fail in a way that ends with the request not being made.
 
-  function serverGet(path) {
-    const base = CLOUD ? CLOUD.url : SERVER
-    return new Promise((resolve, reject) => {
-      if (typeof GM_xmlhttpRequest === 'function') {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: base + path,
-          headers: { ...AUTH_HEADERS },
-          timeout: 60000,
-          onload: (r) => (r.status === 200 ? resolve(JSON.parse(r.responseText)) : reject(new Error('server ' + r.status))),
-          onerror: () => reject(new Error('server unreachable')),
-          ontimeout: () => reject(new Error('server timeout')),
-        })
-      } else {
-        fetch(base + path, { headers: { ...AUTH_HEADERS } })
-          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('server ' + r.status))))
-          .then(resolve, reject)
-      }
-    })
+  /** The bare collection path and nothing else. `/api/v3/games/<token>` is a
+   * different endpoint entirely — that one is game *state*, it is read on every
+   * round and written on every guess, and holding it would stall the game
+   * rather than seed it. Trailing slash and query string are allowed; an id
+   * after it is not. */
+  function isGameCreate(url, method) {
+    return method === 'POST' && /\/api\/v3\/games\/?(\?|#|$)/.test(url || '')
   }
+
+  // How long game creation may be held. Measured rebuilds — fetch the deck,
+  // then GeoGuessr's own draft GET, PUT and publish — ran between three and
+  // eight seconds against the old 484-location bag; the ranked five is a
+  // fraction of that payload, and the post-game rebuild has usually done the
+  // work already, in which case this resolves the moment that one lands.
+  // Six seconds is about where a wait still reads as "the game is loading"
+  // rather than "GeoGuessr is broken", and overrunning it costs exactly what
+  // every game cost before this existed — a deck one game stale — never a game
+  // the user cannot start.
+  const JIT_BUDGET_MS = 6000
+
+  /** Runs the rebuild, but for at most the budget, and never rejects.
+   *
+   * Losing the race does not cancel anything: the rebuild carries on in the
+   * background and its publish lands for the game after. Both outcomes are
+   * logged, with the elapsed time, because this is a thing that happens
+   * invisibly at the one moment nobody is looking at a console. */
+  function holdForRebuild(rebuild) {
+    const t0 = Date.now()
+    let settled = false
+    tlog('deck: holding game creation while the map is rebuilt')
+    const done = Promise.resolve()
+      .then(rebuild)
+      .then(
+        () => {
+          settled = true
+          tlog('deck: rebuilt in ' + (Date.now() - t0) + 'ms — this game gets the new deck')
+        },
+        (err) => {
+          settled = true
+          tlog('deck: rebuild before the game FAILED after ' + (Date.now() - t0) + 'ms (' +
+            ((err && err.message) || err) + ') — starting the game anyway')
+        },
+      )
+    const deadline = new Promise((resolve) =>
+      setTimeout(() => {
+        if (!settled)
+          tlog('deck: rebuild still running after ' + JIT_BUDGET_MS + 'ms — starting the game on the deck already published')
+        resolve()
+      }, JIT_BUDGET_MS),
+    )
+    return Promise.race([done, deadline])
+  }
+
+  /** Installs the gate over `W.fetch` and `XMLHttpRequest`, calling `hold`
+   * before a game-creation request is allowed out.
+   *
+   * Outermost by construction: it wraps whatever fetch is current, which is
+   * already the capture wrap above, which is already the loader's tap. Those
+   * two only *watch* a request — they are handed the promise after the call
+   * has been made and cannot delay anything — so the delay has to live in its
+   * own wrap, and that wrap has to go on last.
+   *
+   * `hold` lives on the gate object rather than in this closure because the
+   * body hot-reloads and the wrap does not: a gate holding the previous body's
+   * rebuild is a gate publishing through a dead script. */
+  function installRequestGate(W, hold) {
+    const existing = W.__geocoachGate
+    if (existing) {
+      existing.hold = hold
+      return existing
+    }
+    // `held` counts the games this gate has stood in front of — nothing reads
+    // it, but `__geocoachGate.held` in a console is the fastest way to tell a
+    // gate that is working from one that never fired.
+    const gate = (W.__geocoachGate = { hold, pending: null, held: 0 })
+    /** One rebuild, however many creation requests arrive at once — a retry, a
+     * second tab, a mutation React fired twice. They all wait on the same
+     * publish rather than racing two of them at the same draft. Never rejects,
+     * so every caller's `.then` runs and every original request is made. */
+    const wait = () => {
+      if (!gate.pending) {
+        gate.held++
+        const clear = () => (gate.pending = null)
+        gate.pending = holdForRebuild(gate.hold).then(clear, clear)
+      }
+      return gate.pending
+    }
+    const pageFetch = W.fetch
+    W.fetch = function (input, opts) {
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || ''
+        const method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
+        if (isGameCreate(url, method)) {
+          const self = this
+          const args = arguments
+          // Resolve-then-call rather than await: the arguments go through
+          // untouched, so an AbortSignal, a Request object or a body stream is
+          // the same object GeoGuessr handed us.
+          return wait().then(() => pageFetch.apply(self, args))
+        }
+      } catch {}
+      return pageFetch.apply(this, arguments)
+    }
+    // Every /api/v3/games call this script has ever seen came through the fetch
+    // tap, and there is no XMLHttpRequest anywhere in GeoGuessr's client that
+    // this script has ever observed — so the wrap above is expected to be the
+    // one that fires. But being wrong about that costs a card its review, and
+    // being right about it costs fifteen lines, so the same hold goes in front
+    // of XHR too. If the line below ever appears in the log, the assumption in
+    // this paragraph is wrong and the fetch tap was never the whole story.
+    try {
+      const XHR = W.XMLHttpRequest && W.XMLHttpRequest.prototype
+      if (XHR && !XHR.__geocoachGated) {
+        XHR.__geocoachGated = true
+        const open = XHR.open
+        const send = XHR.send
+        XHR.open = function (method, url) {
+          try {
+            // Only an async request may be held. Deferring a synchronous send
+            // would hand control back to a caller that is about to block on a
+            // request which has not left yet.
+            const async = arguments[2] !== false
+            this.__geocoachHeld = async && isGameCreate(String(url || ''), String(method || 'GET').toUpperCase())
+          } catch {}
+          return open.apply(this, arguments)
+        }
+        XHR.send = function () {
+          if (!this.__geocoachHeld) return send.apply(this, arguments)
+          this.__geocoachHeld = false
+          const self = this
+          const args = arguments
+          tlog('deck: game creation went out over XMLHttpRequest, not fetch')
+          // The send has to happen exactly once, whatever the hold does, so it
+          // is its own try inside a chain that cannot reject.
+          wait().then(() => {
+            try {
+              send.apply(self, args)
+            } catch (err) {
+              tlog('deck: releasing the held XHR threw — ' + ((err && err.message) || err))
+            }
+          })
+        }
+      }
+    } catch {}
+    return gate
+  }
+
+  installRequestGate(W, () => rebuildSilently('game starting'))
+
+  // ---------------------------------------------------------------- deck
+  // The trainer widget: asks the coach server what is due (serverGet, up with
+  // the rest of the client), rebuilds the trainer map through GeoGuessr's own
+  // draft API (session cookies), and publishes it. Contract per
+  // coach/API-CONTRACTS.md: GET the draft, PUT the full object back with
+  // version+1 and new customCoordinates, then PUT /publish with an empty
+  // object — draft edits alone never go live.
+  //
+  // A game is five rounds and GeoGuessr picks them at creation, so a map
+  // holding exactly the five highest-priority cards means the five played ARE
+  // the five due — no sampling and no luck, which is the other half of the fix
+  // that holds game creation above.
+  //
+  // Ranking is the Worker's contract: it answers /deck?n= with the n cards it
+  // would pick. The laptop's server matches the path exactly and would 404 on
+  // a query string, so it is asked the old way and answers with the whole bag.
+  // Five drawn from 484 is a lottery, but it is the lottery this ran on for
+  // months and it still works.
+  const DECK_SIZE = 5
+  const DECK_PATH = CLOUD ? '/deck?n=' + DECK_SIZE : '/deck'
 
   async function gg(url, options) {
     const res = await fetch(url, { credentials: 'include', ...options })
@@ -2429,7 +2684,7 @@
    * Fire-and-forget with one silent retry: losing this only costs a duplicate
    * map next rebuild, so it never interrupts the user. */
   function registerTrainerMap(mapId) {
-    const url = (CLOUD ? CLOUD.url : SERVER) + '/trainer-map'
+    const url = (CLOUD ? CLOUD.url : LOCAL) + '/trainer-map'
     const body = JSON.stringify({ mapId })
     const attempt = (retriesLeft) => {
       const failed = (message) => {
@@ -2460,24 +2715,48 @@
     attempt(1)
   }
 
-  let rebuilding = false
+  // The rebuild in flight, or null — a promise rather than a flag, because
+  // game creation now *waits* on this. A second caller has to join the publish
+  // already running: sailing past it would start the game on the old map, and
+  // starting a second one would put two versions of the same draft in the air.
+  let rebuilding = null
   // Map creation needs a signed-in GeoGuessr session. If it fails once we stop
   // trying for this page load: retrying every rebuild would toast on a loop.
   let mapCreationBlocked = false
 
-  /** All rebuilds are automatic: after a game finishes, and on arriving at the
-   * site with reviews due (or a deck that has never been built). The throttle
-   * stops the menu re-mount from repeating the game-finished rebuild. */
-  async function rebuildSilently(reason) {
-    if (rebuilding) return
+  /** All rebuilds are automatic: before a game starts, after one finishes, and
+   * on arriving at the site with reviews due (or a deck that has never been
+   * built). Always returns a promise that settles when there is nothing left to
+   * publish — including when it decided not to publish at all.
+   *
+   * The throttle stops the menu re-mount from repeating the arrival rebuild. It
+   * never applies to the two triggers either side of a game: those are the exact
+   * moments the deck is known to be out of date. */
+  function rebuildSilently(reason) {
+    if (rebuilding) return rebuilding
     // Leaving a game is the moment a just-finished duel becomes fetchable and
     // the moment its rounds are most likely to be missing.
     sweepRecentDuels('arrival')
     const last = Number(localStorage.getItem('gc-last-rebuild') || 0)
-    if (reason !== 'game finished' && Date.now() - last < 3 * 60 * 1000) return
-    rebuilding = true
+    const aroundAGame = reason === 'game finished' || reason === 'game starting'
+    if (!aroundAGame && Date.now() - last < 3 * 60 * 1000) return Promise.resolve()
+    rebuilding = publishDeck(reason)
+    // Cleared however it ends: a rebuild that threw must not wedge the handle
+    // and block every rebuild after it for the life of the page.
+    rebuilding.then(
+      () => (rebuilding = null),
+      () => (rebuilding = null),
+    )
+    return rebuilding
+  }
+
+  /** The publish itself, and the one place the deck is written. Never throws:
+   * a caller may be a user standing in front of a game that has not started
+   * yet, and nothing here is worth their game. */
+  async function publishDeck(reason) {
+    const t0 = Date.now()
     try {
-      const deck = await serverGet('/deck')
+      const deck = await serverGet(DECK_PATH)
       if (!deck.customCoordinates || deck.customCoordinates.length < 5)
         return tlog('rebuild (' + reason + '): the deck came back too small to publish')
       let mapId = deck.trainerMapId
@@ -2518,13 +2797,16 @@
       }
       localStorage.setItem('gc-last-rebuild', String(Date.now()))
       // Silent on screen — rebuilds are routine housekeeping — but never silent
-      // in the log: a rebuild that stops happening is invisible otherwise.
-      tlog('rebuild (' + reason + '): map published — ' + deck.summary.due + ' due, ' + deck.summary.introduced + ' new')
+      // in the log: a rebuild that stops happening is invisible otherwise. The
+      // elapsed time is here because game creation is now held against it, so
+      // "how long does a rebuild take" stopped being idle curiosity.
+      tlog(
+        'rebuild (' + reason + '): map published in ' + (Date.now() - t0) + 'ms — ' +
+          deck.customCoordinates.length + ' locations, ' + deck.summary.due + ' due, ' + deck.summary.introduced + ' new',
+      )
     } catch (err) {
-      tlog('rebuild (' + reason + ') FAILED: ' + ((err && err.message) || err))
+      tlog('rebuild (' + reason + ') FAILED after ' + (Date.now() - t0) + 'ms: ' + ((err && err.message) || err))
       console.error('[geocoach] auto-rebuild failed', err)
-    } finally {
-      rebuilding = false
     }
   }
 

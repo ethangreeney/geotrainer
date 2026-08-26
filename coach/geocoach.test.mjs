@@ -6,20 +6,90 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
  * cannot be imported — but it is also the one part of the system that never
  * runs on this machine, which makes a copy-paste test worthless. So both files
  * are read and executed as shipped: the loader whole, under stub globals, and
- * the body's scope-overlay section sliced out and given its dependencies as
- * function parameters. Anything that drifts out of that section, or renames its
- * markers, fails the slice test below rather than quietly testing nothing.
+ * three of the body's sections sliced out and given their dependencies as
+ * function parameters. Anything that drifts out of a section, or renames its
+ * markers, fails the slice tests below rather than quietly testing nothing.
  */
 const read = (name) => fs.readFileSync(new URL('./' + name, import.meta.url), 'utf8')
 const loaderSrc = read('geocoach.loader.js')
 const bodySrc = read('geocoach.user.js')
 
+/** Marked-out region of the body, start marker included, end marker excluded. */
+const cut = (from, to) => {
+  const a = bodySrc.indexOf(from)
+  const b = bodySrc.indexOf(to)
+  return { ok: a >= 0 && b > a, at: a, to: b, src: a >= 0 && b > a ? bodySrc.slice(a, b) : '' }
+}
+
+// The shared GET client — GEO_SOURCES, serverGet, geoGet — which the overlay
+// now goes through, so it is prepended to that slice rather than stubbed: which
+// machine answers, in what order, is the whole point of the thing.
+const CLIENT_START = "  // ---------------------------------------------------- the coach's servers"
 const SECTION_START = '  // -------------------------------------------------------- scope overlay'
 const SECTION_END = '  function removeCard() {'
-const startAt = bodySrc.indexOf(SECTION_START)
-const endAt = bodySrc.indexOf(SECTION_END)
-const sliceOk = startAt >= 0 && endAt > startAt
-const section = sliceOk ? bodySrc.slice(startAt, endAt) : ''
+const client = cut(CLIENT_START, SECTION_START)
+const overlay = cut(SECTION_START, SECTION_END)
+const startAt = overlay.at
+const endAt = overlay.to
+const sliceOk = client.ok && overlay.ok
+const section = sliceOk ? client.src + overlay.src : ''
+
+// The gate that holds game creation until the deck is republished. Sliced up to
+// its own install call, which is left out: it names rebuildSilently, which lives
+// in the deck section and would be an undefined reference here.
+const JIT_START = '  // ------------------------------------------------- the deck, just in time'
+const JIT_END = '  installRequestGate(W, '
+const jit = cut(JIT_START, JIT_END)
+const JIT_EXPORTS = ';return { isGameCreate, installRequestGate, holdForRebuild, JIT_BUDGET_MS }'
+
+/**
+ * The gate, run as shipped over a stub window whose fetch records calls and
+ * never resolves on its own. `rebuild` is what the gate is told to wait for.
+ */
+function makeGate({ rebuild = () => Promise.resolve(), install = true } = {}) {
+  if (!jit.ok) throw new Error('just-in-time section not found in geocoach.user.js')
+  const calls = []
+  const tlogLines = []
+  const fetched = []
+  const sent = []
+  // A page's XMLHttpRequest, near enough: it remembers what it was opened with
+  // and records the moment it is actually put on the wire.
+  class XHR {
+    open(method, url, async) {
+      this.method = method
+      this.url = url
+      this.async = async
+    }
+    send(body) {
+      sent.push({ method: this.method, url: this.url, body })
+    }
+  }
+  const W = {
+    XMLHttpRequest: XHR,
+    fetch: function (input, opts) {
+      fetched.push({ input, opts, self: this })
+      return Promise.resolve({ ok: true, input })
+    },
+  }
+  const api = new Function('tlog', jit.src + JIT_EXPORTS)((line) => tlogLines.push(line))
+  const hold = (...args) => {
+    calls.push(args)
+    return rebuild()
+  }
+  const gate = install ? api.installRequestGate(W, hold) : null
+  return { api, W, XHR, gate, hold, calls, fetched, sent, tlogLines }
+}
+
+/** A promise the test settles by hand, so a rebuild can be made to take as
+ * long as the test needs it to. */
+function deferred() {
+  let settle
+  const promise = new Promise((resolve, reject) => (settle = { resolve, reject }))
+  return { promise, ...settle }
+}
+
+/** Let every pending microtask run without moving the clock. */
+const flush = () => vi.advanceTimersByTimeAsync(0)
 
 /** The section's own top-level names, handed back for the tests to drive. */
 const EXPORTS = `;return { fetchScopeGeo, warmScopeGeo, scopeKey, ensureMapCapture, pickResultMap, scopeBounds,
@@ -52,11 +122,18 @@ const ONTARIO = {
 const PAYLOAD = { ok: true, kind: 'region', country: 'CA', label: 'Ontario, Canada', names: ['Ontario'], geojson: ONTARIO }
 const SCOPE = { country: 'CA', regions: ['Ontario'] }
 
+const LOCAL = 'http://127.0.0.1:5177'
+const CLOUD_BASE = 'https://geofsrs.example.dev'
+
 /**
  * One page's worth of stubs: a Maps API with the two classes the overlay
  * touches, one result-map-sized map, and a GM_xmlhttpRequest whose reply is
  * whatever the test says it is. `reply` returns a response object, or the
  * string 'error'/'timeout' to take those callbacks instead.
+ *
+ * `cloud` is off by default so the bulk of the suite keeps describing the
+ * laptop-only install; the tests that care about which machine is asked first
+ * turn it on.
  */
 function makeEnv({
   payload = PAYLOAD,
@@ -65,6 +142,7 @@ function makeEnv({
   viewport = null,
   zoom = 4,
   quota = Infinity,
+  cloud = null,
 } = {}) {
   if (!sliceOk) throw new Error('scope-overlay section not found in geocoach.user.js')
   const dataLayers = []
@@ -162,9 +240,12 @@ function makeEnv({
     }, 0)
   }
   const seenOnce = new Set()
+  const CLOUD = cloud ? { url: CLOUD_BASE, token: 'tok' } : null
   const api = new Function(
     'W',
     'LOCAL',
+    'CLOUD',
+    'AUTH_HEADERS',
     'tlog',
     'tlogOnce',
     'GM_xmlhttpRequest',
@@ -176,7 +257,9 @@ function makeEnv({
     section + EXPORTS,
   )(
     W,
-    'http://127.0.0.1:5177',
+    LOCAL,
+    CLOUD,
+    CLOUD ? { Authorization: 'Bearer ' + CLOUD.token } : {},
     (line) => tlogLines.push(line),
     (key, line) => {
       if (seenOnce.has(key)) return
@@ -217,6 +300,21 @@ describe('test setup', () => {
     expect(startAt, 'section start marker missing from geocoach.user.js').toBeGreaterThanOrEqual(0)
     expect(endAt, 'section end marker (removeCard) missing or above the start').toBeGreaterThan(startAt)
     expect(section).toContain('function drawScopeOverlay')
+  })
+
+  it('finds the shared server client, and runs the overlay through it', () => {
+    expect(client.ok, "the coach's-servers marker moved or vanished").toBe(true)
+    expect(client.src).toContain('const GEO_SOURCES')
+    expect(client.src).toContain('function serverGet')
+    expect(client.src).toContain('function geoGet')
+    // Two clients is how the overlay ended up LAN-only in the first place.
+    expect(overlay.src).not.toContain('GM_xmlhttpRequest({')
+  })
+
+  it('finds the just-in-time section, and leaves its install call out of the slice', () => {
+    expect(jit.ok, 'just-in-time markers moved or vanished').toBe(true)
+    expect(jit.src).toContain('function installRequestGate')
+    expect(jit.src).not.toContain('rebuildSilently')
   })
 
   it('logs the same version it declares', () => {
@@ -480,6 +578,89 @@ describe('scope-geo request', () => {
     expect(env.requests).toHaveLength(1)
     expect(env.requests[0]).toMatchObject({ method: 'GET' })
     expect(env.requests[0].timeout).toBeGreaterThan(0)
+  })
+})
+
+// The Brazil round: the Mac was asleep, the overlay asked it anyway, and
+// neither the sub-region nor the country drew. The cloud holds the same packs
+// and is always awake, so it is asked first and the laptop is the fallback.
+describe('which machine is asked', () => {
+  const cloudEnv = (opts = {}) => makeEnv({ cloud: true, ...opts })
+  const isCloud = (u) => u.startsWith(CLOUD_BASE)
+
+  it('asks the cloud first, and stops there when it answers', async () => {
+    const env = cloudEnv()
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(urlsOf(env)).toEqual([CLOUD_BASE + '/api/scope-geo?country=CA&regions=Ontario&lod=0'])
+    expect(env.dataLayers).toHaveLength(2)
+    expect(env.tlogLines.join(' ')).toContain('cloud')
+  })
+
+  it('carries the bearer token, or the Worker would refuse it', () => {
+    const env = cloudEnv()
+    env.api.fetchScopeGeo(SCOPE).catch(() => {})
+    expect(env.requests[0].headers).toMatchObject({ Authorization: 'Bearer tok' })
+  })
+
+  const cloudDown = {
+    'unreachable': 'error',
+    'timing out': 'timeout',
+    '500ing': { status: 500, responseText: '' },
+    // The Worker's packs can be a country short of the laptop's, and that is
+    // the whole reason the laptop is still on the list.
+    'answering with no shape it has': { status: 200, responseText: JSON.stringify({ ok: false, error: 'no boundary' }) },
+  }
+  for (const [name, cloudReply] of Object.entries(cloudDown)) {
+    it(`falls back to the laptop with the cloud ${name}`, async () => {
+      const env = cloudEnv({
+        reply: (req) => (isCloud(req.url) ? cloudReply : { status: 200, responseText: JSON.stringify(PAYLOAD) }),
+      })
+      env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+      await settle()
+      expect(urlsOf(env).filter(isCloud)).toHaveLength(1) // asked once; the laptop IS the retry
+      expect(urlsOf(env).some((u) => u.startsWith(LOCAL))).toBe(true)
+      expect(env.dataLayers).toHaveLength(2) // the shape still lands on the map
+      expect(env.tlogLines.join(' ')).toContain('answered by the laptop')
+    })
+  }
+
+  it('says the cloud is out once a page load, not once a round', async () => {
+    const env = cloudEnv({
+      reply: (req) => (isCloud(req.url) ? 'error' : { status: 200, responseText: JSON.stringify(PAYLOAD) }),
+    })
+    env.api.fetchScopeGeo({ country: 'SE' }).catch(() => {})
+    await settle()
+    env.api.fetchScopeGeo({ country: 'NO' }).catch(() => {})
+    await settle()
+    expect(env.tlogLines.filter((l) => l.includes('answered by the laptop'))).toHaveLength(1)
+  })
+
+  it('names both machines and both reasons when neither answers', async () => {
+    const env = cloudEnv({ reply: (req) => (isCloud(req.url) ? 'timeout' : 'error') })
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.dataLayers).toHaveLength(0)
+    // The one trace of an overlay that was meant to be there. "server
+    // unreachable" on its own is what made the Brazil round a week-long
+    // mystery: it never said which server.
+    expect(env.tlogLines).toHaveLength(1)
+    expect(env.tlogLines[0]).toContain('CA|Ontario: no shape')
+    expect(env.tlogLines[0]).toContain('cloud: timed out')
+    expect(env.tlogLines[0]).toContain('laptop: server unreachable')
+  })
+
+  it('asks the pano lookup of the cloud first too', async () => {
+    const env = cloudEnv({
+      reply: (req) =>
+        /scope-for-pano/.test(req.url)
+          ? { status: 200, responseText: JSON.stringify({ ok: true, scope: SCOPE }) }
+          : { status: 200, responseText: JSON.stringify(PAYLOAD) },
+    })
+    env.api.warmScopeGeo('pano1')
+    await settle()
+    expect(urlsOf(env)[0]).toBe(CLOUD_BASE + '/api/scope-for-pano?pano=pano1')
+    expect(env.tlogLines.join(' ')).toContain('warmed ahead of the round from the cloud')
   })
 })
 
@@ -1551,5 +1732,184 @@ describe('a result map that moves under the overlay', () => {
     await vi.advanceTimersByTimeAsync(8000)
     expect(env.api.layers()).toEqual([])
     expect(env.dataLayers).toHaveLength(2) // nothing new was ever drawn
+  })
+})
+
+// GeoGuessr freezes a game's five locations at POST /api/v3/games, so a deck
+// published after that request is a deck the game will never look at. Every
+// rating used to land one game late for exactly that reason.
+describe('holding game creation until the deck is republished', () => {
+  describe('which request is the one that freezes the deck', () => {
+    const creates = [
+      '/api/v3/games',
+      'https://www.geoguessr.com/api/v3/games',
+      '/api/v3/games/',
+      '/api/v3/games?something=1',
+    ]
+    for (const url of creates) {
+      it(`holds POST ${url}`, () => {
+        expect(makeGate().api.isGameCreate(url, 'POST')).toBe(true)
+      })
+    }
+
+    const passes = [
+      // Game *state*: read every round, written on every guess. Holding this
+      // one would stall the game rather than seed it.
+      ['/api/v3/games/XEb0zuHB2bsm4pVT', 'POST'],
+      ['https://www.geoguessr.com/api/v3/games/XEb0zuHB2bsm4pVT', 'GET'],
+      ['/api/v3/games', 'GET'],
+      ['/api/v4/user-maps/drafts', 'POST'],
+      ['/api/duels/abc-123', 'POST'],
+      ['', 'POST'],
+    ]
+    for (const [url, method] of passes) {
+      it(`lets ${method} ${url || '(no url)'} through`, () => {
+        expect(makeGate().api.isGameCreate(url, method)).toBe(false)
+      })
+    }
+  })
+
+  it('makes the creation request only once the rebuild has published', async () => {
+    const d = deferred()
+    const g = makeGate({ rebuild: () => d.promise })
+    const answer = g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    expect(g.calls).toHaveLength(1)
+    expect(g.fetched, 'the game was created before the deck was published').toHaveLength(0)
+    d.resolve()
+    await flush()
+    expect(g.fetched).toHaveLength(1)
+    await expect(answer).resolves.toMatchObject({ ok: true })
+    expect(g.tlogLines.join(' ')).toContain('holding game creation')
+    expect(g.tlogLines.join(' ')).toContain('this game gets the new deck')
+  })
+
+  it('hands the request through untouched — same arguments, same `this`', async () => {
+    const g = makeGate()
+    const opts = { method: 'POST', body: '{}', signal: {} }
+    const input = { url: '/api/v3/games', method: 'POST' }
+    g.W.fetch(input, opts)
+    await flush()
+    expect(g.fetched[0].input).toBe(input)
+    expect(g.fetched[0].opts).toBe(opts)
+    expect(g.fetched[0].self).toBe(g.W)
+  })
+
+  it('never holds game state, and never holds it asynchronously either', () => {
+    const g = makeGate({ rebuild: () => deferred().promise })
+    g.W.fetch('/api/v3/games/XEb0zuHB2bsm4pVT', { method: 'POST' }) // the guess
+    g.W.fetch('/api/v3/games/XEb0zuHB2bsm4pVT') // the round being served
+    // Synchronously, on the same tick: a guess POST that waits on a promise is
+    // a card that arrives after the result screen has moved on.
+    expect(g.fetched).toHaveLength(2)
+    expect(g.calls).toHaveLength(0)
+  })
+
+  it('releases the request on the deadline when the rebuild runs long', async () => {
+    const g = makeGate({ rebuild: () => deferred().promise }) // never settles
+    g.W.fetch('/api/v3/games', { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(g.api.JIT_BUDGET_MS - 1)
+    expect(g.fetched).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(g.fetched, 'a slow rebuild must never stop the user playing').toHaveLength(1)
+    expect(g.tlogLines.join(' ')).toContain('still running after ' + g.api.JIT_BUDGET_MS + 'ms')
+  })
+
+  it('keeps the deadline to a few seconds', () => {
+    // The number is a judgement call, but the shape of it is not: long enough
+    // for a rebuild, short enough that the wait reads as the game loading.
+    expect(makeGate().api.JIT_BUDGET_MS).toBeGreaterThanOrEqual(2000)
+    expect(makeGate().api.JIT_BUDGET_MS).toBeLessThanOrEqual(10000)
+  })
+
+  it('starts the game anyway when the rebuild throws', async () => {
+    const g = makeGate({ rebuild: () => Promise.reject(new Error('server unreachable')) })
+    const answer = g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    expect(g.fetched).toHaveLength(1)
+    await expect(answer).resolves.toMatchObject({ ok: true })
+    expect(g.tlogLines.join(' ')).toContain('FAILED')
+    expect(g.tlogLines.join(' ')).toContain('starting the game anyway')
+  })
+
+  it('starts the game anyway when the rebuild throws synchronously', async () => {
+    const g = makeGate({
+      rebuild: () => {
+        throw new Error('nope')
+      },
+    })
+    const answer = g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    expect(g.fetched).toHaveLength(1)
+    await expect(answer).resolves.toMatchObject({ ok: true })
+  })
+
+  it('runs one rebuild for two creation requests at once', async () => {
+    const d = deferred()
+    const g = makeGate({ rebuild: () => d.promise })
+    g.W.fetch('/api/v3/games', { method: 'POST' })
+    g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    // Two publishes at the same draft is a version conflict waiting to happen.
+    expect(g.calls).toHaveLength(1)
+    d.resolve()
+    await flush()
+    expect(g.fetched).toHaveLength(2)
+  })
+
+  it('rebuilds again for the game after that', async () => {
+    const g = makeGate()
+    g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    expect(g.calls).toHaveLength(2)
+    expect(g.fetched).toHaveLength(2)
+  })
+
+  it('wraps fetch once, and a hot-reloaded body takes over the old wrap', async () => {
+    const g = makeGate()
+    const wrapped = g.W.fetch
+    const second = []
+    g.api.installRequestGate(g.W, () => {
+      second.push(1)
+      return Promise.resolve()
+    })
+    expect(g.W.fetch, 'the gate wrapped its own wrap').toBe(wrapped)
+    g.W.fetch('/api/v3/games', { method: 'POST' })
+    await flush()
+    // A gate still publishing through the previous body is a gate publishing
+    // through a dead script.
+    expect(g.calls).toHaveLength(0)
+    expect(second).toHaveLength(1)
+  })
+
+  it('holds a creation request that goes out over XMLHttpRequest instead', async () => {
+    const d = deferred()
+    const g = makeGate({ rebuild: () => d.promise })
+    const xhr = new g.XHR()
+    xhr.open('POST', '/api/v3/games')
+    xhr.send('{}')
+    await flush()
+    expect(g.calls).toHaveLength(1)
+    expect(g.sent).toHaveLength(0)
+    d.resolve()
+    await flush()
+    expect(g.sent).toEqual([{ method: 'POST', url: '/api/v3/games', body: '{}' }])
+    // If this line ever shows up in a real log, the fetch tap was never the
+    // whole story and the comment above it needs rewriting.
+    expect(g.tlogLines.join(' ')).toContain('went out over XMLHttpRequest')
+  })
+
+  it('leaves every other XMLHttpRequest alone, synchronous ones included', () => {
+    const g = makeGate({ rebuild: () => deferred().promise })
+    const state = new g.XHR()
+    state.open('POST', '/api/v3/games/XEb0zuHB2bsm4pVT')
+    state.send('{}')
+    const sync = new g.XHR()
+    sync.open('POST', '/api/v3/games', false) // blocking: it cannot be deferred
+    sync.send('{}')
+    expect(g.sent).toHaveLength(2)
+    expect(g.calls).toHaveLength(0)
   })
 })

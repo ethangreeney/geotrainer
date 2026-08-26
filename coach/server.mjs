@@ -23,8 +23,8 @@ import { countryCode, countryShape, geoReady, lodFor, regionShapes } from './geo
 import { loadPack, locate } from './geo/locate.mjs'
 import { COUNTRY_PACK, REGION_PACK } from './geo/pack.mjs'
 import { clipGeometry } from './geo/shape.mjs'
+import { buildRankedDeck, deckSizeFor, metaKeyOf } from './deck.mjs'
 import {
-  buildDeck,
   deckSummary,
   gradeRound,
   MASTERY_DAYS,
@@ -127,7 +127,6 @@ async function loadCatalogs() {
  * ("Pole" is a Thai meta and a Brazilian one), so bare names would merge
  * unrelated cards.
  */
-const metaKeyOf = (country, name) => (name ? (country ? `${country}: ${name}` : name) : null)
 
 /** Metas whose physical design is shared across countries: any country in the
  * set is a correct read. Codes are the uppercase ISO codes countryOf returns. */
@@ -1075,7 +1074,13 @@ const server = createServer(async (req, res) => {
     return answer({ country: cc.toUpperCase(), regions })
   }
   // The just-in-time deck: what to test right now, as GeoGuessr locations.
-  if (req.method === 'GET' && req.url === '/deck') {
+  //
+  // Same ranking and the same map size as the Worker, out of coach/deck.mjs.
+  // When this route had its own older algorithm it published every meta's four
+  // locations into one flat map, so losing the cloud for a minute did not mean
+  // a slightly staler deck — it meant the scheduler's ordering was discarded
+  // entirely and the player went back to 484 locations drawn at random.
+  if (req.method === 'GET' && req.url.split('?')[0] === '/deck') {
     const catalogs = await loadCatalogs()
     if (catalogs.length === 0) {
       res.writeHead(503, { 'Content-Type': 'application/json' })
@@ -1084,43 +1089,37 @@ const server = createServer(async (req, res) => {
     }
     const state = await loadState()
     const now = new Date()
-    const deck = buildDeck(state.deckCards, toLadder(catalogs), { minNew: 5, minSize: 18 }, now)
+    const size = deckSizeFor(new URL(req.url, 'http://localhost').searchParams.get('n'))
+    const { customCoordinates, ranking, stats } = buildRankedDeck(
+      state.deckCards,
+      catalogs,
+      toLadder(catalogs),
+      size,
+      now,
+    )
 
-    // Up to 4 locations per chosen meta, so one or two games sweep the deck.
-    const byMap = new Map(catalogs.map((c) => [c.mapId, c]))
-    const usedPanos = new Set()
-    const customCoordinates = []
-    for (const m of deck.metas) {
-      const pool = (byMap.get(m.mapId)?.locations ?? []).filter(
-        (l) => metaKeyOf(l.country, l.metaName) === m.name && !usedPanos.has(l.panoId),
-      )
-      for (let i = pool.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1))
-        ;[pool[i], pool[j]] = [pool[j], pool[i]]
-      }
-      for (const loc of pool.slice(0, 4)) {
-        usedPanos.add(loc.panoId)
-        customCoordinates.push(loc)
-      }
-    }
-
-    // Padding metas sit at the tail of deck.metas; remember them so a correct
-    // answer there is not FSRS-graded (see the grading rule in handleRound).
-    const paddingNames = deck.metas.slice(deck.metas.length - deck.stats.padding).map((m) => m.name)
-    state.lastDeck = { ts: now.toISOString(), metas: deck.metas.map((m) => m.name), padding: paddingNames }
+    // Not-yet-due metas are this deck's padding: getting one right proves
+    // nothing FSRS did not already know, and handleRound's grading rule reads
+    // this list to leave them ungraded.
+    const paddingNames = ranking.filter((r) => r.kind === 'future').map((r) => r.name)
+    state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name), padding: paddingNames }
     await writeFile(STATE_PATH, JSON.stringify(state, null, 2))
 
+    const due = ranking.filter((r) => r.kind === 'due').length
+    const fresh = ranking.filter((r) => r.kind === 'new').length
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(
       JSON.stringify({
         trainerMapId: CONFIG.trainerMapId,
         customCoordinates,
-        summary: { due: deck.stats.due, introduced: deck.stats.introduced, unlockedTiers: deck.stats.unlockedTiers },
-        description: `Auto-generated spaced-repetition deck — ${deck.stats.due} due, ${deck.stats.introduced} new (${now.toISOString().slice(0, 16)})`,
+        summary: { due, introduced: fresh, unlockedTiers: stats.unlockedTiers },
+        ranking,
+        stats,
+        description: `Auto-generated spaced-repetition deck — ${due} due, ${fresh} new (${now.toISOString().slice(0, 16)})`,
       }),
     )
     console.log(
-      `[coach] deck: ${deck.metas.length} metas (${deck.stats.due} due, ${deck.stats.introduced} new, ${deck.stats.padding} padding), ${customCoordinates.length} locations`,
+      `[coach] deck: ${ranking.length} metas (${due} due, ${fresh} new, ${paddingNames.length} padding), ${customCoordinates.length} locations`,
     )
     return
   }

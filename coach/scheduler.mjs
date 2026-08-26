@@ -219,6 +219,153 @@ export function buildDeck(cards, catalog, opts = {}, now) {
 }
 
 /**
+ * How many never-seen metas a single published deck is allowed to introduce.
+ *
+ * This is a cap, not a ranking, and the distinction is the whole design. FSRS
+ * models forgetting for material already seen; it has no opinion at all about
+ * the rate at which new material should arrive, and asking a retrievability
+ * number to arbitrate that question is asking it something it cannot answer.
+ * Anki, which does answer it, keeps the two entirely separate: a hard daily cap
+ * on new cards (default 20) against a review limit (default 200), so new
+ * material is about 9% of the day's load and never competes with review on a
+ * shared priority scale.
+ *
+ * The reason a cap rather than a priority is that a new card is not one unit of
+ * work — the rule of thumb is that each one generates roughly ten future
+ * reviews. The introduction rate is the derivative of the review load, so
+ * letting it run free is exactly how a deck buries its owner a fortnight later.
+ * Cognitive-load and scaffolding research says the same thing from the other
+ * direction: material is absorbed gradually, against what is already known.
+ *
+ * And this domain sharpens it. A published deck is one five-round GeoGuessr
+ * game. A game of all-new metas is five near-certain misses with nothing known
+ * to contrast against — but most of the learning here is discrimination ("this
+ * is Estonia and NOT Latvia"), which only happens when known cards share the
+ * game. One new meta per deck is 20% new: ahead of Anki's ~9% default and of
+ * the player's own measured 8%, deliberately, because there is a real unseen
+ * backlog to work through — but still a game that is mostly answerable.
+ *
+ * This is the knob. Raise it to introduce faster; `Infinity` removes the cap
+ * entirely and restores the front-load-everything behaviour, where the unseen
+ * backlog is cleared before review resumes.
+ */
+export const DEFAULT_NEW_PER_DECK = 1
+
+/**
+ * Where an unseen meta sits within the deck it was admitted to.
+ *
+ * Not a knob — DEFAULT_NEW_PER_DECK is the knob, and by the time this number is
+ * used the cap has already decided how much new material exists. Zero is simply
+ * the honest reading of a card with no memory behind it, and it keeps the
+ * exposed `priority` monotonic across the returned list. Intra-deck order is
+ * cosmetic anyway: GeoGuessr draws the rounds of a game from the published map
+ * in its own order.
+ */
+const UNSEEN_PRIORITY = 0
+
+/**
+ * The offset that parks not-yet-due cards behind every card actually owed.
+ * Retrievability is a probability, so due priorities occupy [0, 1]; adding one
+ * puts filler in [1, 2], and no arithmetic accident can float a card the player
+ * does not owe above one they do.
+ */
+const FUTURE_PRIORITY_OFFSET = 1
+
+/**
+ * How many entries rankDeck hands back when the caller does not say.
+ *
+ * A GeoGuessr game is five rounds, so this is five games' worth: enough that a
+ * single sitting never runs off the end of the list, small enough that the tail
+ * of the queue — the 90%-recall cards and the not-yet-due filler — never
+ * reaches the published map at all. The Worker passes its own limit; this
+ * default exists so a script or a test can call rankDeck without inventing one.
+ */
+const DEFAULT_LIMIT = 25
+
+/**
+ * Ranks the whole ladder into one priority queue and returns the head of it.
+ *
+ * This is the just-in-time answer to what buildDeck could not do. buildDeck's
+ * careful retrievability ordering was thrown away the moment its metas were
+ * flattened into a single GeoGuessr custom map, because GeoGuessr draws from a
+ * map uniformly at random: a card at 55% recall and one at 92% had identical
+ * odds of coming up. Rebuilding the map at game creation with only the top
+ * entries is what makes an ordering mean anything, and rankDeck is that
+ * ordering.
+ *
+ * Three groups, concatenated, so the separation is structural rather than a
+ * numeric coincidence: unseen metas in ladder order (tier ascending, then
+ * catalog order, deduped at a meta's first and easiest appearance) but no more
+ * than `newLimit` of them, then due cards weakest-memory-first with the
+ * longest-overdue breaking ties, then not-yet-due cards on the same key. The
+ * third group is filler and behaves like it: it only appears when the caller
+ * asks for more entries than there is real work, and it can never displace the
+ * first two. `priority` is the key that produced the order, exposed so the
+ * Worker or a debugging view can see why a meta landed where it did.
+ *
+ * The unseen surplus is dropped, not demoted. An unseen meta that loses to the
+ * cap is simply not in this deck; parking it at the tail as filler would let
+ * material the player has never met push out review work that is genuinely
+ * owed, which is the thing the cap exists to prevent. `stats.newAvailable`
+ * reports how many were waiting, so the backlog stays visible rather than
+ * silently disappearing.
+ *
+ * The cap applies before `limit`, so the new slot survives a small deck: asking
+ * for one entry against a real backlog yields the new meta, not a review.
+ *
+ * Unlike buildDeck there is no minimum size and no padding to reach one: if the
+ * ladder yields three entries, three come back. Inventing filler to hit a
+ * number was always a lie about what the player owes, and a just-in-time map
+ * has no reason to tell it.
+ */
+export function rankDeck(cards, catalog, opts = {}, now) {
+  const limit = Math.max(0, opts?.limit ?? DEFAULT_LIMIT)
+  const newLimit = Math.max(0, opts?.newLimit ?? DEFAULT_NEW_PER_DECK)
+  const table = cards ?? {}
+  const entries = unlockedMetas(catalog ?? [], catalog?.length ?? 0)
+  const moment = now.getTime()
+
+  const unseen = []
+  const due = []
+  const future = []
+  for (const entry of entries) {
+    const card = table[entry.name]
+    if (!card) {
+      unseen.push({ ...entry, kind: 'new', priority: UNSEEN_PRIORITY })
+      continue
+    }
+    const retrievability = scheduler.get_retrievability(fromStored(card), now, false)
+    if (dueAt(card) <= moment) due.push({ ...entry, kind: 'due', priority: retrievability })
+    else future.push({ ...entry, kind: 'future', priority: FUTURE_PRIORITY_OFFSET + retrievability })
+  }
+
+  // Equal recall is broken by due date: the card that has been waiting longest
+  // is the one the schedule is furthest behind on.
+  const byPriority = (a, b) => a.priority - b.priority || dueAt(table[a.name]) - dueAt(table[b.name])
+  due.sort(byPriority)
+  future.sort(byPriority)
+
+  const metas = [...unseen.slice(0, newLimit), ...due, ...future]
+    .slice(0, limit)
+    .map(({ name, mapId, priority, kind }) => ({ name, mapId, priority, kind }))
+
+  // The counts describe what is being returned, the same as buildDeck's stats —
+  // except newAvailable, which is deliberately about what did not fit, since a
+  // capped backlog the player cannot see is a backlog they cannot decide about.
+  const counted = { new: 0, due: 0, future: 0 }
+  for (const meta of metas) counted[meta.kind] += 1
+  return {
+    metas,
+    stats: {
+      ...counted,
+      newAvailable: unseen.length,
+      total: metas.length,
+      unlockedTiers: unlockedTiers(table, catalog),
+    },
+  }
+}
+
+/**
  * Counts for the status widget, scoped to the unlocked ladder so the numbers
  * match the deck the player will actually be handed. nextDue looks strictly
  * forward — anything already owed is counted in `due`, so the useful remaining

@@ -3,8 +3,10 @@ import { fsrs, State } from 'ts-fsrs'
 import {
   buildDeck,
   deckSummary,
+  DEFAULT_NEW_PER_DECK,
   gradeRound,
   MASTERY_DAYS,
+  rankDeck,
   ratingNameFor,
   unlockedTiers,
 } from './scheduler.mjs'
@@ -391,6 +393,235 @@ describe('buildDeck: padding', () => {
     const withDefaults = buildDeck(cards, CATALOG, {}, T0)
     expect(withDefaults).toEqual(buildDeck(cards, CATALOG, { minNew: 5, minSize: 18 }, T0))
     expect(withDefaults.metas.length).toBe(15) // every card there is, still under 18
+  })
+})
+
+describe('rankDeck', () => {
+  const LADDER = [...T1, ...T2, ...T3]
+
+  /**
+   * Every meta already carried, none of them owed: due dates walk out from
+   * T0+1, so ascending catalog order is also ascending retrievability.
+   */
+  function fullTable(overrides = {}) {
+    const cards = {}
+    for (const [i, name] of LADDER.entries()) {
+      cards[name] = card({ due: plus(T0, i + 1).toISOString(), scheduledDays: 30, stability: 30 })
+    }
+    return { ...cards, ...overrides }
+  }
+
+  /** A catalog of `count` unseen metas, for testing the cap against a real backlog. */
+  const wideCatalog = (count) => [
+    {
+      mapId: 'lm-wide',
+      name: 'Wide',
+      tier: 1,
+      metas: Array.from({ length: count }, (_, i) => `meta ${i}`),
+    },
+  ]
+
+  const names = (deck) => deck.metas.map((m) => m.name)
+  const kinds = (deck) => deck.metas.map((m) => m.kind)
+
+  it('admits one unseen meta ahead of the review work, and drops the surplus', () => {
+    const cards = {
+      [T1[1]]: card({ due: plus(T0, -30).toISOString(), stability: 2, scheduledDays: 2 }),
+      [T2[0]]: card({ due: plus(T0, -10).toISOString(), stability: 5, scheduledDays: 5 }),
+    }
+    const deck = rankDeck(cards, CATALOG, { limit: 99 }, T0)
+
+    expect(names(deck)).toEqual([T1[0], T1[1], T2[0]]) // one new, then due by recall
+    expect(kinds(deck)).toEqual(['new', 'due', 'due'])
+    // the other twelve unseen metas are not filler at the tail — they are absent
+    expect(deck.stats).toEqual({
+      new: 1,
+      due: 2,
+      future: 0,
+      newAvailable: 13,
+      total: 3,
+      unlockedTiers: 1,
+    })
+  })
+
+  it('admits exactly one unseen meta by default, however deep the backlog', () => {
+    expect(DEFAULT_NEW_PER_DECK).toBe(1)
+    const deck = rankDeck({}, wideCatalog(100), { limit: 99 }, T0)
+    expect(deck.metas).toHaveLength(1)
+    expect(deck.metas[0]).toMatchObject({ name: 'meta 0', kind: 'new', priority: 0 })
+    expect(deck.stats).toMatchObject({ new: 1, newAvailable: 100, total: 1 })
+  })
+
+  it('returns pure review at newLimit 0, while still reporting the backlog', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: plus(T0, -1).toISOString(), stability: 6, scheduledDays: 6 }),
+    })
+    delete cards[T3[4]]
+    const deck = rankDeck(cards, CATALOG, { limit: 99, newLimit: 0 }, T0)
+
+    expect(kinds(deck)).not.toContain('new')
+    expect(names(deck)[0]).toBe(T1[0])
+    expect(deck.stats).toMatchObject({ new: 0, due: 1, newAvailable: 1 })
+  })
+
+  it('front-loads the whole unseen backlog at newLimit Infinity', () => {
+    const cards = {
+      [T1[1]]: card({ due: plus(T0, -30).toISOString(), stability: 2, scheduledDays: 2 }),
+      [T2[0]]: card({ due: plus(T0, -10).toISOString(), stability: 5, scheduledDays: 5 }),
+    }
+    const unseen = LADDER.filter((n) => !cards[n])
+    const deck = rankDeck(cards, CATALOG, { limit: 99, newLimit: Infinity }, T0)
+
+    expect(names(deck)).toEqual([...unseen, T1[1], T2[0]])
+    expect(kinds(deck)).toEqual([...unseen.map(() => 'new'), 'due', 'due'])
+    expect(deck.stats).toMatchObject({ new: 13, due: 2, newAvailable: 13, total: 15 })
+  })
+
+  it('reports the true backlog in newAvailable however small the deck', () => {
+    const deck = rankDeck({}, wideCatalog(40), { limit: 3, newLimit: 2 }, T0)
+    expect(deck.metas).toHaveLength(2) // the cap binds before the limit does
+    expect(deck.stats).toMatchObject({ new: 2, newAvailable: 40, total: 2 })
+  })
+
+  it('spends the new slot before any review, even on a one-entry deck', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: plus(T0, -9).toISOString(), stability: 4, scheduledDays: 4 }),
+      [T2[1]]: card({ due: plus(T0, -4).toISOString(), stability: 9, scheduledDays: 9 }),
+    })
+    delete cards[T3[4]]
+    const deck = rankDeck(cards, CATALOG, { limit: 1 }, T0)
+    expect(deck.metas).toHaveLength(1)
+    expect(deck.metas[0]).toMatchObject({ name: T3[4], kind: 'new' })
+    expect(deck.stats).toMatchObject({ new: 1, due: 0, newAvailable: 1, total: 1 })
+  })
+
+  it('orders due cards by retrievability, weakest memory first', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: '2026-02-27T00:00:00Z', stability: 40, scheduledDays: 40 }),
+      [T1[1]]: card({ due: '2026-02-01T00:00:00Z', stability: 10, scheduledDays: 10 }),
+      [T1[2]]: card({ due: '2026-02-28T00:00:00Z', stability: 3, scheduledDays: 3 }),
+    })
+    const deck = rankDeck(cards, CATALOG, { limit: 3 }, T0)
+    const recall = (name) => fsrs().get_retrievability(cards[name], T0, false)
+
+    expect(kinds(deck)).toEqual(['due', 'due', 'due'])
+    expect(names(deck)).toEqual([T1[1], T1[2], T1[0]])
+    expect(deck.metas.map((m) => m.priority)).toEqual(names(deck).map(recall))
+  })
+
+  it('breaks equal recall toward the card that has waited longest', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: T0.toISOString(), stability: 10, scheduledDays: 10 }),
+      [T1[1]]: card({ due: plus(T0, -20).toISOString(), stability: 10, scheduledDays: 10 }),
+    })
+    const deck = rankDeck(cards, CATALOG, { limit: 2 }, T0)
+    expect(names(deck)).toEqual([T1[1], T1[0]])
+  })
+
+  it('holds not-yet-due cards behind every due one, and only when asked for extra', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: plus(T0, -1).toISOString(), scheduledDays: 30, stability: 30 }),
+    })
+    const owed = rankDeck(cards, CATALOG, { limit: 1 }, T0)
+    expect(names(owed)).toEqual([T1[0]])
+    expect(owed.stats).toMatchObject({ new: 0, due: 1, future: 0, newAvailable: 0, total: 1 })
+
+    const padded = rankDeck(cards, CATALOG, { limit: 4 }, T0)
+    expect(kinds(padded)).toEqual(['due', 'future', 'future', 'future'])
+    expect(names(padded)).toEqual([T1[0], T1[1], T1[2], T1[3]])
+    expect(padded.stats).toMatchObject({ due: 1, future: 3, total: 4 })
+  })
+
+  it('returns future cards rather than nothing when the whole ladder is ahead', () => {
+    const deck = rankDeck(fullTable(), CATALOG, { limit: 3 }, T0)
+    expect(deck.metas).toHaveLength(3)
+    expect(kinds(deck)).toEqual(['future', 'future', 'future'])
+    expect(names(deck)).toEqual([T1[0], T1[1], T1[2]])
+    expect(deck.stats).toMatchObject({ new: 0, due: 0, future: 3, newAvailable: 0, total: 3 })
+  })
+
+  it('keeps priority ascending across all three groups', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: plus(T0, -9).toISOString(), stability: 4, scheduledDays: 4 }),
+      [T2[0]]: card({ due: plus(T0, -2).toISOString(), stability: 20, scheduledDays: 20 }),
+    })
+    delete cards[T3[0]] // one unseen meta to head the queue
+    const deck = rankDeck(cards, CATALOG, { limit: 99 }, T0)
+    const priorities = deck.metas.map((m) => m.priority)
+
+    expect(kinds(deck)[0]).toBe('new')
+    expect(priorities[0]).toBe(0)
+    expect(priorities).toEqual([...priorities].sort((a, b) => a - b))
+  })
+
+  it('truncates at limit without reordering', () => {
+    const cards = fullTable({
+      [T1[0]]: card({ due: plus(T0, -1).toISOString(), stability: 6, scheduledDays: 6 }),
+      [T2[1]]: card({ due: plus(T0, -4).toISOString(), stability: 9, scheduledDays: 9 }),
+    })
+    delete cards[T3[4]]
+    const whole = rankDeck(cards, CATALOG, { limit: 99 }, T0)
+    for (const size of [0, 1, 4, 9]) {
+      const cut = rankDeck(cards, CATALOG, { limit: size }, T0)
+      expect(cut.metas).toEqual(whole.metas.slice(0, size))
+      expect(cut.stats.total).toBe(size)
+      expect(cut.stats.newAvailable).toBe(whole.stats.newAvailable)
+    }
+  })
+
+  it('returns pure new material from an empty card table, one meta of it', () => {
+    const deck = rankDeck({}, CATALOG, { limit: 99 }, T0)
+    expect(deck.metas).toEqual([{ name: T1[0], mapId: 'lm-tier1', priority: 0, kind: 'new' }])
+    expect(deck.stats).toEqual({
+      new: 1,
+      due: 0,
+      future: 0,
+      newAvailable: 15,
+      total: 1,
+      unlockedTiers: 1,
+    })
+  })
+
+  it('never pads to a minimum: three entries available means three returned', () => {
+    const small = [{ mapId: 'lm-tiny', name: 'Tiny', tier: 1, metas: T1.slice(0, 3) }]
+    const deck = rankDeck({}, small, { limit: 25, newLimit: Infinity }, T0)
+    expect(deck.metas).toHaveLength(3)
+    expect(deck.stats.total).toBe(3)
+  })
+
+  it('lists a meta once when it appears on two maps, at its easiest', () => {
+    const shared = T1[0]
+    const catalog = [CATALOG[0], { ...CATALOG[1], metas: [shared, ...T2] }]
+    const cards = { ...mastered(T1, 5, { due: plus(T0, -3).toISOString() }) }
+    const deck = rankDeck(cards, catalog, { limit: 99, newLimit: Infinity }, T0)
+
+    expect(names(deck).filter((n) => n === shared)).toHaveLength(1)
+    expect(new Set(names(deck)).size).toBe(deck.metas.length)
+    expect(deck.metas.find((m) => m.name === shared).mapId).toBe('lm-tier1')
+  })
+
+  it('defaults to five games worth of locations', () => {
+    const cards = {}
+    for (const [i, name] of wideCatalog(40)[0].metas.entries()) {
+      cards[name] = card({ due: plus(T0, i + 1).toISOString(), scheduledDays: 30, stability: 30 })
+    }
+    const deck = rankDeck(cards, wideCatalog(40), {}, T0)
+    expect(deck.metas).toHaveLength(25)
+    expect(deck).toEqual(rankDeck(cards, wideCatalog(40), { limit: 25 }, T0))
+  })
+
+  it('reads state without writing it', () => {
+    const cards = fullTable({ [T1[0]]: card({ due: plus(T0, -1).toISOString() }) })
+    const snapshot = structuredClone(cards)
+    rankDeck(cards, CATALOG, { limit: 99 }, T0)
+    expect(cards).toEqual(snapshot)
+  })
+
+  it('survives an empty catalog', () => {
+    expect(rankDeck({}, [], {}, T0)).toEqual({
+      metas: [],
+      stats: { new: 0, due: 0, future: 0, newAvailable: 0, total: 0, unlockedTiers: 1 },
+    })
   })
 })
 
