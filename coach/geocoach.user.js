@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.19.0
+// @version      2.20.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -25,9 +25,22 @@
   const CLOUD = CLOUD_URL.startsWith('http') ? { url: CLOUD_URL, token: CLOUD_TOKEN } : null
   const AUTH_HEADERS = CLOUD ? { Authorization: 'Bearer ' + CLOUD.token } : {}
   const LOCAL = 'http://127.0.0.1:5177'
-  const COACH_URL = (CLOUD ? CLOUD.url : LOCAL) + '/round'
-  const RATE_URL = (CLOUD ? CLOUD.url : LOCAL) + '/rate'
-  const PREWARM_URL = (CLOUD ? CLOUD.url : LOCAL) + '/prewarm'
+  // The LAN server is a development convenience now, not part of playing: the
+  // Worker answers every route it answers, and the coaching tools rebuild a
+  // round's imagery from Google on demand rather than from anything the laptop
+  // hoarded. What it still buys is a body reloaded straight off disk.
+  //
+  // So it is asked only when it costs nothing to ask: on the Mac itself, where
+  // the address is loopback and a sleeping server refuses instantly. Installed
+  // over the LAN onto the gaming PC that address is a real host two rooms away,
+  // and every leg to it waits out a timeout on a machine that is usually
+  // asleep. There, with a cloud configured, the cloud is simply the server —
+  // and with no cloud configured it is the only server, loopback or not.
+  const LAN = !CLOUD || /^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(LOCAL) ? LOCAL : null
+  const HOME = CLOUD ? CLOUD.url : LOCAL
+  const COACH_URL = HOME + '/round'
+  const RATE_URL = HOME + '/rate'
+  const PREWARM_URL = HOME + '/prewarm'
 
   // Timing trace for the guess→card path. Cheap, permanent: reading the
   // timeline is how latency regressions get caught. Mirrored onto <html
@@ -62,16 +75,18 @@
     const body = JSON.stringify({ lines })
     // Same transport split as post(): GM for the http LAN server (an https
     // page can't reach it with fetch), page-context fetch for the https cloud.
-    if (typeof GM_xmlhttpRequest === 'function') {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: LOCAL + '/tlog',
-        headers: { 'Content-Type': 'application/json' },
-        data: body,
-        timeout: 15000,
-      })
-    } else {
-      fetch(LOCAL + '/tlog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {})
+    if (LAN) {
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: LAN + '/tlog',
+          headers: { 'Content-Type': 'application/json' },
+          data: body,
+          timeout: 15000,
+        })
+      } else {
+        fetch(LAN + '/tlog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {})
+      }
     }
     if (!CLOUD) return
     // Only the cloud leg is worth retrying — it is the copy we read remotely.
@@ -102,31 +117,8 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.19.0'
+  const BODY_VERSION = '2.20.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
-
-  /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
-   * server still gets every round so pano dossiers keep building at home.
-   * Fire-and-forget — away from the Mac this fails silently, and its card
-   * and grading are ignored (the cloud response drives the UI). */
-  function postLocalDossier(body) {
-    if (!CLOUD) return
-    if (typeof GM_xmlhttpRequest === 'function') {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: LOCAL + '/round',
-        headers: { 'Content-Type': 'application/json' },
-        data: body,
-        timeout: 30000,
-      })
-    } else {
-      fetch(LOCAL + '/round', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      }).catch(() => {})
-    }
-  }
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
    * posts there is no game-state backstop, so a transient LAN blip would lose
@@ -188,15 +180,15 @@
   // feature and behaved like one — the rounds that *did* draw that evening were
   // drawing out of localStorage, not off a server. The Worker holds the same
   // packs and answers the same two routes with the same JSON, so the machine
-  // that is always awake is the one asked first. The laptop stays on the list
-  // as the fallback, which is a real job: it catches a Worker that is down, and
-  // it holds shapes the Worker may not have yet while the packs are rebuilt.
-  const GEO_SOURCES = CLOUD
-    ? [
-        { base: CLOUD.url, name: 'cloud' },
-        { base: LOCAL, name: 'laptop' },
-      ]
-    : [{ base: LOCAL, name: 'laptop' }]
+  // that is always awake is the one asked first. The laptop follows it only
+  // where it is loopback (see LAN): there the fallback is free and still a real
+  // job — it catches a Worker that is down and holds shapes the Worker may not
+  // have yet while the packs rebuild. Reached over the LAN it is neither, just
+  // a timeout in front of the overlay.
+  const GEO_SOURCES = [
+    ...(CLOUD ? [{ base: CLOUD.url, name: 'cloud' }] : []),
+    ...(LAN ? [{ base: LAN, name: 'laptop' }] : []),
+  ]
 
   /** One GET, one machine, parsed JSON out.
    *
@@ -211,7 +203,7 @@
    * the page is https; the plain-fetch branch only exists for a direct install
    * with no GM grant, where that leg is blocked by the browser anyway. */
   function serverGet(path, opts) {
-    const { base = CLOUD ? CLOUD.url : LOCAL, timeout = 60000, retry = 0 } = opts || {}
+    const { base = HOME, timeout = 60000, retry = 0 } = opts || {}
     const url = base + path
     return new Promise((resolve, reject) => {
       const parsed = (text) => {
@@ -288,8 +280,8 @@
   // own result map puts that claim right next to where the guess landed.
   //
   // The geometry comes from whichever coach server answers first (see
-  // GEO_SOURCES: the cloud, then the laptop). A sleeping Mac used to mean no
-  // overlay at all; now it only means the second-choice machine is out. Every
+  // GEO_SOURCES: the cloud, then the laptop where it is free to ask). A sleeping
+  // Mac used to mean no overlay at all; now it does not come up. Every
   // failure below is still silent and total — no overlay, no exception, card
   // untouched — but a *total* failure now names both machines and the reason
   // each gave, because "server unreachable" on its own says nothing about
@@ -1579,7 +1571,6 @@
     const tPost = Date.now()
     tlog('post ' + key + ' → ' + COACH_URL)
     const body = JSON.stringify(payload)
-    postLocalDossier(body)
     // Success is silent — the card (or its absence) is the signal. Only
     // failures toast, since those need acting on.
     const accepted = (j) => {
@@ -2377,7 +2368,7 @@
    * Fire-and-forget with one silent retry: losing this only costs a duplicate
    * map next rebuild, so it never interrupts the user. */
   function registerTrainerMap(mapId) {
-    const url = (CLOUD ? CLOUD.url : LOCAL) + '/trainer-map'
+    const url = HOME + '/trainer-map'
     const body = JSON.stringify({ mapId })
     const attempt = (retriesLeft) => {
       const failed = (message) => {

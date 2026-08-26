@@ -243,6 +243,8 @@ function makeEnv({
   const api = new Function(
     'W',
     'LOCAL',
+    'LAN',
+    'HOME',
     'CLOUD',
     'AUTH_HEADERS',
     'tlog',
@@ -257,6 +259,10 @@ function makeEnv({
   )(
     W,
     LOCAL,
+    // The body only keeps the laptop where the address is loopback; the test
+    // LOCAL is, so both shapes stay reachable here.
+    LOCAL,
+    CLOUD ? CLOUD.url : LOCAL,
     CLOUD,
     CLOUD ? { Authorization: 'Bearer ' + CLOUD.token } : {},
     (line) => tlogLines.push(line),
@@ -545,6 +551,48 @@ describe('loader game-creation hold', () => {
     W.fetch(CREATE, { method: 'POST' })
     await vi.advanceTimersByTimeAsync(0)
     expect(fetched).toHaveLength(1)
+  })
+})
+
+/** The loader as each host actually serves it: the Worker stamps the cloud in
+ * and leaves the loopback address alone, while the LAN server also rewrites
+ * that address to its own hostname so a remote install can reach it. */
+function loaderSources(stamp) {
+  let src = loaderSrc
+  if (stamp.cloud) src = src.replace("'__CLOUD_URL__'", JSON.stringify(CLOUD_BASE)).replace("'__CLOUD_TOKEN__'", '"tok"')
+  if (stamp.host) src = src.replaceAll('127.0.0.1:5177', stamp.host)
+  const asked = []
+  const W = { google: {}, fetch() {} }
+  new Function('unsafeWindow', 'GM_xmlhttpRequest', 'console', src)(
+    W,
+    (req) => asked.push(req),
+    { log() {}, warn() {}, error() {} },
+  )
+  return asked
+}
+
+describe('loader body sources', () => {
+  // The laptop serves the body off disk, so an edit is live without a deploy —
+  // worth asking for where asking is free. Over the LAN it is a sleeping Mac in
+  // front of every page load, which is the whole reason for the loopback test.
+  it('asks the laptop alone when no cloud is configured', () => {
+    const asked = loaderSources({})
+    expect(asked).toHaveLength(1)
+    expect(asked[0].url).toContain('127.0.0.1:5177')
+  })
+
+  it('keeps the laptop first on the machine serving it, cloud behind', () => {
+    const asked = loaderSources({ cloud: true })
+    expect(asked[0].url).toContain('127.0.0.1:5177')
+    expect(asked[0].timeout).toBe(1500)
+  })
+
+  it('skips a laptop that is a whole other machine away', () => {
+    const asked = loaderSources({ cloud: true, host: 'macbook.local:5177' })
+    expect(asked).toHaveLength(1)
+    expect(asked[0].url.startsWith(CLOUD_BASE)).toBe(true)
+    // Nothing in front of it means nothing to hurry past, either.
+    expect(asked[0].timeout).toBe(10000)
   })
 })
 

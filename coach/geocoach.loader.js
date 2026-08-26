@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Loader: fetches the current GeoCoach script on every page load, so script changes never need a Tampermonkey reinstall.
-// @version      3.6.0
+// @version      3.7.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -258,9 +258,18 @@
   const LOCAL = 'http://127.0.0.1:5177'
   const CLOUD_URL = '__CLOUD_URL__'
   const CLOUD_TOKEN = '__CLOUD_TOKEN__'
-  const sources = [LOCAL + '/geocoach.body.js?t=' + Date.now()]
-  if (CLOUD_URL.startsWith('http'))
-    sources.push(CLOUD_URL + '/geocoach.body.js?token=' + encodeURIComponent(CLOUD_TOKEN) + '&t=' + Date.now())
+  const cloud = CLOUD_URL.startsWith('http')
+  // The laptop is asked first because it serves the body straight off disk, so
+  // an edit is live on the next page load with nothing to deploy. That is worth
+  // a probe only where the probe is free: on the Mac the address is loopback
+  // and a stopped server refuses in microseconds. Installed over the LAN onto
+  // the gaming PC it is a real host that is usually asleep, and the probe
+  // becomes a second and a half of nothing in front of every single page. With
+  // a cloud configured, that install goes straight to the cloud.
+  const nearby = /^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(LOCAL)
+  const sources = []
+  if (nearby || !cloud) sources.push(LOCAL + '/geocoach.body.js?t=' + Date.now())
+  if (cloud) sources.push(CLOUD_URL + '/geocoach.body.js?token=' + encodeURIComponent(CLOUD_TOKEN) + '&t=' + Date.now())
 
   const run = (code) => {
     try {
@@ -279,7 +288,7 @@
     GM_xmlhttpRequest({
       method: 'GET',
       url: sources[i],
-      timeout: i === 0 ? 1500 : 10000,
+      timeout: i === 0 && sources.length > 1 ? 1500 : 10000,
       onload: (r) => (r.status === 200 && r.responseText ? run(r.responseText) : tryNext(i + 1)),
       onerror: () => tryNext(i + 1),
       ontimeout: () => tryNext(i + 1),
