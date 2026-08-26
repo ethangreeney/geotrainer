@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.17.0
+// @version      2.18.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.17.0'
+  const BODY_VERSION = '2.18.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -1373,6 +1373,30 @@
       good: 'Recalled it with a bit of thought — the normal interval',
       easy: 'Knew it instantly — waits much longer before returning',
     }
+    // The first time a meta lands and the pin is right, the pre-selected Easy
+    // is a guess about the player, not a measurement: getting the country off
+    // the language and the landscape says nothing about whether the clue this
+    // location was chosen for was ever looked at. Left alone, that round marks
+    // the meta known and pushes it past mastery in one go. So on first sight
+    // the four grades — which are asking a question about recall that has no
+    // answer yet — give way to the one question that does: did you use it?
+    //
+    // The two answers are the two ends of the same row, so nothing else here
+    // changes: "no" is Again, which rewinds the grade and replays it as a
+    // brand-new card that was failed, and comes back inside the hour like any
+    // other lapse. Doing nothing still leaves Easy selected, exactly as
+    // before — the question is here to be hard to miss, not to make a fast
+    // ramp through material the player already knows any slower.
+    const asking = !!card.firstSight
+    const ASK_TIP = {
+      again: 'The clue went unread — it starts learning now and comes back within minutes',
+      easy: 'You already knew this meta — it starts at a long interval',
+    }
+    const RATE_KEYS = asking ? ['again', 'easy'] : ['again', 'hard', 'good', 'easy']
+    const RATE_TEXT = asking
+      ? { again: "No, I didn't", easy: 'Yes, I knew it' }
+      : { again: 'Again', hard: 'Hard', good: 'Good', easy: 'Easy' }
+    const RATE_TITLE = asking ? ASK_TIP : RATE_TIP
     const foot = document.createElement('div')
     foot.style.cssText = 'flex:0 0 auto'
     foot.innerHTML =
@@ -1381,12 +1405,10 @@
           // The ⓘ advertises the button tooltips (and carries one itself) —
           // without it there's no hint that hovering a grade explains it.
           `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 2px 7px">` +
-          `<span style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:rgba(232,228,246,.42)">Rate your recall</span>` +
-          `<span title="Hover any grade to see what it means for your review schedule" style="cursor:help;font-size:9px;font-weight:700;font-style:italic;font-family:Georgia,serif;color:rgba(232,228,246,.5);border:1px solid rgba(232,228,246,.32);border-radius:999px;width:13px;height:13px;line-height:11px;text-align:center;user-select:none">i</span></div>` +
+          `<span style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${asking ? '#ffc76e' : 'rgba(232,228,246,.42)'}">${asking ? 'Did you use this clue?' : 'Rate your recall'}</span>` +
+          `<span title="Hover either answer to see what it means for your review schedule" style="cursor:help;font-size:9px;font-weight:700;font-style:italic;font-family:Georgia,serif;color:rgba(232,228,246,.5);border:1px solid rgba(232,228,246,.32);border-radius:999px;width:13px;height:13px;line-height:11px;text-align:center;user-select:none">i</span></div>` +
           `<div style="display:flex;gap:7px">` +
-          ['again', 'hard', 'good', 'easy']
-            .map((r) => `<button data-rate="${r}" title="${RATE_TIP[r]}">${r[0].toUpperCase() + r.slice(1)}</button>`)
-            .join('') +
+          RATE_KEYS.map((r) => `<button data-rate="${r}" title="${RATE_TITLE[r]}">${RATE_TEXT[r]}</button>`).join('') +
           `</div></div>`
         : '') +
       (url
@@ -1423,7 +1445,7 @@
           const [top, bot, ink] = RATE_STYLE[b.dataset.rate]
           b.style.cssText =
             'flex:1;padding:8px 0;border:0;border-radius:10px;font:700 11px/1 system-ui;' +
-            'letter-spacing:.03em;cursor:pointer;user-select:none;transition:all .15s ease;' +
+            'letter-spacing:.03em;cursor:pointer;user-select:none;transition:all .15s ease;white-space:nowrap;' +
             (on
               ? `background:linear-gradient(180deg,${top},${bot});color:${ink};transform:translateY(-1px);` +
                 'box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 3px 8px rgba(5,0,25,.5),0 1px 2px rgba(5,0,25,.4)'

@@ -696,9 +696,21 @@ async function handleRound(payload) {
   // Per-meta mastery: consecutive cold hits are what earn a meta its way OFF
   // the personal map. One miss resets the streak.
   let inferredRating = null
+  let firstSight = false
   if (round.metaName) {
     const isPadding = !!state.lastDeck?.padding?.includes(round.metaName)
     inferredRating = ratingNameFor(correctScope, !state.deckCards[round.metaName])
+  // A first-sight meta answered correctly is the one grade this system has to
+  // guess at. Everything else is measured: you either recalled a card that was
+  // already in the deck or you didn't. But the first time a meta is served,
+  // "correct" only says the pin landed in the right place — it does not say
+  // you read the clue the location was chosen for. Get Ecuador off the Spanish
+  // and the mountains, never look at the truck, and the truck meta is marked
+  // known and pushed eight days out on the strength of a round it was never
+  // tested in. So the card asks, instead of assuming, and this flag is what
+  // tells it to. Padding rounds are excluded because a correct one is not
+  // graded at all — there is nothing to ask about.
+    firstSight = !state.deckCards[round.metaName] && correctScope && !isPadding
     // Snapshot the pre-grade state so a rating-button tap can redo this grade.
     rememberSnapshot(id, {
       metaName: round.metaName,
@@ -793,6 +805,7 @@ async function handleRound(payload) {
             // id to override it against. Absent when the round wasn't gradeable.
             roundId: round.metaName ? id : null,
             rating: inferredRating,
+            firstSight,
           }
         : null,
   }

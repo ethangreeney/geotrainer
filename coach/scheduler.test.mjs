@@ -152,6 +152,18 @@ describe('gradeRound', () => {
     expect(firstSight.stability).toBeGreaterThan(asRepeat.stability)
   })
 
+  it('sends a first sight the player did not actually read back into learning', () => {
+    // The card asks "did you use this clue?" the first time a meta lands and
+    // the pin is right, because "correct" there says nothing about whether the
+    // clue was read. Answering no has to mean what Again means anywhere else:
+    // not a shorter interval, not a softer one — an unlearnt card, due now.
+    const assumed = drill({}, T1[0], true, T0)[T1[0]] // left alone: prior knowledge
+    const answered = gradeRound({}, { metaName: T1[0], rating: 'again', correct: false }, T0)[T1[0]]
+    expect(at(assumed.due).getTime() - T0.getTime()).toBeGreaterThan(7 * DAY)
+    expect(at(answered.due).getTime() - T0.getTime()).toBeLessThan(60 * 60 * 1000)
+    expect(answered.state).toBe(1) // learning, not review
+  })
+
   it('lets an explicit rating override the inferred one', () => {
     let base = drill({}, T1[0], true, T0)
     const now = at(base[T1[0]].due)

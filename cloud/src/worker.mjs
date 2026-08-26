@@ -925,9 +925,21 @@ async function handleRound(env, user, payload, ctx) {
 
   let inferredRating = null
   let snapshot = null
+  let firstSight = false
   if (metaName) {
     const isPadding = !!state.lastDeck?.padding?.includes(metaName)
     inferredRating = ratingNameFor(correctScope, !state.deckCards[metaName])
+  // A first-sight meta answered correctly is the one grade this system has to
+  // guess at. Everything else is measured: you either recalled a card that was
+  // already in the deck or you didn't. But the first time a meta is served,
+  // "correct" only says the pin landed in the right place — it does not say
+  // you read the clue the location was chosen for. Get Ecuador off the Spanish
+  // and the mountains, never look at the truck, and the truck meta is marked
+  // known and pushed eight days out on the strength of a round it was never
+  // tested in. So the card asks, instead of assuming, and this flag is what
+  // tells it to. Padding rounds are excluded because a correct one is not
+  // graded at all — there is nothing to ask about.
+    firstSight = !state.deckCards[metaName] && correctScope && !isPadding
     snapshot = {
       metaName,
       ts: round.ts,
@@ -991,6 +1003,7 @@ async function handleRound(env, user, payload, ctx) {
             footer: meta.footer ?? null,
             roundId: metaName ? id : null,
             rating: inferredRating,
+            firstSight,
           }
         : null,
   }
