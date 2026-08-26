@@ -15,12 +15,20 @@ the dossier from the cloud, rebuilds the imagery from Google's tile CDN into
 the user's standing patterns, a country-facts differential, and the Plonk It
 clues that separate the true country from the guessed one.
 
-Read the `view_front/right/back/left.jpg` it names — rectilinear views, the
-round as the player saw it (front = the way the camera car faced). `pano.jpg`
-is the 360° overview; `pano_<row>_<col>.jpg` tiles carry native detail. For a
-close-up of one thing (a sign, a plate, road lines):
-`node coach/look.mjs <id> <yaw> [pitch] [fov]` — fov below 45 fetches sharper
-zoom-5 imagery for just that sector.
+Then **always** run `node coach/look.mjs <id> --scan` and read all eight frames
+it prints in one pass. The `view_front/right/back/left.jpg` the brief writes are
+100° wide — about sixteen pixels per degree — which is too coarse to resolve the
+thing that usually decides the round: the holes in a holey pole, a bollard's
+stripe, a plate. Judging a round off the four wide views alone has already
+produced a confidently wrong answer. The scan rings the round in eight
+overlapping 50° frames at eye level, at twice that detail, so nothing has to be
+guessed at before it is seen.
+
+`pano.jpg` is the 360° overview; `pano_<row>_<col>.jpg` tiles carry native
+detail. To go closer still on one thing:
+`node coach/look.mjs <id> <yaw> [pitch] [fov]`. Aim at or below the horizon —
+pole shafts, signposts and road lines all live there, and a positive pitch looks
+straight past them.
 
 For the wider question — "what else could this have been?" — `node coach/clues.mjs`
 slices all 140 guides by clue type across countries: `bollard`, `pole white top`,

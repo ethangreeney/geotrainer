@@ -178,12 +178,15 @@ async function call(path, { headers = {}, state = null, rounds = [], assets = nu
   )
   const buf = new Uint8Array(await res.arrayBuffer())
   const encoding = res.headers.get('Content-Encoding')
-  // The gzip path has to be decoded to be asserted on, and decoding it is also
-  // the only real proof the bytes are gzip rather than a mislabelled body.
+  // Decoded only if the Worker says it encoded, which it no longer does for
+  // anything. Reading the first byte rather than trusting the header is the
+  // point: a body that starts 0x1f 0x8b is gzip whatever the header claims,
+  // and a mismatch between the two is the exact fault this file now guards.
   const text =
     encoding === 'gzip'
       ? await new Response(new Response(buf).body.pipeThrough(new DecompressionStream('gzip'))).text()
       : new TextDecoder().decode(buf)
+  const gzipMagic = buf[0] === 0x1f && buf[1] === 0x8b
   let body = null
   try {
     body = JSON.parse(text)
@@ -191,6 +194,7 @@ async function call(path, { headers = {}, state = null, rounds = [], assets = nu
   return {
     status: res.status,
     encoding,
+    gzipMagic,
     bytes: buf.length,
     contentType: res.headers.get('Content-Type'),
     // Opt-in: most of these responses are geometry, and shipping megabytes of
@@ -480,13 +484,21 @@ describe('GET /api/scope-geo', () => {
     expect(R.optionsPreflight.cors.headers).toContain('Authorization')
   })
 
-  it('gzips when asked and not when not, and says the body varies by it', () => {
-    expect(R.country.encoding).toBe('gzip')
-    expect(R.countryPlain.encoding).toBe(null)
-    // Both decoded to the same outline in the child, so the gzip body is real
-    // gzip of the real answer rather than a mislabelled one.
+  it('never compresses the body itself, however the client asks', () => {
+    // The Worker used to gzip these and set Content-Encoding, and Cloudflare
+    // then gzipped the result again under that one header. The browser decoded
+    // once, got gzip bytes labelled JSON, and every region overlay silently
+    // stopped drawing unless the LAN server was awake to answer instead.
+    // Compression belongs to the edge; this asserts the Worker has stopped
+    // competing with it, by the header and by the bytes.
+    for (const r of [R.country, R.countryPlain]) {
+      expect(r.encoding).toBe(null)
+      expect(r.gzipMagic).toBe(false)
+    }
+    // Asking for gzip must not change the answer, only how the edge ships it.
     expect(R.country.geometry).toEqual(R.countryPlain.geometry)
-    expect(R.country.bytes).toBeLessThan(R.countryPlain.bytes)
+    expect(R.country.bytes).toBe(R.countryPlain.bytes)
+    // Still varies by it, because the edge's own encoding does.
     expect(R.country.vary).toBe('Accept-Encoding')
   })
 

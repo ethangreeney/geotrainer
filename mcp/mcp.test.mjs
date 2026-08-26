@@ -21,6 +21,7 @@ afterEach(() => {
 describe('the not-set-up cases', () => {
   it('names the place to get a token when there is none', () => {
     vi.stubEnv('GEOCOACH_TOKEN', '')
+    vi.stubEnv('GEOCOACH_CONFIG', '/nowhere/config.json') // not on the author's own laptop
     expect(() => token()).toThrow(Actionable)
     expect(() => token()).toThrow(/geofsrs\.pages\.dev/)
     expect(() => token()).toThrow(/GEOCOACH_TOKEN/)
@@ -31,10 +32,29 @@ describe('the not-set-up cases', () => {
     expect(token()).toBe('abc123')
   })
 
+  // The point of the file is that the secret never has to be pasted into an MCP
+  // config or a command line, where it would outlive the setup in a dotfile
+  // backup and show up in every ps listing of the running server.
+  it('reads the token from a file when one is named', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'gc-token-'))
+    const file = join(dir, 'token')
+    await writeFile(file, 'from-a-file\n')
+    vi.stubEnv('GEOCOACH_TOKEN', '')
+    vi.stubEnv('GEOCOACH_TOKEN_FILE', file)
+    expect(token()).toBe('from-a-file')
+  })
+
+  it('says which file it could not read rather than falling through', () => {
+    vi.stubEnv('GEOCOACH_TOKEN', '')
+    vi.stubEnv('GEOCOACH_TOKEN_FILE', '/nowhere/token')
+    expect(() => token()).toThrow(/nowhere\/token/)
+  })
+
   // A missing token used to surface as "network error": token() throws from
   // inside the same try that wraps fetch, and the catch relabelled it.
   it('does not disguise a missing token as a network failure', async () => {
     vi.stubEnv('GEOCOACH_TOKEN', '')
+    vi.stubEnv('GEOCOACH_CONFIG', '/nowhere/config.json')
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('should never be called') }))
     await expect(cloud.history()).rejects.toThrow(/Sign in at|No GeoCoach token/)
     expect(globalThis.fetch).not.toHaveBeenCalled()

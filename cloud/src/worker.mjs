@@ -1104,22 +1104,29 @@ const json = (obj, status = 200) =>
  * cache that missed that would hand a gzipped body to a client that asked for
  * plain bytes.
  */
-async function gzipJson(request, obj, status = 200, cacheControl = 'no-store') {
-  const body = new TextEncoder().encode(JSON.stringify(obj))
-  const headers = {
-    'Content-Type': 'application/json',
-    'Cache-Control': cacheControl,
-    Vary: 'Accept-Encoding',
-    ...CORS,
-  }
-  if (!/\bgzip\b/i.test(request.headers.get('Accept-Encoding') ?? ''))
-    return new Response(body, { status, headers })
-  // Buffered rather than streamed so Content-Length is known: these responses
-  // are meant to sit in a cache, and a cache would rather not guess at a size.
-  const packed = await new Response(
-    new Response(body).body.pipeThrough(new CompressionStream('gzip')),
-  ).arrayBuffer()
-  return new Response(packed, { status, headers: { ...headers, 'Content-Encoding': 'gzip' } })
+function cachedJson(obj, status = 200, cacheControl = 'no-store') {
+  // These bodies are geometry and compress ten to one, but the compressing is
+  // Cloudflare's job and not this Worker's. It used to be done here — gzip the
+  // bytes, set Content-Encoding, hand it over — and the edge then compressed
+  // the already-compressed body a second time while leaving the single header
+  // in place. A browser decodes once, exactly as the header instructs, and is
+  // left holding gzip bytes it was told were JSON. The parse fails, the
+  // userscript reads a working server as unusable and moves to the next one,
+  // and the overlay draws only if the laptop happens to be awake to answer.
+  // Nothing local reproduced it: the tests call this module directly, so the
+  // second compression never happened, and the LAN server never compressed at
+  // all. Shipping plain JSON and letting the edge negotiate its own encoding
+  // is both smaller on the wire and the only version that cannot disagree
+  // with its own header.
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': cacheControl,
+      Vary: 'Accept-Encoding',
+      ...CORS,
+    },
+  })
 }
 
 /** Token-gated routes. Everything else belongs to the static site, so /start
@@ -1346,7 +1353,7 @@ export default {
       if (request.method === 'GET' && path === '/api/scope-geo') {
         const country = (url.searchParams.get('country') ?? '').trim()
         if (!/^[A-Za-z]{2}$/.test(country))
-          return gzipJson(request, { ok: false, error: 'country must be an ISO 3166-1 alpha-2 code' }, 400)
+          return cachedJson({ ok: false, error: 'country must be an ISO 3166-1 alpha-2 code' }, 400)
         const regions = (url.searchParams.get('regions') ?? '')
           .split('|')
           .map((s) => s.trim())
@@ -1361,7 +1368,7 @@ export default {
         // shape is good for the day at the edge and in the browser alike. A
         // miss is not cached at all: a country that gains a boundary in the
         // next pack build should draw the moment that build ships.
-        return gzipJson(request, body, status, status === 200 ? 'public, max-age=86400, s-maxage=86400' : 'no-store')
+        return cachedJson(body, status, status === 200 ? 'public, max-age=86400, s-maxage=86400' : 'no-store')
       }
 
       // The same scope the card will eventually carry, named a whole guess
@@ -1374,8 +1381,7 @@ export default {
         // A hit is a fact about a bundled catalog and cannot change until the
         // next deploy, so it caches; a miss might be a catalog not yet
         // reindexed, and should be asked again.
-        return gzipJson(
-          request,
+        return cachedJson(
           scope ? { ok: true, scope } : { ok: false },
           200,
           scope ? 'public, max-age=86400, s-maxage=86400' : 'no-store',

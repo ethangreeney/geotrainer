@@ -3,6 +3,14 @@
  * views brief.mjs renders.
  *
  *   node coach/look.mjs <roundId> <yaw|N|NE|SSW…> [pitch] [fov]
+ *   node coach/look.mjs <roundId> --scan
+ *
+ * --scan is the one to reach for first. It rings the whole round in eight
+ * overlapping 50° frames at eye level and prints every path at once, so the
+ * detail that decides the round — a pole's holes, a plate, a bollard's stripe —
+ * is already rendered at a legible scale before anyone has to guess where to
+ * point. The four wide views brief.mjs writes are for orientation; they are too
+ * wide to resolve any of that.
  *
  * Yaw 0 is the way the camera car faced and grows clockwise; pitch up is
  * positive; defaults are pitch -5, fov 60. A 16-wind name in place of the yaw
@@ -25,9 +33,19 @@ const ROOT = dirname(fileURLToPath(import.meta.url))
 const TILE = 512
 const ASPECT = 1008 / 1344 // render.py's view, so the vertical field follows the horizontal
 const MARGIN = 2 // degrees of slack, so tile rounding can never clip the frame
-const WIDE = 45 // at or above this field of view pano_full.jpg already has the detail
+// Above this field of view the stitch already holds every pixel the render can
+// use: a 16-column pano is 8192px round, or 22.8 per degree, and the render is
+// VIEW_W (1568) across — so zoom 5 stops paying for itself past 1568/22.8. It
+// was 45 while the render was 1344 wide and never re-derived, which quietly
+// capped every look between 45° and 68° at stitch detail.
+const WIDE = 68
+const SCAN_N = 8 // frames in a --scan ring: 45° apart, so SCAN_FOV overlaps them
+const SCAN_FOV = 50 // 1568/50 = 31 pixels per degree — holey-pole holes are legible
+const SCAN_PITCH = -2 // the band poles, plates, bollards and road lines live in
 const BUDGET = 64 // tiles: past this the view is nearly straight down, not worth the fetch
-const USAGE = 'usage: node coach/look.mjs <roundId> <yaw|N|NE|SSW…> [pitch] [fov]'
+const USAGE =
+  'usage: node coach/look.mjs <roundId> <yaw|N|NE|SSW…> [pitch] [fov]\n' +
+  '       node coach/look.mjs <roundId> --scan [pitch] [fov]'
 
 const die = (msg) => {
   console.error(msg)
@@ -113,9 +131,11 @@ async function fetchSector(panoId, z5, grid, s) {
 
 /* ------------------------------------------------------------------- main */
 
-const [id, yawArg, pitchArg, fovArg] = process.argv.slice(2)
-const [pitch, fov] = [Number(pitchArg ?? -5), Number(fovArg ?? 60)]
-if (!id || yawArg === undefined || ![pitch, fov].every(Number.isFinite) || fov <= 0) die(USAGE)
+const argv = process.argv.slice(2)
+const scan = argv.includes('--scan')
+const [id, yawArg, pitchArg, fovArg] = argv.filter((a) => a !== '--scan')
+const [pitch, fov] = [Number(pitchArg ?? (scan ? SCAN_PITCH : -5)), Number(fovArg ?? (scan ? SCAN_FOV : 60))]
+if (!id || (!scan && yawArg === undefined) || ![pitch, fov].every(Number.isFinite) || fov <= 0) die(USAGE)
 
 const dir = join(ROOT, 'rounds', id)
 if (!existsSync(join(dir, 'dossier.json')) || !existsSync(join(dir, 'pano_full.jpg')))
@@ -138,54 +158,79 @@ const panoId =
 // The pano's compass heading, if the brief already wrote it down. A numeric aim
 // only wants it to name the direction afterwards, so it is never worth a fetch;
 // a compass aim cannot be turned into yaw without it, so that one pays for it.
-const wind = compassDeg(yawArg)
+const wind = scan ? null : compassDeg(yawArg)
 let north = meta.heading ?? null
 if (wind != null && north == null) {
   north = await panoHeading(panoId)
   if (north == null) die(`no compass heading for this pano — aim in degrees, not "${yawArg}"`)
   await writeRoundMeta(dir, { heading: north })
 }
-const yaw = wind == null ? Number(yawArg) : mod(wind - north, 360)
-if (!Number.isFinite(yaw)) die(USAGE)
 
-let sector = null
-const sphere = c4 ? ` (${c4 * TILE}x${(c4 * TILE) / 2})` : ''
-let source = `pano_full.jpg${sphere} — ${fov}° of field asks nothing sharper`
-if (fov < WIDE) {
-  source = 'pano_full.jpg — no zoom-4 grid here to hang a zoom 5 on'
-  const z5 = join(dir, 'z5')
-  const s = c4 >= 8 && panoId ? sectorFor(grid, yaw, pitch, fov) : null
-  const affordable = s && s.cols * s.rows <= BUDGET
-  if (affordable) await mkdir(z5, { recursive: true })
-  // One tile at the centre of the frame says whether the rest are worth asking
-  // for: steep-down aims fall outside the band Google keeps zoom 5 for.
-  const aimed = affordable ? await tile(z5, panoId, s.aim) : 0
-  if (s && !affordable) {
-    source = `pano_full.jpg — this aim spans ${s.cols}x${s.rows} zoom-5 tiles, too many to fetch`
-  } else if (aimed && aimed < TILE) {
-    source = 'pano_full.jpg — zoom 5 is no sharper than the stitch this far below the horizon'
-  } else if (s) {
-    const got = await fetchSector(panoId, z5, grid, s)
-    if (got.have === got.want) {
-      sector = s
-      const px = `${grid.cols * TILE}x${grid.rows * TILE}`
-      source = `zoom 5 (${px}) — ${s.cols}x${s.rows} tiles, ${got.want - got.cached} fetched, ${got.cached} cached`
-    } else {
-      source = `pano_full.jpg — zoom 5 came back ${got.want - got.have} of ${got.want} tiles short`
+/** One aimed frame: pick the sharpest source that covers it, then render. */
+async function aim(yaw, out) {
+  let sector = null
+  const sphere = c4 ? ` (${c4 * TILE}x${(c4 * TILE) / 2})` : ''
+  let source = `pano_full.jpg${sphere} — ${fov}° of field asks nothing sharper`
+  if (fov < WIDE) {
+    source = 'pano_full.jpg — no zoom-4 grid here to hang a zoom 5 on'
+    const z5 = join(dir, 'z5')
+    const s = c4 >= 8 && panoId ? sectorFor(grid, yaw, pitch, fov) : null
+    const affordable = s && s.cols * s.rows <= BUDGET
+    if (affordable) await mkdir(z5, { recursive: true })
+    // One tile at the centre of the frame says whether the rest are worth asking
+    // for: steep-down aims fall outside the band Google keeps zoom 5 for.
+    const aimed = affordable ? await tile(z5, panoId, s.aim) : 0
+    if (s && !affordable) {
+      source = `pano_full.jpg — this aim spans ${s.cols}x${s.rows} zoom-5 tiles, too many to fetch`
+    } else if (aimed && aimed < TILE) {
+      source = 'pano_full.jpg — zoom 5 is no sharper than the stitch this far below the horizon'
+    } else if (s) {
+      const got = await fetchSector(panoId, z5, grid, s)
+      if (got.have === got.want) {
+        sector = s
+        const px = `${grid.cols * TILE}x${grid.rows * TILE}`
+        source = `zoom 5 (${px}) — ${s.cols}x${s.rows} tiles, ${got.want - got.cached} fetched, ${got.cached} cached`
+      } else {
+        source = `pano_full.jpg — zoom 5 came back ${got.want - got.have} of ${got.want} tiles short`
+      }
     }
   }
+
+  const args = ['look', dir, yaw, pitch, fov, out]
+  if (sector) args.push(sector.x0, sector.y0, sector.cols, sector.rows, grid.cols, grid.rows)
+  await new Promise((done, fail) => {
+    const script = join(ROOT, 'render.py')
+    execFile('python3', [script, ...args.map(String)], (err, _out, stderr) =>
+      err ? fail(new Error(stderr.trim() || err.message)) : done(),
+    )
+  }).catch((e) => die(e.message))
+  return source
 }
 
-const out = join(dir, `look_${Math.round(yaw)}_${Math.round(fov)}.jpg`)
-const args = ['look', dir, yaw, pitch, fov, out]
-if (sector) args.push(sector.x0, sector.y0, sector.cols, sector.rows, grid.cols, grid.rows)
-await new Promise((done, fail) => {
-  const script = join(ROOT, 'render.py')
-  execFile('python3', [script, ...args.map(String)], (err, _out, stderr) =>
-    err ? fail(new Error(stderr.trim() || err.message)) : done(),
+if (scan) {
+  // The ring exists because the four wide views cannot resolve the thing that
+  // decides most rounds. A 100° view is ~16 pixels per degree, so the holes in
+  // a Gujarat holey pole 15m away land on four or five pixels and smear into
+  // the shaft. At SCAN_FOV that is over thirty, and they are unmistakable. The
+  // frames overlap so nothing can hide on a seam, and every path is printed at
+  // once so the whole round can be read in a single pass instead of a dozen
+  // guesses about where to point next.
+  const yaws = Array.from({ length: SCAN_N }, (_, i) => mod(i * (360 / SCAN_N), 360))
+  const outs = yaws.map((y) => join(dir, `scan_${String(Math.round(y)).padStart(3, '0')}.jpg`))
+  // Serially: the frames overlap heavily, so the first few aims warm the tile
+  // cache the rest read from, and racing them would fetch the same tiles twice.
+  for (let i = 0; i < yaws.length; i++) await aim(yaws[i], outs[i])
+  for (const o of outs) console.log(o)
+  console.log(
+    `${SCAN_N} frames, ${fov}° each at pitch ${pitch}, covering all 360° with ` +
+      `${Math.round(fov - 360 / SCAN_N)}° of overlap — read them together.`,
   )
-}).catch((e) => die(e.message))
-
-console.log(out)
-console.log(source)
-if (north != null) console.log(`aim: yaw ${Math.round(yaw)} = ${compass16(north + yaw)} compass`)
+  if (north != null) console.log(`compass: frame scan_000 faces ${compass16(north)}, clockwise from there`)
+} else {
+  const yaw = wind == null ? Number(yawArg) : mod(wind - north, 360)
+  if (!Number.isFinite(yaw)) die(USAGE)
+  const out = join(dir, `look_${Math.round(yaw)}_${Math.round(fov)}.jpg`)
+  console.log(out)
+  console.log(await aim(yaw, out))
+  if (north != null) console.log(`aim: yaw ${Math.round(yaw)} = ${compass16(north + yaw)} compass`)
+}

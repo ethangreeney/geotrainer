@@ -92,12 +92,11 @@ function deferred() {
 const flush = () => vi.advanceTimersByTimeAsync(0)
 
 /** The section's own top-level names, handed back for the tests to drive. */
-const EXPORTS = `;return { fetchScopeGeo, warmScopeGeo, scopeKey, ensureMapCapture, pickResultMap, scopeBounds,
+const EXPORTS = `;return { fetchScopeGeo, warmScopeGeo, scopeKey, ensureMapCapture, pickResultMap,
   paintScope, drawScopeOverlay, removeScopeOverlay, layers: () => scopeLayers,
-  lodForZoom, scopeWeights, zoomForBox, boxOfBounds, visibleFraction, countPoints,
-  armScopeHold, armMapCamera, offerScopeBox, frameScope, boxOf,
+  lodForZoom, scopeWeights, boxOfBounds, countPoints,
   boxCovers, boxParam, viewBox, padBox,
-  scopeStoreGet, scopeStorePut, easeInOut, lerpLng }`
+  scopeStoreGet, scopeStorePut }`
 
 /** The loader, run against a stub window. Its body fetch never calls back. */
 function runLoader(W) {
@@ -678,6 +677,21 @@ describe('drawing the scope', () => {
     expect(env.api.layers()).toHaveLength(2)
   })
 
+  it('never moves the camera, whatever the shape turns out to be', async () => {
+    // The overlay used to widen GeoGuessr's result framing to take in the whole
+    // region. The player read every one of those as the map jumping out from
+    // under them, and worst on the rounds they got right — a tight frame is the
+    // one a union has to pull furthest out of. The outline is now drawn on
+    // whatever GeoGuessr chose to show, and the zoom is theirs.
+    const env = makeEnv()
+    const before = { ...env.cam }
+    env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
+    await settle()
+    expect(env.dataLayers).toHaveLength(2) // it did draw
+    expect(env.fitCalls).toEqual([])
+    expect(env.cam).toEqual(before)
+  })
+
   it('styles the layers before the features land, so there is no default-blue frame', async () => {
     const env = makeEnv()
     env.api.drawScopeOverlay({ roundId: 'r1', scope: SCOPE })
@@ -904,323 +918,6 @@ describe('choosing the map to draw on', () => {
   })
 })
 
-describe('bounds', () => {
-  const BOX = { n: 57, s: 41, e: -74, w: -95 }
-
-  it('reads the bounding box off the raw coordinates', () => {
-    expect(makeEnv().api.scopeBounds(ONTARIO)).toEqual(BOX)
-  })
-
-  it('answers null for geometry it cannot measure', () => {
-    const { api } = makeEnv()
-    expect(api.scopeBounds({ features: [] })).toBeNull()
-    expect(api.scopeBounds({ features: [{ geometry: null }] })).toBeNull()
-    expect(api.scopeBounds({})).toBeNull()
-  })
-
-  it('trusts the server’s own bbox over the drawn coordinates', () => {
-    // The point of the server sending one: at a coarse level the coordinates
-    // have been simplified inwards, so measuring them under-frames the region.
-    const { api } = makeEnv()
-    const bbox = { n: 58, s: 40, e: -73, w: -96 }
-    expect(api.boxOf({ bbox, geojson: ONTARIO })).toEqual(bbox)
-    expect(api.boxOf({ geojson: ONTARIO })).toEqual(BOX)
-    expect(api.boxOf({ bbox: { n: 1, s: 2, e: 3, w: 4 }, geojson: ONTARIO })).toEqual(BOX)
-    // And the main mass beats the true extent: Chile is framed on Chile, not on
-    // the ocean out to Easter Island.
-    const frame = { n: 57, s: 41, e: -74, w: -80 }
-    expect(api.boxOf({ frame, bbox, geojson: ONTARIO })).toEqual(frame)
-    expect(api.boxOf({ frame: null, bbox, geojson: ONTARIO })).toEqual(bbox)
-  })
-})
-
-// The camera is the part the user actually feels: one move, not two. The guess
-// POST arms a hold, GeoGuessr's own fitBounds is sat on for a few hundred ms,
-// and it is released widened to take in the region — so the zoom-in-then-out
-// jerk never happens. Geometry that misses the hold eases instead of snapping.
-describe('the camera makes one move', () => {
-  const BOX = { n: 57, s: 41, e: -74, w: -95 }
-  /** A LatLngBounds of the env's own class, the way GeoGuessr would pass one. */
-  const bounds = (env, box) =>
-    new env.W.google.maps.LatLngBounds().extend({ lat: box.n, lng: box.e }).extend({ lat: box.s, lng: box.w })
-  const boxOfCall = (env, i) => env.api.boxOfBounds(env.fitCalls[i][0])
-  const AWAY = { n: 0, s: -40, e: 160, w: 100 } // an Australian framing
-  const NEAR = { n: 60, s: 35, e: -70, w: -100 } // Ontario, comfortably framed
-
-  it('sits on GeoGuessr’s framing until the region turns up, then folds it in', () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.map.fitBounds(bounds(env, AWAY), 40)
-    expect(env.fitCalls).toEqual([]) // held: nothing has moved yet
-
-    env.api.offerScopeBox(BOX)
-    expect(env.fitCalls).toHaveLength(1)
-    expect(boxOfCall(env, 0)).toEqual({ n: 57, s: -40, e: 160, w: -95 }) // the union
-    expect(env.fitCalls[0][1]).toBe(40) // their own padding rides along
-    expect(env.tlogLines.join(' ')).toMatch(/folded into/)
-  })
-
-  it('never moves twice', async () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.map.fitBounds(bounds(env, AWAY))
-    env.api.offerScopeBox(BOX)
-    await vi.advanceTimersByTimeAsync(2000) // the hold’s own expiry must not re-fire it
-    expect(env.fitCalls).toHaveLength(1)
-  })
-
-  it('hands the framing back untouched when the region is already in frame', () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    const asked = bounds(env, NEAR)
-    env.map.fitBounds(asked)
-    env.api.offerScopeBox(BOX)
-    expect(env.fitCalls).toHaveLength(1)
-    expect(env.fitCalls[0][0]).toBe(asked) // the very object they passed
-  })
-
-  it('lets the framing through on its own if no geometry ever arrives', async () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    const asked = bounds(env, AWAY)
-    env.map.fitBounds(asked)
-    expect(env.fitCalls).toEqual([])
-    await vi.advanceTimersByTimeAsync(400)
-    expect(env.fitCalls).toHaveLength(1)
-    expect(env.fitCalls[0][0]).toBe(asked)
-    expect(env.tlogLines.join(' ')).toMatch(/hold expired/)
-  })
-
-  it('holds nothing at all on a map too small to be the result map', () => {
-    const env = makeEnv()
-    env.div.getBoundingClientRect = () => ({ width: 180, height: 120 })
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.map.fitBounds(bounds(env, AWAY))
-    expect(env.fitCalls).toHaveLength(1) // the guess mini-map is left alone
-  })
-
-  /** Both legs of the warm: the pano→scope lookup and the geometry it then
-   * pulls, answered off the one stub. */
-  const warmReply = (req) =>
-    req.url.includes('scope-for-pano')
-      ? { status: 200, responseText: JSON.stringify({ ok: true, scope: SCOPE }) }
-      : { status: 200, responseText: JSON.stringify(PAYLOAD) }
-
-  it('takes the region from the warm, so the first framing is the final one', async () => {
-    // The warm runs while the user is still guessing, so by the time the guess
-    // POST arms the hold the extent is already in hand — GeoGuessr's own
-    // fitBounds goes out widened and there is nothing left to correct.
-    const env = makeEnv({ reply: warmReply })
-    env.api.warmScopeGeo('pano-1')
-    await settle()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.map.fitBounds(bounds(env, AWAY))
-    expect(env.fitCalls).toHaveLength(1) // no hold to wait out
-    expect(boxOfCall(env, 0)).toEqual({ n: 57, s: -40, e: 160, w: -95 })
-    expect(env.tlogLines.join(' ')).toMatch(/folded into/)
-  })
-
-  it('drops the warm when the next round is served', async () => {
-    // Otherwise a round whose own warm fails would be framed on the last
-    // round's region, which is worse than not framing it at all.
-    const env = makeEnv({ reply: warmReply })
-    env.api.warmScopeGeo('pano-1')
-    await settle()
-    env.api.warmScopeGeo(null) // a round with no pano to warm from
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    const asked = bounds(env, AWAY)
-    env.map.fitBounds(asked)
-    expect(env.fitCalls).toEqual([]) // held, exactly as if nothing were warmed
-    await vi.advanceTimersByTimeAsync(400)
-    expect(env.fitCalls[0][0]).toBe(asked)
-  })
-
-  it('goes straight through when the shape was already in hand', () => {
-    // The disk store answers before GeoGuessr has framed anything: the hold
-    // begins and ends inside the one call.
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.api.offerScopeBox(BOX)
-    env.map.fitBounds(bounds(env, AWAY))
-    expect(env.fitCalls).toHaveLength(1)
-    expect(boxOfCall(env, 0)).toEqual({ n: 57, s: -40, e: 160, w: -95 })
-  })
-
-  it('ignores a region box that wraps the antimeridian', async () => {
-    // A shape crossing 180° has a bbox claiming most of the planet; framing on
-    // it would be worse than not framing at all.
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    const asked = bounds(env, AWAY)
-    env.map.fitBounds(asked)
-    env.api.offerScopeBox({ n: 70, s: 40, e: 179, w: -179 })
-    expect(env.fitCalls).toEqual([]) // not sane, so the hold is not ended by it
-    await vi.advanceTimersByTimeAsync(400)
-    expect(env.fitCalls[0][0]).toBe(asked) // it times out and their framing stands
-  })
-
-  it('widens a later GeoGuessr re-frame too, without being asked twice', () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.map.fitBounds(bounds(env, NEAR))
-    env.api.offerScopeBox(BOX)
-    env.map.fitBounds(bounds(env, AWAY)) // they re-frame, e.g. on a panel toggle
-    expect(env.fitCalls).toHaveLength(2)
-    expect(boxOfCall(env, 1)).toEqual({ n: 57, s: -40, e: 160, w: -95 })
-  })
-
-  it('stops touching the camera the moment the user does', () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.fireDiv('wheel')
-    env.api.offerScopeBox(BOX)
-    const asked = bounds(env, AWAY)
-    env.map.fitBounds(asked)
-    expect(env.fitCalls).toHaveLength(1)
-    expect(env.fitCalls[0][0]).toBe(asked) // theirs, unwidened
-    expect(env.tlogLines.join(' ')).toMatch(/user took the map/)
-  })
-
-  it('a drag counts as the user taking the map, just like a wheel', () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.fire('dragstart')
-    env.api.offerScopeBox(BOX)
-    const asked = bounds(env, AWAY)
-    env.map.fitBounds(asked)
-    expect(env.fitCalls[0][0]).toBe(asked)
-  })
-
-  it('arming a new round releases whatever the last one was sitting on', () => {
-    const env = makeEnv()
-    env.api.armScopeHold()
-    env.api.armMapCamera(env.map)
-    env.map.fitBounds(bounds(env, AWAY))
-    expect(env.fitCalls).toEqual([])
-    env.api.armScopeHold()
-    expect(env.fitCalls).toHaveLength(1) // nothing is ever left stuck
-  })
-})
-
-// Geometry that arrives after GeoGuessr's camera has already moved cannot be
-// folded into it, so this move the user does see — which is why it eases, only
-// fires when the region is genuinely half off-screen, and only ever widens.
-describe('the late framing eases rather than snaps', () => {
-  const BOX = { n: 57, s: 41, e: -74, w: -95 }
-  const view = (s, w, n, e) => ({
-    getSouthWest: () => ({ lat: () => s, lng: () => w }),
-    getNorthEast: () => ({ lat: () => n, lng: () => e }),
-  })
-
-  it('eases out to hold the region, and never zooms in doing it', async () => {
-    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
-    env.api.offerScopeBox(BOX)
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(env.cam.zoom).toBeLessThan(9)
-    expect(env.cam.center.lat).toBeCloseTo(49, 5) // the union’s centre
-    expect(env.tlogLines.join(' ')).toMatch(/eased out/)
-    expect(env.fitCalls).toEqual([]) // eased, not snapped
-  })
-
-  it('takes several frames to get there', async () => {
-    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
-    env.api.offerScopeBox(BOX)
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(100)
-    const part = env.cam.zoom
-    expect(part).toBeLessThan(9)
-    await vi.advanceTimersByTimeAsync(900)
-    expect(env.cam.zoom).toBeLessThan(part) // still moving after the first frame
-  })
-
-  it('leaves a framing that already shows the region alone', async () => {
-    const env = makeEnv({ viewport: view(35, -100, 60, -70), zoom: 5 })
-    env.api.offerScopeBox(BOX)
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(env.cam.zoom).toBe(5)
-  })
-
-  it('leaves the framing alone before the map has settled', async () => {
-    const env = makeEnv({ viewport: null, zoom: 9 })
-    env.api.offerScopeBox(BOX)
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(env.cam.zoom).toBe(9)
-  })
-
-  it('abandons the ease mid-flight when the user grabs the map', async () => {
-    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
-    env.api.armMapCamera(env.map)
-    env.api.offerScopeBox(BOX)
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(100)
-    const stopped = env.cam.zoom
-    env.fireDiv('pointerdown')
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(env.cam.zoom).toBe(stopped)
-  })
-
-  it('never re-frames twice for one round', async () => {
-    const env = makeEnv({ viewport: view(43, -80, 45, -78), zoom: 9 })
-    env.api.offerScopeBox(BOX)
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(1000)
-    const settled = env.cam.zoom
-    env.api.frameScope(env.map)
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(env.cam.zoom).toBe(settled)
-  })
-
-  it('shares the eased path’s arithmetic with the plain helpers', () => {
-    const { api } = makeEnv()
-    expect(api.easeInOut(0)).toBe(0)
-    expect(api.easeInOut(1)).toBe(1)
-    expect(api.easeInOut(0.5)).toBeCloseTo(0.5, 10)
-    expect(api.easeInOut(0.25)).toBeLessThan(0.25) // slow out of the gate
-    // The short way round: 170°E to 170°W is 20° east, not 340° west.
-    expect(api.lerpLng(170, -170, 0.5)).toBeCloseTo(180, 10)
-    expect(api.lerpLng(-10, 10, 0.5)).toBeCloseTo(0, 10)
-  })
-
-  it('measures how much of a shape a frame actually shows', () => {
-    const { api } = makeEnv()
-    const box = { n: 10, s: 0, e: 10, w: 0 }
-    expect(api.visibleFraction(box, { n: 20, s: -10, e: 20, w: -10 })).toBe(1)
-    expect(api.visibleFraction(box, { n: 10, s: 5, e: 10, w: 0 })).toBeCloseTo(0.5, 10)
-    expect(api.visibleFraction(box, { n: -1, s: -5, e: 10, w: 0 })).toBe(0)
-    expect(api.visibleFraction(box, null)).toBe(1) // unmeasurable is never a reason to move
-  })
-
-  it('works out the zoom that fits a box in a given viewport', () => {
-    const { api } = makeEnv()
-    const world = api.zoomForBox({ n: 70, s: -60, e: 80, w: -80 }, 900, 600, 0)
-    const city = api.zoomForBox({ n: 51.6, s: 51.4, e: -0.0, w: -0.3 }, 900, 600, 0)
-    expect(world).toBeLessThan(city)
-    expect(world).toBeGreaterThan(0)
-    // Padding costs zoom, never gains it.
-    expect(api.zoomForBox({ n: 57, s: 41, e: -74, w: -95 }, 900, 600, 64)).toBeLessThan(
-      api.zoomForBox({ n: 57, s: 41, e: -74, w: -95 }, 900, 600, 0),
-    )
-  })
-})
-
-// The whole answer to "the borders look low-poly": detail is a ladder, and the
-// rung is chosen by the zoom. Coarse first so the shape is on screen fast, finer
-// as the user leans in — and never coarser again once it has been paid for.
 describe('detail follows the zoom', () => {
   it('picks a level for every zoom, and something sane for a broken one', () => {
     const { api } = makeEnv()
@@ -1911,5 +1608,208 @@ describe('holding game creation until the deck is republished', () => {
     sync.send('{}')
     expect(g.sent).toHaveLength(2)
     expect(g.calls).toHaveLength(0)
+  })
+})
+
+// --------------------------------------------------------------- live duels
+// The capture that broke without anyone noticing. GeoGuessr moved live ranked
+// off /duels/<id> and onto a websocket, and the fetch tap — which learns the
+// game id by overhearing a request that names it — went blind: every round
+// still arrived, but only once the player opened the summary screen. These
+// tests run the duel section as shipped and assert the thing that actually
+// matters, which is that a round posts *while the match is still being played*
+// with nothing but socket traffic to go on.
+const DUEL_START = '  // ------------------------------------------------------------- duels'
+const DUEL_END = '  // --------------------------------------------------------- backfill'
+const duels = cut(DUEL_START, DUEL_END)
+const DUEL_EXPORTS =
+  ';return { noteDuelId, onSocket, pollDuel, handleDuelState, duelCandidates, fetchDuel }'
+
+const SOCKET_START = '  // The same wrap for websockets, and it can live here rather than in the'
+const socketWrap = cut(SOCKET_START, JIT_START)
+
+/** One duel's state as game-server answers it, with `n` rounds guessed. */
+const duelState = (gameId, n) => ({
+  gameId,
+  rounds: Array.from({ length: n }, (_, i) => ({
+    roundNumber: i + 1,
+    panorama: { panoId: 'abc', lat: 1 + i, lng: 2 + i, heading: 0 },
+  })),
+  teams: [{ players: [{ playerId: 'me', guesses: Array.from({ length: n }, (_, i) => ({ roundNumber: i + 1, lat: 3, lng: 4, score: 5000 })) }] }],
+})
+
+/**
+ * The duel section over stubs: a fetch that answers only for the ids it was
+ * given, a location that is the live-ranked page (no id in the path, which is
+ * the whole problem), and a socket the test can push frames through.
+ */
+function makeDuels({ pathname = '/multiplayer/duels', states = {} } = {}) {
+  if (!duels.ok) throw new Error('duel section not found in geocoach.user.js')
+  const posted = []
+  const fetched = []
+  const tlogLines = []
+  const listeners = []
+  const socket = { addEventListener: (type, fn) => listeners.push([type, fn]) }
+  const fetch = (url) => {
+    fetched.push(url)
+    const id = url.match(/duels\/([\w-]+)/)?.[1]
+    const body = states[id]
+    return Promise.resolve(body ? { ok: true, json: () => Promise.resolve(body) } : { ok: false, status: 404 })
+  }
+  const W = { __NEXT_DATA__: { props: { accountProps: { account: { user: { userId: 'me' } } } } } }
+  const api = new Function(
+    'W', 'fetch', 'location', 'tlog', 'tlogOnce', 'post', 'hex2a', 'console',
+    duels.src + DUEL_EXPORTS,
+  )(
+    W, fetch, { pathname },
+    (m) => tlogLines.push(m), (_k, m) => tlogLines.push(m),
+    (key, payload) => posted.push({ key, payload }),
+    (h) => h, { warn() {} },
+  )
+  /** Deliver a text frame to whatever the section subscribed with. */
+  const frame = (data) => listeners.filter(([t]) => t === 'message').forEach(([, fn]) => fn({ data }))
+  return { ...api, posted, fetched, tlogLines, socket, frame }
+}
+
+describe('live duels are captured from the socket', () => {
+  const GAME = '6a8e81bd8972125225421744'
+
+  it('slices the duel section', () => {
+    expect(duels.ok).toBe(true)
+    expect(socketWrap.ok).toBe(true)
+  })
+
+  it('learns the game id from the socket URL and posts mid-match', async () => {
+    const d = makeDuels({ states: { [GAME]: duelState(GAME, 2) } })
+    d.onSocket({ url: `wss://game-server.geoguessr.com/duels?gameId=${GAME}`, socket: d.socket })
+    d.pollDuel()
+    await flush()
+    // Two rounds guessed so far, posted without a summary screen in sight.
+    expect(d.posted.map((p) => p.key)).toEqual([`${GAME}:1:duel`, `${GAME}:2:duel`])
+  })
+
+  it('falls back to the id inside a frame when the URL does not carry one', async () => {
+    const d = makeDuels({ states: { [GAME]: duelState(GAME, 1) } })
+    d.onSocket({ url: 'wss://game-server.geoguessr.com/socket', socket: d.socket })
+    d.pollDuel()
+    await flush()
+    expect(d.posted).toHaveLength(0) // nothing named the game yet
+    d.frame(JSON.stringify({ type: 'RoundStarted', gameId: GAME }))
+    d.pollDuel()
+    await flush()
+    expect(d.posted.map((p) => p.key)).toEqual([`${GAME}:1:duel`])
+  })
+
+  it('keeps capturing as later rounds are guessed', async () => {
+    const states = { [GAME]: duelState(GAME, 1) }
+    const d = makeDuels({ states })
+    d.onSocket({ url: `wss://x/${GAME}`, socket: d.socket })
+    d.pollDuel()
+    await flush()
+    expect(d.posted).toHaveLength(1)
+    states[GAME] = duelState(GAME, 3) // two more rounds played
+    d.pollDuel()
+    await flush()
+    expect(d.posted.map((p) => p.key)).toEqual([
+      `${GAME}:1:duel`, `${GAME}:1:duel`, `${GAME}:2:duel`, `${GAME}:3:duel`,
+    ])
+  })
+
+  it('tries a wrong id once and never again', async () => {
+    const junk = '0123456789abcdef01234567'
+    const d = makeDuels({ states: {} })
+    d.onSocket({ url: `wss://x/${junk}`, socket: d.socket })
+    d.pollDuel()
+    await flush()
+    d.pollDuel()
+    d.pollDuel()
+    await flush()
+    expect(d.fetched.filter((u) => u.includes(junk))).toHaveLength(1)
+  })
+
+  it('spends at most one request a tick however many ids go past', async () => {
+    const d = makeDuels({ states: {} })
+    d.onSocket({ url: 'wss://x/', socket: d.socket })
+    d.frame(Array.from({ length: 12 }, (_, i) => String(i).padStart(24, 'a')).join(' '))
+    d.pollDuel()
+    await flush()
+    expect(d.fetched).toHaveLength(1)
+  })
+
+  it('ignores binary frames rather than guessing at them', async () => {
+    const d = makeDuels({ states: { [GAME]: duelState(GAME, 1) } })
+    d.onSocket({ url: 'wss://x/', socket: d.socket })
+    d.frame(new ArrayBuffer(8))
+    d.pollDuel()
+    await flush()
+    expect(d.fetched).toHaveLength(0)
+  })
+
+  it('lets a new duel overtake the one that just finished', async () => {
+    const NEXT = 'aa8e81bd8972125225421799'
+    const d = makeDuels({ states: { [GAME]: duelState(GAME, 1), [NEXT]: duelState(NEXT, 1) } })
+    d.onSocket({ url: `wss://x/${GAME}`, socket: d.socket })
+    d.pollDuel()
+    await flush()
+    d.frame(JSON.stringify({ gameId: NEXT }))
+    d.pollDuel()
+    await flush()
+    expect(d.posted.map((p) => p.key)).toContain(`${NEXT}:1:duel`)
+  })
+})
+
+describe('the websocket wrap does not break its host', () => {
+  /** The wrap as shipped, over a stub window carrying a stub WebSocket. */
+  function wrap() {
+    const seen = []
+    class PageSocket {
+      constructor(url, protocols) {
+        this.url = url
+        this.protocols = protocols
+      }
+    }
+    PageSocket.CONNECTING = 0
+    PageSocket.OPEN = 1
+    PageSocket.CLOSING = 2
+    PageSocket.CLOSED = 3
+    const W = { WebSocket: PageSocket }
+    new Function('W', 'onSocket', socketWrap.src)(W, (rec) => seen.push(rec))
+    return { W, seen, PageSocket }
+  }
+
+  it('passes the socket through and reports it', () => {
+    const { W, seen } = wrap()
+    const ws = new W.WebSocket('wss://x/1')
+    expect(ws.url).toBe('wss://x/1')
+    expect(seen).toEqual([{ url: 'wss://x/1', socket: ws }])
+  })
+
+  it('keeps instanceof and the readyState constants working', () => {
+    const { W, PageSocket } = wrap()
+    expect(new W.WebSocket('wss://x/1') instanceof PageSocket).toBe(true)
+    expect(W.WebSocket.OPEN).toBe(1)
+    expect(W.WebSocket.CLOSED).toBe(3)
+  })
+
+  it('forwards subprotocols, and omits them when the page did', () => {
+    const { W } = wrap()
+    expect(new W.WebSocket('wss://x/1', 'json').protocols).toBe('json')
+    expect(new W.WebSocket('wss://x/1').protocols).toBe(undefined)
+  })
+
+  it('survives a reporter that throws', () => {
+    const seen = []
+    class PageSocket { constructor(url) { this.url = url } }
+    const W = { WebSocket: PageSocket }
+    new Function('W', 'onSocket', socketWrap.src)(W, () => { throw new Error('body reloaded') })
+    expect(new W.WebSocket('wss://x/1').url).toBe('wss://x/1')
+    expect(seen).toHaveLength(0)
+  })
+
+  it('wraps once however many times the body reloads', () => {
+    const { W } = wrap()
+    const first = W.WebSocket
+    new Function('W', 'onSocket', socketWrap.src)(W, () => {})
+    expect(W.WebSocket).toBe(first)
   })
 })

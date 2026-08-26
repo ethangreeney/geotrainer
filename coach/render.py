@@ -21,7 +21,10 @@ import numpy as np
 from PIL import Image
 
 TILE = 512
-VIEW_W, VIEW_H = 1344, 1008
+# The long edge a vision model will actually keep: anything wider is resampled
+# back down to this before it is ever looked at, so rendering past it costs time
+# and buys nothing, and stopping short of it throws detail away for free.
+VIEW_W, VIEW_H = 1568, 1176
 FILL = 24  # dark grey where the source has no pixels to give
 
 

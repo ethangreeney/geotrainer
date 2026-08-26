@@ -23,7 +23,10 @@ import { join } from 'node:path'
 import jpeg from 'jpeg-js'
 
 export const TILE = 512
-export const VIEW_W = 1344
+// The long edge a vision model will actually keep: anything wider is resampled
+// back down to this before it is ever looked at, so rendering past it costs
+// time and buys nothing, and stopping short of it throws detail away for free.
+export const VIEW_W = 1568
 export const VIEW_H = 1008
 const FILL = 24 // dark grey where the sphere has no pixels to give
 const BAND = 64 // output rows rendered at a time — caps the tile working set

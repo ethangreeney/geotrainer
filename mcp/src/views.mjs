@@ -20,10 +20,18 @@ import { Sphere, TILE, encodeJpeg, gridCols, renderView } from './imagery.mjs'
 import { cacheRound, compass16, compassDeg, fetchTile, heading, readMeta } from './tiles.mjs'
 
 const VIEWS = [['front', 0], ['right', 90], ['back', 180], ['left', 270]]
-const ASPECT = 1008 / 1344 // the view's own shape, so the vertical field follows the horizontal
+const ASPECT = 3 / 4 // the view's own shape, so the vertical field follows the horizontal
 const MARGIN = 2 // degrees of slack, so tile rounding can never clip the frame
-const WIDE = 45 // at or above this field of view the zoom-4 sphere already has the detail
+// Above this field of view the zoom-4 sphere already holds every pixel the
+// render can use: 16 columns is 8192px round, or 22.8 per degree, against a
+// VIEW_W-wide frame — so zoom 5 stops paying for itself past VIEW_W/22.8. This
+// was 45 while the frame was 1344 wide and was never re-derived, which quietly
+// capped every close-up between 45° and 68° at stitched detail.
+const WIDE = 68
 const BUDGET = 64 // zoom-5 tiles: past this the view is nearly straight down, not worth the fetch
+const SCAN_N = 8 // frames in a ring: 45° apart, so SCAN_FOV overlaps its neighbours
+const SCAN_FOV = 50 // VIEW_W/50 = 31 pixels per degree — a holey pole's holes are legible
+const SCAN_PITCH = -2 // the band poles, plates, bollards and road lines live in
 
 const mod = (n, m) => ((n % m) + m) % m
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n))
@@ -192,6 +200,49 @@ export async function look(r, aim, pitch = -5, fov = 60) {
       `round ${r.id} — yaw ${Math.round(yaw)}°, pitch ${pitch}°, ${fov}° field`,
       north == null ? null : `that is ${compass16(north + yaw)} on the compass`,
       source,
+      note,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  }
+}
+
+/**
+ * The whole round at a scale its clues can actually be read at.
+ *
+ * The four wide views are 100° across — about sixteen pixels per degree — which
+ * is orientation, not evidence. The holes in a Gujarat holey pole fifteen metres
+ * away land on four or five of those pixels and smear into the shaft, and a
+ * reader who only has the wide views will confidently describe a solid pole.
+ * This rings the round in eight overlapping 50° frames at eye level instead, at
+ * twice that detail, and hands back all eight at once — so the deciding detail
+ * is on the table before anyone has to guess which way to point, and one call
+ * does what a dozen aimed guesses were doing badly.
+ */
+export async function scan(r, pitch = SCAN_PITCH, fov = SCAN_FOV) {
+  const { dir, sphere, note } = await prepare(r)
+  if (!sphere) throw new Actionable(note)
+  const step = 360 / SCAN_N
+  const north = (await readMeta(dir)).heading ?? (await heading(dir, r.panoId))
+  const frames = []
+  // Serially: the frames overlap heavily, so each aim warms the tile cache the
+  // next one reads from, and racing them would fetch the same tiles twice.
+  for (let i = 0; i < SCAN_N; i++) {
+    const yaw = mod(i * step, 360)
+    const shot = await look(r, String(yaw), pitch, fov)
+    frames.push({
+      yaw,
+      label: `yaw ${Math.round(yaw)}°` + (north == null ? '' : ` — ${compass16(north + yaw)}`),
+      jpeg: shot.jpeg,
+    })
+  }
+  return {
+    frames,
+    text: [
+      `round ${r.id} — ${SCAN_N} frames, ${fov}° each at pitch ${pitch}°, covering all 360° ` +
+        `with ${Math.round(fov - step)}° of overlap. They run clockwise from the way the camera ` +
+        'car faced; the label under each says where it points.',
+      north == null ? null : `the first frame faces ${compass16(north)}`,
       note,
     ]
       .filter(Boolean)

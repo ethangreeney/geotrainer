@@ -24,7 +24,7 @@ import * as cloud from './src/cloud.mjs'
 import * as clues from './src/clues.mjs'
 import { dossierText, profileText } from './src/coach.mjs'
 import { status as guideStatus, warm } from './src/guides.mjs'
-import { fourViews, look } from './src/views.mjs'
+import { fourViews, look, scan } from './src/views.mjs'
 
 const text = (s) => ({ type: 'text', text: s })
 
@@ -76,8 +76,11 @@ const server = new McpServer(
       'GeoCoach coaches the GeoGuessr rounds this user has actually played. Start a coaching ' +
       'session with geocoach_round_dossier — it returns the round as four photographs plus where ' +
       'it really was, where they clicked, and the clue the location was chosen for. Read the ' +
-      'images before the text. Use geocoach_look to read a sign, a plate or road markings up ' +
-      'close, geocoach_clues to ask what else a location could have been, and geocoach_profile ' +
+      'images before the text. Then call geocoach_scan on the same round: the dossier views are ' +
+      '100 degrees wide and too coarse to resolve the detail that usually decides a round, and ' +
+      'answering off them alone is how a solid pole gets described where a holey one stood. Use ' +
+      'geocoach_look to go closer still on one bearing, geocoach_clues to ask what else a ' +
+      'location could have been, and geocoach_profile ' +
       'to see standing form before choosing what to work on. Coach only clues that transfer to ' +
       'other rounds; never reveal a location the user is still being asked to guess.',
   },
@@ -127,8 +130,10 @@ server.registerTool(
       'wide views. Use it to read a road sign, a licence plate, a bollard, lane markings or a ' +
       'utility pole that the wide view leaves too small. Yaw 0 is the way the camera car faced ' +
       'and grows clockwise; a 16-wind compass name ("N", "SSW") aims by the world instead. A ' +
-      'field of view below 45 degrees fetches sharper zoom-5 imagery for that sector alone, which ' +
-      'is the setting for reading text.',
+      'field of view below 68 degrees fetches sharper zoom-5 imagery for that sector alone, which ' +
+      'is the setting for reading text. Aim at or below the horizon for poles, signposts, ' +
+      'bollards and road lines — a positive pitch looks straight past all of them. To survey a ' +
+      'round rather than inspect one thing, call geocoach_scan instead of guessing bearings.',
     inputSchema: {
       round: z.string().describe('Round id, or "1" for the most recent — as for geocoach_round_dossier.'),
       yaw: z
@@ -151,6 +156,49 @@ server.registerTool(
     const r = await cloud.resolve(round)
     const shot = await look(r, yaw, pitch ?? -5, fov ?? 60)
     return { content: [text(shot.text), image(shot.jpeg)] }
+  }),
+)
+
+server.registerTool(
+  'geocoach_scan',
+  {
+    title: 'Read the whole round up close',
+    description:
+      'The entire round as eight overlapping close-ups, in one call — the survey to the ' +
+      'dossier\'s four wide views. Those views are 100 degrees across, roughly sixteen pixels ' +
+      'per degree, which is enough to orient yourself and not enough to read the clue: the holes ' +
+      'in a Gujarat holey pole fifteen metres away fall on four or five pixels and smear into ' +
+      'the shaft. This rings the round in eight 50-degree frames at eye level, at twice that ' +
+      'detail, so utility poles, bollards, signposts, plates and road markings are legible ' +
+      'everywhere at once. Call it on any round being coached before drawing conclusions from ' +
+      'the wide views, and use geocoach_look afterwards only to go closer on something the scan ' +
+      'has already shown you.',
+    inputSchema: {
+      round: z.string().describe('Round id, or "1" for the most recent — as for geocoach_round_dossier.'),
+      pitch: z
+        .number()
+        .min(-90)
+        .max(90)
+        .optional()
+        .describe('Degrees up (positive) or down. Default -2, which is where poles and signs live.'),
+      fov: z
+        .number()
+        .min(1)
+        .max(170)
+        .optional()
+        .describe('Field of view per frame. Default 50; the eight frames always cover all 360.'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  guard(async ({ round, pitch, fov }) => {
+    const r = await cloud.resolve(round)
+    const shot = await scan(r, pitch, fov)
+    return {
+      content: [
+        text(shot.text),
+        ...shot.frames.flatMap((f) => [text(f.label), image(f.jpeg)]),
+      ],
+    }
   }),
 )
 

@@ -267,10 +267,15 @@ export async function dossierText(r, past, views, note) {
       views.map((v) => v.label).join(', ') +
         ' — attached below, in that order. 100° each, photograph geometry;',
       'front is the way the camera car faced. These are what a player actually sees.',
+      'They are for orientation only: 100° is about sixteen pixels per degree, which cannot',
+      'resolve the holes in a holey pole or the stripe on a bollard. Do not conclude from them.',
     )
     out.push(
+      `survey: geocoach_scan(round: "${r.id}") — the whole round as eight overlapping close-ups`,
+      'at twice that detail, in one call. Read it before drawing any conclusion from the views.',
       `close-up: geocoach_look(round: "${r.id}", yaw: <0-359 or a compass point>, fov: <degrees>)` +
-        ' — fov below 45 fetches sharper zoom-5 imagery for that sector alone.',
+        ' — for one thing the scan has already shown you; fov below 68 fetches sharper zoom-5' +
+        ' imagery for that sector alone, and aim at or below the horizon or you miss every pole shaft.',
     )
   }
   out.push(
