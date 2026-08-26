@@ -699,18 +699,24 @@ async function handleRound(payload) {
   let firstSight = false
   if (round.metaName) {
     const isPadding = !!state.lastDeck?.padding?.includes(round.metaName)
-    inferredRating = ratingNameFor(correctScope, !state.deckCards[round.metaName])
-  // A first-sight meta answered correctly is the one grade this system has to
-  // guess at. Everything else is measured: you either recalled a card that was
-  // already in the deck or you didn't. But the first time a meta is served,
-  // "correct" only says the pin landed in the right place — it does not say
-  // you read the clue the location was chosen for. Get Ecuador off the Spanish
-  // and the mountains, never look at the truck, and the truck meta is marked
-  // known and pushed eight days out on the strength of a round it was never
-  // tested in. So the card asks, instead of assuming, and this flag is what
-  // tells it to. Padding rounds are excluded because a correct one is not
-  // graded at all — there is nothing to ask about.
-    firstSight = !state.deckCards[round.metaName] && correctScope && !isPadding
+    // A first-sight meta answered correctly is the one grade this system used to
+    // guess at. Everything else is measured: you either recalled a card that was
+    // already in the deck or you didn't. But the first time a meta is served,
+    // "correct" only says the pin landed in the right place — it does not say
+    // you read the clue the location was chosen for. Get Ecuador off the Spanish
+    // and the mountains, never look at the truck, and the truck meta would be
+    // marked known and pushed eight days out on the strength of a round it was
+    // never tested in.
+    //
+    // So the card asks, and until it is answered the round counts as uncredited:
+    // not correct, no streak, graded Again. Tapping "yes, I knew it" is what
+    // turns it into the Easy this used to assume. Padding rounds are excluded
+    // because a correct one is not graded at all, and so are duels — the card
+    // never appears there, so there is no question to leave unanswered.
+    firstSight =
+      !state.deckCards[round.metaName] && correctScope && !isPadding && !!meta && source !== 'duel'
+    const credited = correctScope && !firstSight
+    inferredRating = ratingNameFor(credited, !state.deckCards[round.metaName])
     // Snapshot the pre-grade state so a rating-button tap can redo this grade.
     rememberSnapshot(id, {
       metaName: round.metaName,
@@ -722,7 +728,7 @@ async function handleRound(payload) {
 
     const m = (state.metas[round.metaName] ??= { seen: 0, correct: 0, streak: 0 })
     m.seen += 1
-    if (correctScope) {
+    if (credited) {
       m.correct += 1
       m.streak += 1
     } else {
@@ -736,7 +742,7 @@ async function handleRound(payload) {
     if (!(isPadding && correctScope)) {
       state.deckCards = gradeRound(
         state.deckCards,
-        { metaName: round.metaName, correct: correctScope },
+        { metaName: round.metaName, correct: credited },
         new Date(),
       )
     }

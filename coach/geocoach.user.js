@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.18.0
+// @version      2.19.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.18.0'
+  const BODY_VERSION = '2.19.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -1373,20 +1373,19 @@
       good: 'Recalled it with a bit of thought — the normal interval',
       easy: 'Knew it instantly — waits much longer before returning',
     }
-    // The first time a meta lands and the pin is right, the pre-selected Easy
-    // is a guess about the player, not a measurement: getting the country off
-    // the language and the landscape says nothing about whether the clue this
-    // location was chosen for was ever looked at. Left alone, that round marks
-    // the meta known and pushes it past mastery in one go. So on first sight
-    // the four grades — which are asking a question about recall that has no
-    // answer yet — give way to the one question that does: did you use it?
+    // The first time a meta lands and the pin is right, a grade of Easy would be
+    // a guess about the player, not a measurement: getting the country off the
+    // language and the landscape says nothing about whether the clue this
+    // location was chosen for was ever looked at. So on first sight the four
+    // grades — which ask a question about recall that has no answer yet — give
+    // way to the one question that does: did you use it?
     //
     // The two answers are the two ends of the same row, so nothing else here
     // changes: "no" is Again, which rewinds the grade and replays it as a
     // brand-new card that was failed, and comes back inside the hour like any
-    // other lapse. Doing nothing still leaves Easy selected, exactly as
-    // before — the question is here to be hard to miss, not to make a fast
-    // ramp through material the player already knows any slower.
+    // other lapse. It is also what the server has already applied, so the row
+    // opens on it — an unanswered question credits nothing, and saying yes is
+    // what turns the round into the long interval.
     const asking = !!card.firstSight
     const ASK_TIP = {
       again: 'The clue went unread — it starts learning now and comes back within minutes',
@@ -1416,8 +1415,9 @@
         : '')
     el.appendChild(foot)
     // FSRS rating row: the server pre-selects the inferred grade; tapping a
-    // different button re-grades the round. Doing nothing keeps the default,
-    // so the zero-interaction flow behaves exactly as before.
+    // different button re-grades the round. Doing nothing keeps the default —
+    // on a review that is the grade the round earned, and on a first sighting
+    // it is the uncredited Again the meta starts from until you say otherwise.
     const rateRow = foot.querySelector('.gc-rate')
     if (rateRow) {
       // Hue tracks how well you knew it: red (forgot) through amber to
