@@ -400,6 +400,154 @@ describe('loader map capture', () => {
   })
 })
 
+describe('loader game-creation hold', () => {
+  // This is the half of the gate that has to be in the loader. A wrap
+  // installed from the body lands whenever the body finishes downloading,
+  // which on a cold page load is after GeoGuessr has bound its own fetch — and
+  // then it is simply not in the chain for the rest of the session, silently.
+  // These run the loader as shipped and check the hold from outside.
+  const makeW = () => {
+    const fetched = []
+    const lines = []
+    const W = {
+      fetch: function (input, opts) {
+        fetched.push({ input, opts, self: this })
+        return Promise.resolve({ ok: true, input })
+      },
+    }
+    runLoader(W)
+    W.__geocoachGate.log = (m) => lines.push(m)
+    return { W, fetched, lines, gate: W.__geocoachGate, tap: W.__geocoachTap }
+  }
+  const CREATE = 'https://www.geoguessr.com/api/v3/games'
+
+  it('lets everything that is not game creation straight through', async () => {
+    const { W, fetched, gate } = makeW()
+    gate.hold = () => Promise.resolve()
+    W.fetch(CREATE, { method: 'GET' })
+    W.fetch('/api/v3/games/AbCdEf123456', { method: 'POST' })
+    W.fetch('/api/v4/geo-coding/rounds', { method: 'POST' })
+    expect(fetched).toHaveLength(3) // all three already on the wire
+    expect(gate.held).toBe(0)
+  })
+
+  it('still taps every request it holds nothing for', () => {
+    const { W, tap } = makeW()
+    W.fetch('/api/v3/games/AbCdEf123456', { method: 'POST' })
+    expect(tap.queue).toHaveLength(1)
+    expect(tap.queue[0].method).toBe('POST')
+  })
+
+  it('makes the request immediately while the body has not loaded yet', async () => {
+    const { W, fetched, gate } = makeW()
+    expect(gate.hold).toBeNull() // nothing to rebuild before the body exists
+    W.fetch(CREATE, { method: 'POST' })
+    expect(fetched).toHaveLength(1)
+  })
+
+  it('holds game creation until the rebuild publishes, then sends it unchanged', async () => {
+    const { W, fetched, gate, lines } = makeW()
+    let publish
+    gate.hold = () => new Promise((r) => (publish = r))
+    const opts = { method: 'POST', body: '{"map":"x"}' }
+    const p = W.fetch(CREATE, opts)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetched).toHaveLength(0) // held
+    expect(gate.held).toBe(1)
+    publish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetched).toHaveLength(1)
+    expect(fetched[0].opts).toBe(opts) // the same object, not a copy
+    await expect(p).resolves.toMatchObject({ ok: true })
+    expect(lines[0]).toMatch(/holding game creation/)
+    expect(lines[1]).toMatch(/this game gets the new deck/)
+  })
+
+  it('taps the held request only once it actually goes out', async () => {
+    const { W, gate, tap } = makeW()
+    let publish
+    gate.hold = () => new Promise((r) => (publish = r))
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(tap.queue).toHaveLength(0)
+    publish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(tap.queue).toHaveLength(1)
+  })
+
+  it('runs one rebuild however many creations arrive at once', async () => {
+    const { W, fetched, gate } = makeW()
+    let holds = 0
+    let publish
+    gate.hold = () => {
+      holds++
+      return new Promise((r) => (publish = r))
+    }
+    W.fetch(CREATE, { method: 'POST' })
+    W.fetch(CREATE, { method: 'post' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toBe(1)
+    publish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetched).toHaveLength(2)
+  })
+
+  it('starts a fresh rebuild for the game after next', async () => {
+    const { W, gate } = makeW()
+    let holds = 0
+    gate.hold = () => {
+      holds++
+      return Promise.resolve()
+    }
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(0)
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toBe(2)
+    expect(gate.held).toBe(2)
+  })
+
+  it('starts the game anyway when the rebuild overruns its budget', async () => {
+    const { W, fetched, gate, lines } = makeW()
+    gate.hold = () => new Promise(() => {}) // never publishes
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(5999)
+    expect(fetched).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(fetched).toHaveLength(1)
+    expect(lines.join(' ')).toMatch(/still running after 6000ms/)
+  })
+
+  it('takes the budget the body gives it', async () => {
+    const { W, fetched, gate } = makeW()
+    gate.budgetMs = 1000
+    gate.hold = () => new Promise(() => {})
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(1001)
+    expect(fetched).toHaveLength(1)
+  })
+
+  it('starts the game when the rebuild throws', async () => {
+    const { W, fetched, gate, lines } = makeW()
+    gate.hold = () => {
+      throw new Error('server down')
+    }
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetched).toHaveLength(1)
+    expect(lines.join(' ')).toMatch(/FAILED.*server down.*starting the game anyway/)
+  })
+
+  it('starts the game when the body has left no way to log', async () => {
+    const { W, fetched, gate } = makeW()
+    gate.log = null
+    gate.hold = () => Promise.resolve()
+    W.fetch(CREATE, { method: 'POST' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetched).toHaveLength(1)
+  })
+})
+
 describe('loader importLibrary capture', () => {
   it('captures a page that only ever destructures Map out of importLibrary', async () => {
     const W = {}

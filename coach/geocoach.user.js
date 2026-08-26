@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.15.0
+// @version      2.17.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -102,7 +102,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.15.0'
+  const BODY_VERSION = '2.17.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Best-effort dossier capture: with the cloud as FSRS authority, the LAN
@@ -2198,55 +2198,70 @@
     return Promise.race([done, deadline])
   }
 
-  /** Installs the gate over `W.fetch` and `XMLHttpRequest`, calling `hold`
-   * before a game-creation request is allowed out.
+  /** Fills in the rebuild the gate holds for, and installs the gate itself if
+   * nothing has already.
    *
-   * Outermost by construction: it wraps whatever fetch is current, which is
-   * already the capture wrap above, which is already the loader's tap. Those
-   * two only *watch* a request — they are handed the promise after the call
-   * has been made and cannot delay anything — so the delay has to live in its
-   * own wrap, and that wrap has to go on last.
+   * Normally something has: the loader creates the gate at document-start and
+   * wraps fetch there, and this function only hands it the rebuild, the
+   * budget and somewhere to log. That split is not tidiness. A wrap installed
+   * from here goes on whenever the body finishes downloading, which on a cold
+   * page load is after GeoGuessr has already bound its own fetch reference —
+   * and then it is simply not in the chain, silently, for that whole session.
+   * That is the failure the log showed: a card correctly pushed three days out
+   * came back within the minute, because creation beat its own republish by a
+   * second and nothing was standing in front of it.
    *
-   * `hold` lives on the gate object rather than in this closure because the
-   * body hot-reloads and the wrap does not: a gate holding the previous body's
-   * rebuild is a gate publishing through a dead script. */
+   * The wrap below therefore only runs where there is no loader — a body
+   * pasted straight into a console, and the tests. `hold` lives on the gate
+   * object either way, because the body hot-reloads and the wrap does not: a
+   * gate holding the previous body's rebuild is a gate publishing through a
+   * dead script. */
   function installRequestGate(W, hold) {
     const existing = W.__geocoachGate
     if (existing) {
       existing.hold = hold
-      return existing
+      existing.budgetMs = JIT_BUDGET_MS
+      existing.log = tlog
     }
     // `held` counts the games this gate has stood in front of — nothing reads
     // it, but `__geocoachGate.held` in a console is the fastest way to tell a
     // gate that is working from one that never fired.
-    const gate = (W.__geocoachGate = { hold, pending: null, held: 0 })
+    const gate = existing || (W.__geocoachGate = { hold, pending: null, held: 0 })
     /** One rebuild, however many creation requests arrive at once — a retry, a
      * second tab, a mutation React fired twice. They all wait on the same
      * publish rather than racing two of them at the same draft. Never rejects,
-     * so every caller's `.then` runs and every original request is made. */
-    const wait = () => {
-      if (!gate.pending) {
-        gate.held++
-        const clear = () => (gate.pending = null)
-        gate.pending = holdForRebuild(gate.hold).then(clear, clear)
-      }
-      return gate.pending
-    }
-    const pageFetch = W.fetch
-    W.fetch = function (input, opts) {
-      try {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        const method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
-        if (isGameCreate(url, method)) {
-          const self = this
-          const args = arguments
-          // Resolve-then-call rather than await: the arguments go through
-          // untouched, so an AbortSignal, a Request object or a body stream is
-          // the same object GeoGuessr handed us.
-          return wait().then(() => pageFetch.apply(self, args))
+     * so every caller's `.then` runs and every original request is made.
+     *
+     * The loader defines this too, and where it has, its version is the one in
+     * front of fetch — so use whichever already exists rather than making a
+     * second one that counts the same holds twice. */
+    const wait =
+      gate.wait ||
+      (gate.wait = () => {
+        if (!gate.pending) {
+          gate.held++
+          const clear = () => (gate.pending = null)
+          gate.pending = holdForRebuild(gate.hold).then(clear, clear)
         }
-      } catch {}
-      return pageFetch.apply(this, arguments)
+        return gate.pending
+      })
+    if (!existing) {
+      const pageFetch = W.fetch
+      W.fetch = function (input, opts) {
+        try {
+          const url = typeof input === 'string' ? input : (input && input.url) || ''
+          const method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
+          if (isGameCreate(url, method)) {
+            const self = this
+            const args = arguments
+            // Resolve-then-call rather than await: the arguments go through
+            // untouched, so an AbortSignal, a Request object or a body stream is
+            // the same object GeoGuessr handed us.
+            return wait().then(() => pageFetch.apply(self, args))
+          }
+        } catch {}
+        return pageFetch.apply(this, arguments)
+      }
     }
     // Every /api/v3/games call this script has ever seen came through the fetch
     // tap, and there is no XMLHttpRequest anywhere in GeoGuessr's client that

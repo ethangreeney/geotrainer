@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Loader: fetches the current GeoCoach script on every page load, so script changes never need a Tampermonkey reinstall.
-// @version      3.5.0
+// @version      3.6.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -25,20 +25,103 @@
   // fetch reference, so a wrap inside the body sees nothing. This tap buffers
   // every request until the body attaches a handler. Deliberately dumb — all
   // real logic lives in the hot-reloadable body, so this loader never changes.
+  //
+  // The same wrap also HOLDS game creation, and that half has to be here for
+  // exactly the reason the tap does. GeoGuessr freezes a game's five locations
+  // at POST /api/v3/games and never reads the map again, so the rebuild has to
+  // land before that request goes out. The body used to install the hold
+  // itself and it worked only when it won a race it had no business being in:
+  // on a page load where GeoGuessr bound its fetch before the body finished
+  // downloading, the hold simply was not in the chain, and a "Play again"
+  // pressed a second after the last guess started on the previous deck. From
+  // one evening's log, a card correctly pushed three days out came back within
+  // the minute because creation beat its own republish by a single second.
+  //
+  // So the *timing* lives here, where it is early enough to be certain, and
+  // the *decision* — what a rebuild is, how long it may take, where it logs —
+  // stays on the gate object, which the hot-reloadable body fills in. Until it
+  // does, `hold` is null and every request passes straight through: there is
+  // nothing to rebuild before the body exists.
   try {
     const W = unsafeWindow
     const tap = (W.__geocoachTap = { queue: [], handler: null })
+    const gate = (W.__geocoachGate = {
+      hold: null, // set by the body: the rebuild to run before creation
+      log: null, // set by the body: where these lines go home
+      budgetMs: 6000, // the body's own budget replaces this on load
+      pending: null,
+      held: 0,
+    })
+    const say = (line) => {
+      try {
+        if (gate.log) gate.log(line)
+      } catch {}
+    }
+    /** The bare collection path and nothing else. `/api/v3/games/<token>` is
+     * game *state* — read every round, written on every guess — and holding
+     * that one would stall the game rather than seed it. */
+    const isGameCreate = (url, method) =>
+      method === 'POST' && /\/api\/v3\/games\/?(\?|#|$)/.test(url || '')
+    /** One rebuild however many creation requests arrive at once, capped by
+     * the budget, and never rejecting — a hold that throws is a game that
+     * never starts. */
+    const wait = (gate.wait = () => {
+      if (gate.pending) return gate.pending
+      gate.held++
+      const t0 = Date.now()
+      const budget = gate.budgetMs || 6000
+      let settled = false
+      say('deck: holding game creation while the map is rebuilt')
+      const done = Promise.resolve()
+        .then(() => gate.hold())
+        .then(
+          () => {
+            settled = true
+            say('deck: rebuilt in ' + (Date.now() - t0) + 'ms — this game gets the new deck')
+          },
+          (err) => {
+            settled = true
+            say(
+              'deck: rebuild before the game FAILED after ' + (Date.now() - t0) + 'ms (' +
+                ((err && err.message) || err) + ') — starting the game anyway',
+            )
+          },
+        )
+      const deadline = new Promise((resolve) =>
+        setTimeout(() => {
+          if (!settled)
+            say('deck: rebuild still running after ' + budget + 'ms — starting the game on the deck already published')
+          resolve()
+        }, budget),
+      )
+      const clear = () => (gate.pending = null)
+      gate.pending = Promise.race([done, deadline]).then(clear, clear)
+      return gate.pending
+    })
     const origFetch = W.fetch
     W.fetch = function (input, opts) {
-      const p = origFetch.apply(this, arguments)
+      let url = ''
+      let method = 'GET'
       try {
-        const url = typeof input === 'string' ? input : (input && input.url) || ''
-        const method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
-        const rec = { url, method, promise: p }
-        if (tap.handler) tap.handler(rec)
-        else if (tap.queue.length < 500) tap.queue.push(rec)
+        url = typeof input === 'string' ? input : (input && input.url) || ''
+        method = ((opts && opts.method) || (input && input.method) || 'GET').toUpperCase()
       } catch {}
-      return p
+      // Resolve-then-call rather than await: the arguments go through
+      // untouched, so an AbortSignal, a Request object or a body stream is the
+      // same object GeoGuessr handed us.
+      const call = () => {
+        const p = origFetch.apply(this, arguments)
+        try {
+          const rec = { url, method, promise: p }
+          if (tap.handler) tap.handler(rec)
+          else if (tap.queue.length < 500) tap.queue.push(rec)
+        } catch {}
+        return p
+      }
+      try {
+        if (gate.hold && isGameCreate(url, method)) return wait().then(call)
+      } catch {}
+      return call()
     }
   } catch (e) {
     console.error('[geocoach loader] fetch tap failed', e)
