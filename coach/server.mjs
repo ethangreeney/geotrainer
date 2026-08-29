@@ -30,6 +30,7 @@ import {
   gradeRound,
   MASTERY_DAYS,
   newIntroducedToday,
+  reviewsCompletedToday,
   ratingNameFor,
   retrievabilityOf,
 } from './scheduler.mjs'
@@ -176,6 +177,31 @@ function toLadder(catalogs) {
     tier: c.tier,
     metas: [...new Set(c.locations.map((l) => metaKeyOf(l.country, l.metaName)).filter(Boolean))],
   }))
+}
+
+/**
+ * The session as things-done against things-to-do, in one place.
+ *
+ * Field-for-field what the cloud Worker's /round and /status return, because
+ * the same userscript draws the same readout whichever host answered it: a
+ * laptop that named the halves differently would simply stop the progress bar
+ * appearing on the machine it was developed on.
+ *
+ * Neither half decides what "today" means — both counters take the
+ * scheduler's rolling window and its own line between a review and an
+ * introduction.
+ */
+function dayState(cards, summary, now) {
+  const newIntroduced = newIntroducedToday(cards, now)
+  const newAllowance = Math.max(0, DAILY_NEW - newIntroduced)
+  return {
+    reviewsDone: reviewsCompletedToday(cards, now),
+    reviewsDue: summary.due,
+    newIntroduced,
+    dailyNew: DAILY_NEW,
+    newAllowance,
+    doneForToday: summary.due === 0 && (newAllowance === 0 || summary.unseen === 0),
+  }
 }
 
 /** Our own trainer-map rounds carry no LM data — resolve the meta locally. */
@@ -728,6 +754,9 @@ async function handleRound(payload) {
   }
   // Per-meta mastery: consecutive cold hits are what earn a meta its way OFF
   // the personal map. One miss resets the streak.
+  // One clock for the grade and for the day it lands in, so a round cannot be
+  // written at one instant and counted at another.
+  const now = new Date()
   let inferredRating = null
   let firstSight = false
   if (round.metaName) {
@@ -776,7 +805,7 @@ async function handleRound(payload) {
       state.deckCards = gradeRound(
         state.deckCards,
         { metaName: round.metaName, correct: credited },
-        new Date(),
+        now,
       )
     }
   }
@@ -825,9 +854,21 @@ async function handleRound(payload) {
   const scopedTo = round.metaName ? ((await loadScopeRegions())[round.metaName] ?? null) : null
   const scope = /^[A-Z]{2}$/.test(cc ?? '') ? { country: cc, regions: scopedTo } : null
 
+  // How far this round moved the session along. Outside `card` on purpose: a
+  // duel gets no clue card but still clears review, and a readout that left
+  // with the card would stall on exactly the rounds that moved it. The
+  // catalogs are already in memory by here (metaFromCatalogs loaded them), so
+  // this costs one walk of the ladder and no disk at all.
+  const day = dayState(
+    state.deckCards,
+    deckSummary(state.deckCards, toLadder(await loadCatalogs()), now),
+    now,
+  )
+
   return {
     ok: true,
     id,
+    day,
     // The userscript renders this as the post-round lesson card. Duels never
     // get one: metas are unknowable for arbitrary world locations, and ranked
     // play gets no live assistance — duel dossiers are for after-match review.
@@ -1210,15 +1251,11 @@ const server = createServer(async (req, res) => {
     const state = await loadState()
     const now = new Date()
     const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs()), now)
-    const newAllowance = Math.max(0, DAILY_NEW - newIntroducedToday(state.deckCards, now))
-    const doneForToday = summary.due === 0 && (newAllowance === 0 || summary.unseen === 0)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(
       JSON.stringify({
         ...summary,
-        dailyNew: DAILY_NEW,
-        newAllowance,
-        doneForToday,
+        ...dayState(state.deckCards, summary, now),
         trainerMapId: CONFIG.trainerMapId,
       }),
     )

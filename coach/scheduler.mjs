@@ -296,6 +296,39 @@ export function newIntroducedToday(cards, now) {
 }
 
 /**
+ * The other half of the day: how much review has already been cleared.
+ *
+ * Same rolling window as the allowance above, deliberately — a readout that
+ * counted reviews against one definition of "today" and new metas against
+ * another would be two numbers that never add up to one session.
+ *
+ * It reads `last_review`, which is FSRS's own stamp and is only written by
+ * gradeRound, so the count is exactly "cards this day actually graded".
+ * Padding rounds are ungraded and correctly invisible here: free practice is
+ * not work owed. Cards introduced inside the same window are excluded rather
+ * than double-counted — they are what newIntroducedToday is already reporting,
+ * and the whole point of the two numbers is that they are the two different
+ * kinds of work a session is made of.
+ *
+ * This counts cards, not answers: a card answered twice today is one card of
+ * the day's work, which is what makes `done + still-due` a stable total for a
+ * progress bar to fill rather than a denominator that grows as it is filled.
+ */
+export function reviewsCompletedToday(cards, now) {
+  const moment = now.getTime()
+  const since = moment - ROLLING_DAY_MS
+  let count = 0
+  for (const card of Object.values(cards ?? {})) {
+    const at = card?.last_review ? new Date(card.last_review).getTime() : NaN
+    if (!Number.isFinite(at) || at <= since || at > moment) continue
+    const born = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
+    if (Number.isFinite(born) && born > since && born <= moment) continue
+    count += 1
+  }
+  return count
+}
+
+/**
  * Which metas the next deck would introduce, named, in the order it would meet
  * them.
  *

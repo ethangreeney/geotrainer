@@ -2032,3 +2032,133 @@ describe('the websocket wrap does not break its host', () => {
     expect(W.WebSocket).toBe(first)
   })
 })
+
+/* ---------------------------------------------------------------------------
+ * The day's progress strip.
+ *
+ * Sliced like the sections above and run as shipped. Only the arithmetic is
+ * exercised here — what the two tracks are, how full each one is, and when the
+ * previous card's numbers are still this day's — because that is the part that
+ * decides what gets drawn, and it is the part with no browser in it.
+ * ------------------------------------------------------------------------ */
+const DAY_START = "  // ---------------------------------------------------------- the day's work"
+const DAY_END = '  /** The Plonkit guide for this card'
+const daySection = cut(DAY_START, DAY_END)
+const DAY_EXPORTS =
+  ';return { dayTracks, dayFill, daySegments, dayBefore, DAY_SEGMENT_MAX, DAY_MEMORY_MS }'
+const dayApi = () => {
+  if (!daySection.ok) throw new Error("the day's-work section not found in geocoach.user.js")
+  return new Function(daySection.src + DAY_EXPORTS)()
+}
+
+/** A day block as the host sends it. */
+const dayBlock = (over = {}) => ({
+  reviewsDone: 3,
+  reviewsDue: 5,
+  newIntroduced: 2,
+  dailyNew: 10,
+  newAllowance: 8,
+  doneForToday: false,
+  ...over,
+})
+
+describe("the day's two tracks", () => {
+  it('is sliced out of the shipped body', () => {
+    expect(daySection.ok, "the day's-work section markers moved").toBe(true)
+    expect(daySection.src).toContain('function dayTracks(')
+    expect(daySection.src).toContain('function buildDayStrip(')
+  })
+
+  it('splits the day into reviews and new clues', () => {
+    const { dayTracks } = dayApi()
+    expect(dayTracks(dayBlock())).toEqual([
+      { key: 'reviews', label: 'Reviews', done: 3, total: 8 },
+      { key: 'new', label: 'New clues', done: 2, total: 10 },
+    ])
+  })
+
+  it('draws nothing at all for a host that sends no day', () => {
+    // The whole compatibility story: an older Worker's response simply has no
+    // `day`, and the card must come back exactly as it always did.
+    const { dayTracks } = dayApi()
+    expect(dayTracks(undefined)).toBe(null)
+    expect(dayTracks(null)).toBe(null)
+    expect(dayTracks('later')).toBe(null)
+  })
+
+  it('drops a track with no work in it rather than drawing it empty', () => {
+    // "Review only today" is a real setting; a row reading 0/0 forever is not
+    // a progress bar, it is furniture.
+    const { dayTracks } = dayApi()
+    const reviewOnly = dayBlock({ newIntroduced: 0, dailyNew: 0, newAllowance: 0 })
+    expect(dayTracks(reviewOnly).map((t) => t.key)).toEqual(['reviews'])
+    const nothingOwed = dayBlock({ reviewsDone: 0, reviewsDue: 0 })
+    expect(dayTracks(nothingOwed).map((t) => t.key)).toEqual(['new'])
+  })
+
+  it('keeps a finished day drawable even when both tracks are empty', () => {
+    // Nothing owed and no allowance left is the finish line, and the finish
+    // line is the one thing that still has to appear.
+    const { dayTracks } = dayApi()
+    const empty = { reviewsDone: 0, reviewsDue: 0, newIntroduced: 0, dailyNew: 0, newAllowance: 0 }
+    expect(dayTracks({ ...empty, doneForToday: false })).toBe(null)
+    expect(dayTracks({ ...empty, doneForToday: true })).toEqual([])
+  })
+
+  it('refuses to believe a total it was not sent', () => {
+    const { dayTracks } = dayApi()
+    const junk = dayTracks({ reviewsDone: -4, reviewsDue: 2.7, newIntroduced: null, newAllowance: '9' })
+    expect(junk).toEqual([{ key: 'reviews', label: 'Reviews', done: 0, total: 2 }])
+  })
+
+  it('fills each track by what is done over what the day holds', () => {
+    const { dayTracks, dayFill } = dayApi()
+    const [reviews, fresh] = dayTracks(dayBlock())
+    expect(dayFill(reviews)).toBeCloseTo(3 / 8)
+    expect(dayFill(fresh)).toBeCloseTo(0.2)
+    // Nothing over nothing is finished, not empty — otherwise a zero
+    // allowance draws a bar that can never fill.
+    expect(dayFill({ done: 0, total: 0 })).toBe(1)
+    // And it can never overflow, however the host counted.
+    expect(dayFill({ done: 9, total: 4 })).toBe(1)
+  })
+
+  it('draws small totals as segments and large ones as one bar', () => {
+    const { daySegments, DAY_SEGMENT_MAX } = dayApi()
+    expect(daySegments({ done: 1, total: 8 })).toBe(8)
+    expect(daySegments({ done: 1, total: DAY_SEGMENT_MAX })).toBe(DAY_SEGMENT_MAX)
+    expect(daySegments({ done: 1, total: DAY_SEGMENT_MAX + 1 })).toBe(0)
+    expect(daySegments({ done: 0, total: 0 })).toBe(0)
+  })
+})
+
+describe('what moved since the last card', () => {
+  const now = 1_700_000_000_000
+
+  it('animates from the numbers the last card left on screen', () => {
+    const { dayBefore } = dayApi()
+    const was = dayBlock({ reviewsDone: 2, reviewsDue: 6 })
+    const before = dayBefore(dayBlock(), { ts: now - 60_000, day: was }, now)
+    expect(before.map((t) => t.done)).toEqual([2, 2])
+  })
+
+  it('lands on today rather than replaying a morning that is over', () => {
+    const { dayBefore, DAY_MEMORY_MS } = dayApi()
+    const was = dayBlock({ reviewsDone: 2, reviewsDue: 6 })
+    const stale = { ts: now - DAY_MEMORY_MS - 1, day: was }
+    expect(dayBefore(dayBlock(), stale, now)).toBe(null)
+    expect(dayBefore(dayBlock(), null, now)).toBe(null)
+  })
+
+  it('refuses to fill from a denominator that has changed', () => {
+    // A different total is a different day — an allowance edited, a queue
+    // reshaped by a lapse — and filling from the old one draws a jump that
+    // never happened.
+    const { dayBefore } = dayApi()
+    const otherLoad = dayBlock({ reviewsDone: 2, reviewsDue: 9 })
+    expect(dayBefore(dayBlock(), { ts: now - 60_000, day: otherLoad }, now)).toBe(null)
+    // And a day that has since lost a track is not the same shape either.
+    const reviewOnly = dayBlock({ newIntroduced: 0, dailyNew: 0, newAllowance: 0 })
+    expect(dayBefore(dayBlock(), { ts: now - 60_000, day: reviewOnly }, now)).toBe(null)
+  })
+})

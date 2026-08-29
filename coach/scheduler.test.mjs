@@ -8,6 +8,7 @@ import {
   MASTERY_DAYS,
   newIntroducedToday,
   rankDeck,
+  reviewsCompletedToday,
   ratingNameFor,
   unlockedTiers,
 } from './scheduler.mjs'
@@ -234,6 +235,64 @@ describe('newIntroducedToday', () => {
     expect(newIntroducedToday(cards, at('2026-03-02T00:30:00Z'))).toBe(1)
     expect(newIntroducedToday(cards, at('2026-03-02T22:00:00Z'))).toBe(1)
     expect(newIntroducedToday(cards, at('2026-03-03T00:00:00Z'))).toBe(0)
+  })
+})
+
+describe('reviewsCompletedToday', () => {
+  /** A card answered at `when`, met long enough ago to be a review. */
+  const answeredAt = (when, firstSeen = plus(when, -30)) => ({
+    ...card({ due: plus(when, 6).toISOString(), lastReview: when.toISOString() }),
+    firstSeen: firstSeen.toISOString(),
+  })
+
+  it('counts nothing for an empty table or a card never answered', () => {
+    expect(reviewsCompletedToday({}, T0)).toBe(0)
+    expect(reviewsCompletedToday(null, T0)).toBe(0)
+    expect(reviewsCompletedToday({ [T1[0]]: { seen: 1, firstSeen: T0.toISOString() } }, T0)).toBe(0)
+  })
+
+  it('counts the cards graded inside the same rolling day the allowance uses', () => {
+    const cards = {
+      [T1[0]]: answeredAt(plus(T0, -0.1)),
+      [T1[1]]: answeredAt(plus(T0, -0.9)),
+      [T1[2]]: answeredAt(plus(T0, -2)), // answered the day before yesterday
+    }
+    expect(reviewsCompletedToday(cards, T0)).toBe(2)
+    expect(reviewsCompletedToday(cards, plus(T0, 1))).toBe(0)
+  })
+
+  it('leaves today\'s introductions to the allowance rather than counting them twice', () => {
+    // A meta met an hour ago has both stamps inside the window. It is one
+    // round of work, and it is new-card work — counting it on both halves
+    // would fill two bars off a single round.
+    const cards = {
+      [T1[0]]: answeredAt(plus(T0, -0.05), plus(T0, -0.05)),
+      [T1[1]]: answeredAt(plus(T0, -0.05)),
+    }
+    expect(reviewsCompletedToday(cards, T0)).toBe(1)
+    expect(newIntroducedToday(cards, T0)).toBe(1)
+  })
+
+  it('counts a card, not an answer', () => {
+    // last_review holds one instant, so a meta drilled three times today is
+    // one card of the day's work. That is what keeps done-plus-still-owed a
+    // total that stays put while it fills.
+    let cards = gradeRound({}, { metaName: T1[0] }, T0)
+    cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, 0.01))
+    cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, 0.02))
+    // Introduced in the same window, so it is still the allowance's card.
+    expect(reviewsCompletedToday(cards, plus(T0, 0.03))).toBe(0)
+    // A day later the introduction has aged out and the last answer has too.
+    expect(reviewsCompletedToday(cards, plus(T0, 1.5))).toBe(0)
+  })
+
+  it('sees the grade gradeRound actually wrote', () => {
+    // The stamp is FSRS's own, so this is only ever measuring real work: a
+    // meta drilled yesterday and left alone today does not count.
+    const yesterday = gradeRound({}, { metaName: T1[0], correct: true }, plus(T0, -1.2))
+    expect(reviewsCompletedToday(yesterday, T0)).toBe(0)
+    const again = gradeRound(yesterday, { metaName: T1[0], correct: true }, plus(T0, -0.1))
+    expect(reviewsCompletedToday(again, T0)).toBe(1)
   })
 })
 

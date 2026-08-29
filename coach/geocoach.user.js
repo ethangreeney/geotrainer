@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.22.0
+// @version      2.23.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -117,7 +117,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.22.0'
+  const BODY_VERSION = '2.23.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
@@ -1260,6 +1260,285 @@
     removeScopeOverlay()
   }
 
+  // ---------------------------------------------------------- the day's work
+  /**
+   * The session, drawn on the back of the lesson card.
+   *
+   * The scheduler has had Anki's day semantics for a while — an allowance of
+   * new metas, a review queue, a point at which there is nothing left owed —
+   * but none of it was visible from inside a game. The only way to know
+   * whether a session was nearly over was to alt-tab to the console, which is
+   * exactly the moment a session ends for other reasons.
+   *
+   * So the numbers ride home on the round response (`day`, beside `card`) and
+   * land here: two tracks that fill as the day is cleared, and a finish line
+   * that says so when there is nothing left. Nothing is computed locally —
+   * every number is the host's, off one clock, so the card and the /status
+   * widget cannot tell two different stories about the same minute.
+   */
+
+  /**
+   * Below this many units a track is drawn as discrete segments, above it as
+   * one continuous bar.
+   *
+   * Segments are the better readout because the thing being counted really is
+   * discrete — a round is a round — and a segment lighting up is a beat the
+   * eye catches where two percent of extra bar width is not. They stop being
+   * readable once they are thinner than the gaps between them, which on a card
+   * this wide is somewhere around fifteen.
+   */
+  const DAY_SEGMENT_MAX = 14
+
+  /**
+   * The day block as the two things a session is made of.
+   *
+   * Each track's total is its own done-plus-remaining and nothing else, which
+   * is what makes them bars rather than a pair of tallies: reviews cleared plus
+   * reviews still owed is the day's review load, and metas met plus the
+   * allowance left is its new-material load. Neither denominator can move
+   * unless the day itself does.
+   *
+   * A track with nothing in it is dropped rather than drawn empty — an
+   * allowance of zero is a real setting ("review only today") and a row that
+   * reads 0/0 forever is noise. A response with no `day` at all is an older
+   * host, and gets nothing.
+   */
+  function dayTracks(day) {
+    if (!day || typeof day !== 'object') return null
+    const n = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.trunc(v) : 0)
+    const reviewsDone = n(day.reviewsDone)
+    const newDone = n(day.newIntroduced)
+    const tracks = [
+      { key: 'reviews', label: 'Reviews', done: reviewsDone, total: reviewsDone + n(day.reviewsDue) },
+      { key: 'new', label: 'New clues', done: newDone, total: newDone + n(day.newAllowance) },
+    ].filter((t) => t.total > 0)
+    return tracks.length || day.doneForToday ? tracks : null
+  }
+
+  /** How full a track is, 0..1. A track with no work in it is finished, not
+   * empty — that is the only honest reading of nothing over nothing, and it is
+   * what keeps a zero allowance from drawing an eternally unfinished bar. */
+  const dayFill = (track) =>
+    track.total > 0 ? Math.max(0, Math.min(1, track.done / track.total)) : 1
+
+  /** How many segments to draw for a track, or 0 to draw a continuous bar. */
+  const daySegments = (track) =>
+    track.total > 0 && track.total <= DAY_SEGMENT_MAX ? track.total : 0
+
+  /**
+   * Which tracks moved since the last card, so only those get an animated
+   * beat.
+   *
+   * The previous day is remembered rather than derived because a round is the
+   * only thing that changes it and each round is a separate page state: with
+   * no memory every card would either animate from zero (a bar that resets
+   * itself every round is telling you the opposite of what it means) or not
+   * animate at all. Stale memories are ignored — coming back after lunch, or
+   * after the rolling window has turned over, should land on today's numbers
+   * rather than replay a morning that is over.
+   */
+  const DAY_MEMORY_MS = 2 * 60 * 60 * 1000
+  function dayBefore(day, remembered, at) {
+    if (!remembered || !Number.isFinite(remembered.ts) || at - remembered.ts > DAY_MEMORY_MS) return null
+    const was = dayTracks(remembered.day)
+    const now = dayTracks(day)
+    if (!was || !now) return null
+    // A changed denominator is a different day (a new-card setting edited, a
+    // review queue reshaped by a lapse); filling from the old one would draw a
+    // jump that never happened.
+    const same = now.every((t, i) => was[i] && was[i].key === t.key && was[i].total === t.total)
+    return same ? was : null
+  }
+
+  /**
+   * The strip itself: a header, one row per track, and the finish line.
+   *
+   * Returns the element and the beat to play once it is on screen, because a
+   * width transition on an element that was never laid out simply does not
+   * run — the browser has no first value to interpolate from.
+   */
+  function buildDayStrip(day, before, reduced) {
+    const tracks = dayTracks(day)
+    if (!tracks) return null
+    const done = !!day.doneForToday
+    if (!document.getElementById('gc-day-anim')) {
+      const st = document.createElement('style')
+      st.id = 'gc-day-anim'
+      st.textContent =
+        '@keyframes gc-day-land{0%{opacity:0;transform:translateY(3px) scale(.94)}' +
+        '60%{opacity:1;transform:translateY(0) scale(1.03)}100%{opacity:1;transform:none}}' +
+        '@keyframes gc-day-sweep{0%{transform:translateX(-100%)}100%{transform:translateX(220%)}}'
+      document.head.appendChild(st)
+    }
+    const el = document.createElement('div')
+    el.className = 'gc-day'
+    el.style.cssText =
+      'padding:11px 16px 12px;margin-top:8px;border-top:1px solid rgba(255,255,255,.07);' +
+      'background:rgba(5,0,25,.22)'
+    const HUE = {
+      reviews: ['#8fd44a', '#c9f75d'],
+      new: ['#4f9ae0', '#7dc4ff'],
+    }
+    // Both rows are drawn the same way or neither is: a segmented row stacked
+    // on a solid one reads as two unrelated widgets rather than one day, and a
+    // twenty-review backlog is exactly the day where the two disagree.
+    const segmented = tracks.every((t) => daySegments(t) > 0)
+    // The tallies are given one width for the whole strip — a wider "10/10"
+    // under a "4/8" would otherwise end its bar short, and two bars that stop
+    // at different places read as two different scales.
+    const tally = 2 * Math.max(...tracks.map((t) => String(t.total).length)) + 1
+    el.innerHTML =
+      `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;min-height:19px">` +
+      `<span style="font-size:11.5px;font-weight:600;color:rgba(232,228,246,.62)">Today</span>` +
+      `<span class="gc-day-done" style="opacity:0;background:linear-gradient(180deg,#c9f75d,#97e851);` +
+      `color:#17300d;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),0 2px 5px rgba(5,0,25,.4);` +
+      `font-weight:700;font-size:10.5px;padding:3px 9px;border-radius:999px;white-space:nowrap">` +
+      `✓ Done for today</span></div>` +
+      tracks
+        .map((t) => {
+          const [from, to] = HUE[t.key]
+          const cells = segmented ? daySegments(t) : 0
+          const bar = cells
+            ? `<div class="gc-day-track" style="flex:1 1 auto;display:flex;gap:3px;height:7px">` +
+              Array.from({ length: cells }, (_, i) => `<span data-cell="${i}" style="flex:1 1 0;border-radius:2px;` +
+                `background:rgba(255,255,255,.07);box-shadow:inset 0 1px 2px rgba(5,0,25,.5);` +
+                `transition:background .28s ease,box-shadow .28s ease"></span>`).join('') +
+              `</div>`
+            : `<div class="gc-day-track" style="flex:1 1 auto;height:7px;border-radius:999px;` +
+              `background:rgba(255,255,255,.07);box-shadow:inset 0 1px 2px rgba(5,0,25,.5);overflow:hidden">` +
+              `<span class="gc-day-fill" style="display:block;height:100%;width:0%;border-radius:999px;` +
+              `background:linear-gradient(90deg,${from},${to});transition:width .8s cubic-bezier(.22,.9,.3,1)"></span></div>`
+          return (
+            `<div class="gc-day-row" data-track="${t.key}" style="display:flex;align-items:center;gap:10px;margin-top:8px;position:relative">` +
+            `<span style="flex:0 0 66px;font-size:11.5px;color:#a99fce">${t.label}</span>` +
+            bar +
+            `<span class="gc-day-num" style="flex:0 0 ${tally}ch;text-align:right;font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;` +
+            `font-variant-numeric:tabular-nums;color:#e8e4f6"><span class="gc-day-count">0</span>` +
+            `<span style="opacity:.42">/${t.total}</span></span></div>`
+          )
+        })
+        .join('')
+
+    // Where each track starts from: the last card's numbers when they are
+    // still this day's, otherwise the finished value with no motion at all —
+    // a bar that fills from zero on a card that changed nothing is a lie
+    // about what just happened.
+    const start = tracks.map((t, i) => (before ? before[i].done : reduced ? t.done : 0))
+
+    const paintCells = (row, track, upTo) => {
+      const [from, to] = HUE[track.key]
+      row.querySelectorAll('[data-cell]').forEach((cell, i) => {
+        const on = i < upTo
+        cell.style.background = on ? `linear-gradient(180deg,${to},${from})` : 'rgba(255,255,255,.07)'
+        cell.style.boxShadow = on
+          ? `inset 0 1px 0 rgba(255,255,255,.35),0 1px 3px rgba(5,0,25,.45)`
+          : 'inset 0 1px 2px rgba(5,0,25,.5)'
+      })
+    }
+
+    // The resting state, drawn immediately, so a card that never gets its beat
+    // (reduced motion, a card removed before the frame lands) is still correct.
+    const settle = () => {
+      el.querySelectorAll('.gc-day-row').forEach((row, i) => {
+        const t = tracks[i]
+        row.querySelector('.gc-day-count').textContent = String(t.done)
+        const fill = row.querySelector('.gc-day-fill')
+        if (fill) fill.style.width = dayFill(t) * 100 + '%'
+        else paintCells(row, t, t.done)
+      })
+      const pill = el.querySelector('.gc-day-done')
+      if (done) pill.style.opacity = '1'
+      else pill.remove()
+    }
+
+    if (reduced) {
+      settle()
+      return { el, play: () => {} }
+    }
+
+    // The opening state: whatever the last card left on screen.
+    el.querySelectorAll('.gc-day-row').forEach((row, i) => {
+      const t = tracks[i]
+      row.querySelector('.gc-day-count').textContent = String(start[i])
+      const fill = row.querySelector('.gc-day-fill')
+      if (fill) fill.style.width = dayFill({ done: start[i], total: t.total }) * 100 + '%'
+      else paintCells(row, t, start[i])
+    })
+    if (!done) el.querySelector('.gc-day-done').remove()
+
+    const play = () => {
+      if (!el.isConnected) return
+      el.querySelectorAll('.gc-day-row').forEach((row, i) => {
+        const t = tracks[i]
+        const fill = row.querySelector('.gc-day-fill')
+        if (fill) fill.style.width = dayFill(t) * 100 + '%'
+        else
+          // Segments light up in sequence rather than together: two cells
+          // arriving at once reads as a rendering glitch, one after another
+          // reads as two rounds.
+          for (let c = start[i]; c < t.done; c++)
+            setTimeout(() => paintCells(row, t, c + 1), 90 * (c - start[i]))
+        countTo(row.querySelector('.gc-day-count'), start[i], t.done)
+      })
+      // The finish line lands after the bars do, and sweeps once. One pass,
+      // no repeat: the day being over is a fact to notice, not a state to
+      // celebrate at.
+      const pill = el.querySelector('.gc-day-done')
+      if (!pill) return
+      setTimeout(() => {
+        if (!el.isConnected) return
+        pill.style.opacity = '1'
+        pill.style.animation = 'gc-day-land .42s cubic-bezier(.34,1.56,.64,1)'
+        el.querySelectorAll('.gc-day-track').forEach((track) => {
+          const glare = document.createElement('span')
+          glare.style.cssText =
+            'position:absolute;inset:0;pointer-events:none;border-radius:999px;overflow:hidden'
+          glare.innerHTML =
+            '<span style="position:absolute;top:0;bottom:0;width:35%;' +
+            'background:linear-gradient(90deg,transparent,rgba(255,255,255,.42),transparent);' +
+            'animation:gc-day-sweep .9s ease-in-out"></span>'
+          track.style.position = 'relative'
+          track.appendChild(glare)
+          setTimeout(() => glare.remove(), 1000)
+        })
+      }, 620)
+    }
+    return { el, play }
+  }
+
+  /** A numeral that walks to its new value. Eased out, so it lands rather than
+   * stopping — and skipped entirely when there is nothing to walk. */
+  function countTo(node, from, to, ms = 620) {
+    if (from === to) {
+      node.textContent = String(to)
+      return
+    }
+    const t0 = performance.now()
+    const step = (at) => {
+      const k = Math.min(1, (at - t0) / ms)
+      const eased = 1 - Math.pow(1 - k, 3)
+      node.textContent = String(Math.round(from + (to - from) * eased))
+      if (k < 1 && node.isConnected) requestAnimationFrame(step)
+      else node.textContent = String(to)
+    }
+    requestAnimationFrame(step)
+  }
+
+  /** The day as it stood on the last card, so the next one knows what moved. */
+  const DAY_MEMORY_KEY = 'gc-day-prev'
+  function rememberDay(day) {
+    try {
+      localStorage.setItem(DAY_MEMORY_KEY, JSON.stringify({ ts: Date.now(), day }))
+    } catch {}
+  }
+  function recallDay() {
+    try {
+      return JSON.parse(localStorage.getItem(DAY_MEMORY_KEY))
+    } catch {
+      return null
+    }
+  }
+
   /** The Plonkit guide for this card: LM's footer usually links it; otherwise
    * derive the country page from the "Country: Meta" name. */
   function guideUrl(card) {
@@ -1279,7 +1558,7 @@
   /** Post-round lesson card: the meta you were meant to spot, LM's own words.
    * The footer link opens the Plonkit guide; the card stays until the next
    * round starts (or you ✕ it) so you can read the guide and come back. */
-  function showCard(card) {
+  function showCard(card, day) {
     if (!card || (!card.note && !card.metaName)) return
     if (/^\/(duels|team-duels)\//.test(location.pathname)) return // never during ranked
     tlog('showCard: ' + (card.metaName || 'note-only'))
@@ -1396,7 +1675,7 @@
           // The ⓘ advertises the button tooltips (and carries one itself) —
           // without it there's no hint that hovering a grade explains it.
           `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 2px 7px">` +
-          `<span style="font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${asking ? '#ffc76e' : 'rgba(232,228,246,.42)'}">${asking ? 'Did you use this clue?' : 'Rate your recall'}</span>` +
+          `<span style="font-size:11px;font-weight:600;color:${asking ? '#ffc76e' : 'rgba(232,228,246,.55)'}">${asking ? 'Did you use this clue?' : 'Rate your recall'}</span>` +
           `<span title="Hover either answer to see what it means for your review schedule" style="cursor:help;font-size:9px;font-weight:700;font-style:italic;font-family:Georgia,serif;color:rgba(232,228,246,.5);border:1px solid rgba(232,228,246,.32);border-radius:999px;width:13px;height:13px;line-height:11px;text-align:center;user-select:none">i</span></div>` +
           `<div style="display:flex;gap:7px">` +
           RATE_KEYS.map((r) => `<button data-rate="${r}" title="${RATE_TITLE[r]}">${RATE_TEXT[r]}</button>`).join('') +
@@ -1405,6 +1684,25 @@
       (url
         ? `<a href="${url}" target="_blank" rel="noopener" style="display:block;padding:11px 16px;margin-top:8px;font-size:11.5px;font-weight:700;color:#a3e961;letter-spacing:.02em;text-decoration:none;background:rgba(5,0,25,.25);border-top:1px solid rgba(255,255,255,.07)">Open Plonkit guide ↗</a>`
         : '')
+    // The day's progress, between the grades and the guide link: the last
+    // band of the card, where a glance goes after the clue has been read.
+    // A host that does not send `day` simply gets no strip — the card is
+    // otherwise unchanged, which is what makes this safe to ship ahead of a
+    // deploy.
+    const reducedMotion = (() => {
+      try {
+        return !!matchMedia('(prefers-reduced-motion: reduce)').matches
+      } catch {
+        return false
+      }
+    })()
+    const strip = day ? buildDayStrip(day, dayBefore(day, recallDay(), Date.now()), reducedMotion) : null
+    if (strip) {
+      const link = foot.querySelector('a')
+      if (link) foot.insertBefore(strip.el, link)
+      else foot.appendChild(strip.el)
+      rememberDay(day)
+    }
     el.appendChild(foot)
     // FSRS rating row: the server pre-selects the inferred grade; tapping a
     // different button re-grades the round. Doing nothing keeps the default —
@@ -1558,6 +1856,10 @@
     requestAnimationFrame(() => {
       el.style.opacity = '1'
       el.style.transform = 'translateY(0)'
+      // The bars fill a beat after the card has settled, not with it: two
+      // motions starting together read as one, and the one worth watching is
+      // the smaller of the two.
+      if (strip) setTimeout(strip.play, 220)
     })
     drawScopeOverlay(card)
   }
@@ -1576,7 +1878,7 @@
     const accepted = (j) => {
       tlog('post ' + key + ' accepted after ' + (Date.now() - tPost) + 'ms' + (j && j.duplicate ? ' (duplicate)' : j && j.card ? (j.card.scope ? ' (card, scope ' + j.card.scope.country + ')' : ' (card, NO SCOPE)') : ' (no card)') + (j && j.timings ? ' server=' + JSON.stringify(j.timings) : ''))
       if (j && j.duplicate) return
-      if (j) showCard(j.card)
+      if (j) showCard(j.card, j.day)
       if (onAccepted) onAccepted()
     }
     // A single LAN blip (lost SYN, WiFi hiccup on the gaming PC) shouldn't

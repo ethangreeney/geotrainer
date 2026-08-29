@@ -50,6 +50,10 @@ const TOKENS = {
   reject: 'test-token-config-reject-01',
   doneDash: 'test-token-all-done-dash-0',
   partDash: 'test-token-part-day-dash-0',
+  roundMixed: 'test-token-round-mixed-001',
+  roundNew: 'test-token-round-new-00001',
+  roundLast: 'test-token-round-last-0001',
+  roundDuel: 'test-token-round-duel-0001',
 }
 
 describe('worker source', () => {
@@ -144,6 +148,10 @@ function makeDB(state, rounds = [], account = { token: TOKEN, config: DEFAULT_CO
         correct: r.correct ? 1 : 0,
       }))
     if (sql.includes('SELECT json FROM rounds')) return rounds.map((r) => ({ json: JSON.stringify(r) }))
+    // The round pipeline's own two: the dup probe reads a different projection
+    // again, and the insert is only ever asserted on through what it returns.
+    if (sql.includes('SELECT id, ts FROM rounds')) return null
+    if (sql.includes('INSERT INTO rounds')) return null
     if (sql.includes('FROM users WHERE token'))
       return args[0] === account.token
         ? { id: 1, name: 'Test', config: rows.config, created_at: '2026-01-01T00:00:00.000Z' }
@@ -166,6 +174,9 @@ function makeDB(state, rounds = [], account = { token: TOKEN, config: DEFAULT_CO
   return {
     saved: () => JSON.parse(rows.state),
     savedConfig: () => JSON.parse(rows.config),
+    // D1's batch is a transaction; here it is only ever two statements that
+    // must both land, so running them is faithful enough for the round path.
+    batch: (stmts) => Promise.all(stmts.map((stmt) => stmt.run())),
     prepare(sql) {
       const answer = (args) => ({
         async first() {
@@ -459,6 +470,80 @@ function mixedState(dueOnes, heldOnes) {
   return { ...held, deckCards: { ...due.deckCards, ...held.deckCards } }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * A day with a round played into it.
+ *
+ * The card at the end of a round now carries how far through the session it
+ * left the player, and the only way that number is worth anything is if it is
+ * read off the state the round just wrote. So these states are built with all
+ * three kinds of card in them — cleared this morning, still owed, met an hour
+ * ago — and the assertions are about what one more round does to them.
+ * ------------------------------------------------------------------------ */
+const HOUR = 3600000
+const DAY = 86400000
+const ago = (ms) => new Date(Date.now() - ms).toISOString()
+const ahead = (ms) => new Date(Date.now() + ms).toISOString()
+
+/** The meta the sample location teaches: what a posted round grades. */
+const sampleName = metaKey(sample)
+/** Ladder metas other than that one, to stack a day up around it. */
+const otherNames = dueNames.filter((n) => n !== sampleName)
+
+/** A review card placed by hand on the three dates that decide which half of
+ * the day it counts in: when it was met, when it was last answered, when it
+ * comes back. */
+const dayCard = (firstSeen, lastReview, due) => ({
+  due,
+  stability: 12,
+  difficulty: 5,
+  elapsed_days: 3,
+  scheduled_days: 6,
+  learning_steps: 0,
+  reps: 4,
+  lapses: 0,
+  state: 2,
+  last_review: lastReview,
+  firstSeen,
+  seen: 4,
+  correct: 3,
+  streak: 1,
+})
+
+/**
+ * Mid-session: two reviews cleared two hours ago, four still owed (the sample
+ * among them), and two new metas met an hour ago out of an allowance of ten.
+ */
+function dayInProgress() {
+  const deckCards = {}
+  deckCards[sampleName] = dayCard(ago(30 * DAY), ago(3 * DAY), ago(HOUR))
+  for (const n of otherNames.slice(0, 2)) deckCards[n] = dayCard(ago(20 * DAY), ago(2 * HOUR), ahead(30 * DAY))
+  for (const n of otherNames.slice(2, 5)) deckCards[n] = dayCard(ago(40 * DAY), ago(5 * DAY), ago(2 * DAY))
+  for (const n of otherNames.slice(5, 7)) deckCards[n] = dayCard(ago(HOUR), ago(HOUR), ahead(30 * DAY))
+  return { countries: {}, confusions: {}, metas: {}, deckCards, lastDeck: null }
+}
+
+/**
+ * One review short of the finish line: the sample is the last thing owed, and
+ * an allowance of two was spent an hour ago. Answering it ends the day.
+ */
+function lastOwedOfTheDay() {
+  const deckCards = {}
+  deckCards[sampleName] = dayCard(ago(30 * DAY), ago(3 * DAY), ago(HOUR))
+  for (const n of otherNames.slice(0, 2)) deckCards[n] = dayCard(ago(HOUR), ago(HOUR), ahead(30 * DAY))
+  return { countries: {}, confusions: {}, metas: {}, deckCards, lastDeck: null }
+}
+
+/** A played round, pinned on the sample location and guessed exactly right, so
+ * the grade is never what a case is really about. */
+const roundPayload = (over) => ({
+  location: { lat: sample.lat, lng: sample.lng, panoId: sample.panoId },
+  guess: { lat: sample.lat, lng: sample.lng },
+  mapId: 'aaaaaaaaaaaaaaaaaaaaaaaa',
+  score: 5000,
+  ...over,
+})
+
 /** Everything a settings write must refuse: none of these is a count of metas.
  * undefined is the field left off the payload entirely. */
 const BAD_DAILY_NEW = [undefined, null, '', 'twenty', -1, 101, 1e9, true, {}, [1]]
@@ -499,6 +584,9 @@ const out = {
     state: spentState(dueNames.slice(0, 2)),
   }),
   status: await call('/status', { headers: auth, state: dueState(dueNames) }),
+  // The same mid-session day the duel round is asked about, put to /status:
+  // the two readouts sit on screen together and must agree.
+  statusMidDay: await call('/status', { headers: auth, state: dayInProgress() }),
   statusAllDone: await call('/status', {
     headers: authFor(TOKENS.doneStatus),
     token: TOKENS.doneStatus,
@@ -567,6 +655,40 @@ const out = {
     config: '{"dailyNew":5}',
     state: spentState(dueNames.slice(0, 2)),
   }),
+  // One review answered mid-session: the day should show one more cleared and
+  // one fewer owed, with the new-meta half untouched.
+  roundReview: await call('/round', {
+    method: 'POST',
+    headers: authFor(TOKENS.roundMixed),
+    token: TOKENS.roundMixed,
+    state: dayInProgress(),
+    payload: roundPayload({ token: 'game-mixed', roundNumber: 1 }),
+  }),
+  // The same location on an empty account: a first sighting, which spends
+  // allowance rather than clearing review.
+  roundFirstSight: await call('/round', {
+    method: 'POST',
+    headers: authFor(TOKENS.roundNew),
+    token: TOKENS.roundNew,
+    payload: roundPayload({ token: 'game-new', roundNumber: 2 }),
+  }),
+  // The round that ends the day.
+  roundFinishes: await call('/round', {
+    method: 'POST',
+    headers: authFor(TOKENS.roundLast),
+    token: TOKENS.roundLast,
+    config: '{"dailyNew":2}',
+    state: lastOwedOfTheDay(),
+    payload: roundPayload({ token: 'game-last', roundNumber: 3 }),
+  }),
+  // A duel: no clue card at all, and the day must still come back.
+  roundDuel: await call('/round', {
+    method: 'POST',
+    headers: authFor(TOKENS.roundDuel),
+    token: TOKENS.roundDuel,
+    state: dayInProgress(),
+    payload: roundPayload({ token: 'game-duel', roundNumber: 4, source: 'duel' }),
+  }),
   loader: await call('/geocoach.user.js', { headers: auth, keepText: true }),
   loaderByQuery: await call('/geocoach.user.js?token=' + TOKEN, { keepText: true }),
   body: await call('/geocoach.body.js', { headers: auth, keepText: true }),
@@ -610,6 +732,7 @@ for (const key of ['country', 'countryPlain', 'region', 'unmatchedRegion', 'cana
   }
 
 out.sample = { panoId: sample.panoId, country: sample.country, metaName: sample.metaName }
+out.sampleName = sampleName
 out.ladderHead = ladderHead
 out.playedNames = dueNames.slice(0, 4)
 out.spentNames = dueNames.slice(0, 2)
@@ -949,6 +1072,84 @@ describe('GET /status', () => {
     expect(R.statusAllDone.body.newAllowance).toBe(0)
     expect(R.statusAllDone.body.doneForToday).toBe(true)
     expect(R.deckAllDone.body.summary.doneForToday).toBe(true)
+  })
+})
+
+describe('POST /round reports the day', () => {
+  it('counts one more review cleared and one fewer owed', () => {
+    // Two cleared before the round, four owed including this one.
+    const day = R.roundReview.body.day
+    expect(R.roundReview.body.card.metaName).toBe(R.sampleName)
+    expect(day.reviewsDone).toBe(3)
+    expect(day.reviewsDue).toBe(3)
+    // The review half moved; the new half did not.
+    expect(day.newIntroduced).toBe(2)
+    expect(day.dailyNew).toBe(10)
+    expect(day.newAllowance).toBe(8)
+    expect(day.doneForToday).toBe(false)
+  })
+
+  it('keeps each half a total that can be filled', () => {
+    // The whole reason both counts ride home together: done plus remaining is
+    // the day's load, and a bar drawn against it can only ever fill.
+    const day = R.roundReview.body.day
+    expect(day.reviewsDone + day.reviewsDue).toBe(6)
+    expect(day.newIntroduced + day.newAllowance).toBe(day.dailyNew)
+  })
+
+  it('spends allowance rather than review on a first sighting', () => {
+    // A meta met for the first time is an introduction, never a review — the
+    // card it just wrote is stamped inside today's window at both ends, and
+    // counting it twice would fill both bars off one round.
+    const day = R.roundFirstSight.body.day
+    expect(R.roundFirstSight.body.card.firstSight).toBe(true)
+    expect(day.newIntroduced).toBe(1)
+    expect(day.newAllowance).toBe(9)
+    expect(day.reviewsDone).toBe(0)
+    expect(day.doneForToday).toBe(false)
+  })
+
+  it('names the moment the day is finished', () => {
+    // The last thing owed, answered, against an allowance already spent.
+    const day = R.roundFinishes.body.day
+    expect(day.reviewsDone).toBe(1)
+    expect(day.reviewsDue).toBe(0)
+    expect(day.newIntroduced).toBe(2)
+    expect(day.dailyNew).toBe(2)
+    expect(day.newAllowance).toBe(0)
+    expect(day.doneForToday).toBe(true)
+  })
+
+  it('reports the day on a round that gets no card', () => {
+    // Duels are graded like anything else and never get a clue card. A day
+    // readout that travelled inside the card would stall on exactly the rounds
+    // a duel session is made of.
+    expect(R.roundDuel.body.card).toBe(null)
+    expect(R.roundDuel.body.day).toEqual({
+      reviewsDone: 2,
+      reviewsDue: 4,
+      newIntroduced: 2,
+      dailyNew: 10,
+      newAllowance: 8,
+      doneForToday: false,
+    })
+  })
+
+  it('says the same thing /status says about the same day', () => {
+    // One helper, three routes. The player reads the card between rounds and
+    // the widget while playing, so a second copy of this arithmetic would not
+    // be a duplicate — it would be a contradiction they watch happen.
+    const day = R.roundDuel.body.day
+    const status = R.statusMidDay.body
+    expect({
+      reviewsDone: status.reviewsDone,
+      reviewsDue: status.reviewsDue,
+      newIntroduced: status.newIntroduced,
+      dailyNew: status.dailyNew,
+      newAllowance: status.newAllowance,
+      doneForToday: status.doneForToday,
+    }).toEqual(day)
+    expect(status.due).toBe(day.reviewsDue)
   })
 })
 

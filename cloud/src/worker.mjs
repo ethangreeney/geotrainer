@@ -21,6 +21,7 @@ import {
   nextNewMetas,
   ratingNameFor,
   retrievabilityOf,
+  reviewsCompletedToday,
 } from '../../coach/scheduler.mjs'
 import { buildRankedDeck, deckSizeFor, metaKeyOf } from '../../coach/deck.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
@@ -86,6 +87,17 @@ const toLadder = (catalogs) =>
  */
 const ladderMetaCount = (ladder) =>
   new Set((ladder ?? []).flatMap((rung) => rung?.metas ?? [])).size
+
+/**
+ * The ladder, built once per isolate.
+ *
+ * It is a pure function of catalogs that are bundled at deploy time, so every
+ * rebuild was a few thousand string keys re-derived for an answer that could
+ * not have changed. It matters now because /round asks for it too, and that is
+ * the one route a player waits on between a guess and a card.
+ */
+let ladderCache = null
+const ladderOnce = () => (ladderCache ??= toLadder(CATALOGS))
 
 const haversineKm = (a, b) => {
   const rad = (d) => (d * Math.PI) / 180
@@ -742,6 +754,39 @@ function parseDailyNew(raw) {
  */
 const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_NEW
 
+/**
+ * The session, as a number of things done against a number of things to do.
+ *
+ * One function because there is one day. /status, the console and the card at
+ * the end of a round all answer "how far through today am I" and they are read
+ * side by side — the widget while playing, the card between rounds, the
+ * console afterwards — so a second copy of this arithmetic would not be a
+ * duplicate, it would be a contradiction the player watches happen.
+ *
+ * Both halves are counted off the scheduler's own rolling window and its own
+ * distinction between a review and an introduction (see reviewsCompletedToday),
+ * so nothing here decides what "today" means; it only reports it.
+ *
+ * `reviewsDone + reviewsDue` is the day's review load and `newIntroduced +
+ * newAllowance` is its new-material load, which is what makes each pair a bar
+ * that fills rather than a pair of unrelated tallies. `summary` is passed in
+ * rather than computed because every caller has already built it.
+ */
+function dayState(cards, config, summary, now) {
+  const dailyNew = dailyNewOf(config)
+  const newIntroduced = newIntroducedToday(cards, now)
+  const newAllowance = Math.max(0, dailyNew - newIntroduced)
+  return {
+    reviewsDone: reviewsCompletedToday(cards, now),
+    reviewsDue: summary.due,
+    newIntroduced,
+    dailyNew,
+    newAllowance,
+    // Nothing owed, and either no allowance left or nothing left to introduce.
+    doneForToday: summary.due === 0 && (newAllowance === 0 || summary.unseen === 0),
+  }
+}
+
 // ---------- dashboard ----------
 
 const pct = (correct, seen) => (seen ? correct / seen : 0)
@@ -829,7 +874,7 @@ async function buildProgress(env, user, live, now) {
 async function buildDashboard(env, user) {
   const now = new Date()
   const state = await loadUserState(env, user.id)
-  const ladder = toLadder(CATALOGS)
+  const ladder = ladderOnce()
   const summary = deckSummary(state.deckCards, ladder, now)
   // Distinct metas being tracked. The card table is keyed by meta name, so its
   // keys are already the distinct set — the over-count /deck had to fix (a map
@@ -844,9 +889,7 @@ async function buildDashboard(env, user) {
   // reports and worked out the same way off the same `now`, because a dashboard
   // that said the day was over while the map still served due cards would be
   // the more convincing of the two and the wrong one.
-  const dailyNew = dailyNewOf(user.config)
-  const newAllowance = Math.max(0, dailyNew - newIntroducedToday(state.deckCards, now))
-  const doneForToday = summary.due === 0 && (newAllowance === 0 || summary.unseen === 0)
+  const day = dayState(state.deckCards, user.config, summary, now)
   // And which clues that allowance is about to spend itself on. The console
   // asks the scheduler rather than reading the catalog itself, so the list is
   // the deck's own next introductions and not a second guess at them; a spent
@@ -855,7 +898,7 @@ async function buildDashboard(env, user) {
   // console can show the clue rather than only name it. The URL is the
   // client's to build (see site/api.ts) — the Worker has no business minting
   // image links it never fetches.
-  const upNext = nextNewMetas(state.deckCards, ladder, newAllowance).map(upNextEntry)
+  const upNext = nextNewMetas(state.deckCards, ladder, day.newAllowance).map(upNextEntry)
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
     metaName,
@@ -940,7 +983,7 @@ async function buildDashboard(env, user) {
       ladderTotal,
       nextDue: summary.nextDue,
     },
-    day: { dailyNew, newAllowance, doneForToday, upNext },
+    day: { ...day, upNext },
     metas: {
       solid: solid.length,
       holding: metaRows.length - solid.length - shaky.length,
@@ -1047,6 +1090,10 @@ async function handleRound(env, user, payload, ctx) {
     state.confusions[pair] = (state.confusions[pair] ?? 0) + 1
   }
 
+  // One clock for the grade and for the day it belongs to: a card written at
+  // one instant and counted at another is how a round lands just outside the
+  // window it was played in.
+  const now = new Date()
   let inferredRating = null
   let snapshot = null
   let firstSight = false
@@ -1088,7 +1135,7 @@ async function handleRound(env, user, payload, ctx) {
     // Correct padding rounds are free practice, ungraded (see the local bridge
     // for the FSRS rationale); a wrong padding answer is real forgetting.
     if (!(isPadding && correctScope)) {
-      state.deckCards = gradeRound(state.deckCards, { metaName, correct: credited }, new Date())
+      state.deckCards = gradeRound(state.deckCards, { metaName, correct: credited }, now)
     }
   }
 
@@ -1117,10 +1164,27 @@ async function handleRound(env, user, payload, ctx) {
   const scopedTo = metaName ? (SCOPE_REGIONS[metaName] ?? null) : null
   const scope = /^[A-Z]{2}$/.test(cc ?? '') ? { country: cc, regions: scopedTo } : null
 
+  // How far this round moved the session along, read off the card table this
+  // round has just updated. Free: deckSummary and the two day counters are
+  // pure walks over state already in memory, so there is no second trip to D1
+  // and no chance of the card disagreeing with the /status widget beside it.
+  //
+  // It rides outside `card` on purpose. A duel is graded like anything else
+  // and gets no clue card, but it still clears review — a day readout that
+  // vanished with the card would stall on the screen for the rounds that moved
+  // it most.
+  const day = dayState(
+    state.deckCards,
+    user.config,
+    deckSummary(state.deckCards, ladderOnce(), now),
+    now,
+  )
+
   return {
     ok: true,
     id,
     timings: { ...timed, total: since(t0) },
+    day,
     card:
       meta && source !== 'duel'
         ? {
@@ -1594,7 +1658,7 @@ export default {
         const { customCoordinates, ranking, stats } = buildRankedDeck(
           state.deckCards,
           CATALOGS,
-          toLadder(CATALOGS),
+          ladderOnce(),
           size,
           now,
           { dailyNew: dailyNewOf(user.config) },
@@ -1667,18 +1731,14 @@ export default {
       if (request.method === 'GET' && path === '/status') {
         const state = await loadUserState(env, user.id)
         const now = new Date()
-        const summary = deckSummary(state.deckCards, toLadder(CATALOGS), now)
-        // The same two numbers /deck reports, worked out the same way, so the
-        // widget and the map never disagree about whether the day is over:
-        // nothing owed, and either no allowance left or nothing left to
-        // introduce. Building a deck to find that out would be a write.
-        const dailyNew = dailyNewOf(user.config)
-        const newAllowance = Math.max(0, dailyNew - newIntroducedToday(state.deckCards, now))
+        const summary = deckSummary(state.deckCards, ladderOnce(), now)
+        // The same day /deck, the console and the post-round card report,
+        // worked out in the one place they all read it from, so the widget and
+        // the map never disagree about whether the day is over. Building a
+        // deck to find that out would be a write.
         return json({
           ...summary,
-          dailyNew,
-          newAllowance,
-          doneForToday: summary.due === 0 && (newAllowance === 0 || summary.unseen === 0),
+          ...dayState(state.deckCards, user.config, summary, now),
           trainerMapId: user.config.trainerMapId ?? null,
         })
       }
