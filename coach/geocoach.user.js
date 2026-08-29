@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.21.0
+// @version      2.22.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -117,7 +117,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.21.0'
+  const BODY_VERSION = '2.22.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
@@ -2384,6 +2384,42 @@
   const DECK_SIZE = 5
   const DECK_PATH = CLOUD ? '/deck?n=' + DECK_SIZE : '/deck'
 
+  // The one thing a rebuild says out loud.
+  //
+  // Rebuilds are housekeeping and stay silent, but a spaced-repetition day has
+  // an end and nothing on screen ever admitted it: the deck goes on publishing
+  // not-yet-due filler, so a finished queue and a full one look identical from
+  // the map. The deck now carries the day's own state — doneForToday, and how
+  // much of the new-meta allowance is left — so there is a finish line to
+  // show, at the two moments worth interrupting for: arriving at the site,
+  // where the counts size the sitting about to start, and stepping out of a
+  // game, where a finished queue is the answer to "one more?". Never on 'game
+  // starting' — nothing goes over a game that is about to begin.
+  //
+  // Once per crossing, so the hourly arrival rebuild and the one after every
+  // game do not keep reading a finished day back. A host that has not landed
+  // the allowance yet answers with neither field, and then there is nothing
+  // new to say and the old silence is still right.
+  let doneAnnounced = false
+  function announceDeck(reason, summary) {
+    if (reason === 'game starting') return
+    if (!summary || typeof summary.doneForToday !== 'boolean') return
+    if (summary.doneForToday) {
+      if (doneAnnounced) return
+      doneAnnounced = true
+      toast('GeoCoach: ✓ done for today', true)
+      return
+    }
+    doneAnnounced = false
+    // Only on arrival: between games the counts are noise, and the player is
+    // mid-session and already knows there is work.
+    if (reason !== 'arrival') return
+    const parts = []
+    if (summary.due) parts.push(summary.due + ' due')
+    if (summary.newAllowance) parts.push(summary.newAllowance + ' new left today')
+    if (parts.length) toast('GeoCoach: ' + parts.join(', '), true)
+  }
+
   async function gg(url, options) {
     const res = await fetch(url, { credentials: 'include', ...options })
     if (!res.ok) throw new Error(`geoguessr ${res.status} on ${url}`)
@@ -2482,6 +2518,10 @@
     const t0 = Date.now()
     try {
       const deck = await serverGet(DECK_PATH)
+      const summary = deck.summary || {}
+      // Before the publish, not after it: what the day owes is true whether or
+      // not the map turned out to be publishable.
+      announceDeck(reason, summary)
       if (!deck.customCoordinates || deck.customCoordinates.length < 5)
         return tlog('rebuild (' + reason + '): the deck came back too small to publish')
       let mapId = deck.trainerMapId
@@ -2527,7 +2567,12 @@
       // "how long does a rebuild take" stopped being idle curiosity.
       tlog(
         'rebuild (' + reason + '): map published in ' + (Date.now() - t0) + 'ms — ' +
-          deck.customCoordinates.length + ' locations, ' + deck.summary.due + ' due, ' + deck.summary.introduced + ' new',
+          deck.customCoordinates.length + ' locations, ' + summary.due + ' due, ' + summary.introduced + ' new' +
+          (typeof summary.doneForToday !== 'boolean'
+            ? ''
+            : summary.doneForToday
+              ? ' — done for today'
+              : ' — ' + summary.newAllowance + ' new left today'),
       )
     } catch (err) {
       tlog('rebuild (' + reason + ') FAILED after ' + (Date.now() - t0) + 'ms: ' + ((err && err.message) || err))

@@ -26,8 +26,10 @@ import { clipGeometry } from './geo/shape.mjs'
 import { buildRankedDeck, deckSizeFor, metaKeyOf } from './deck.mjs'
 import {
   deckSummary,
+  DEFAULT_DAILY_NEW,
   gradeRound,
   MASTERY_DAYS,
+  newIntroducedToday,
   ratingNameFor,
   retrievabilityOf,
 } from './scheduler.mjs'
@@ -105,6 +107,37 @@ async function loadState() {
 }
 
 const CONFIG = JSON.parse(await readFile(join(ROOT, 'config.json'), 'utf8'))
+
+/**
+ * The player's new-metas-a-day allowance, as the config file gives it — or the
+ * scheduler's default when the file has nothing sane to say.
+ *
+ * `dailyNew` is optional and absent from the shipped config on purpose: the
+ * number that matters is argued out in scheduler.mjs, and a host that has not
+ * been told otherwise should get that argument rather than a copy of it that
+ * can drift. So this only exists to catch a hand-edit — the file is edited by
+ * hand, which is exactly where a "10 " or a 1000 ends up.
+ *
+ * Validated rather than trusted because the failure is silent in the worst
+ * direction: a NaN allowance subtracts to NaN, every comparison against it is
+ * false, and the deck quietly stops introducing anything at all with nothing
+ * in the log to say why. Zero survives the check — "review only today" is a
+ * real setting — and the ceiling is only there so a stray extra digit cannot
+ * commit the next fortnight to a thousand new metas.
+ *
+ * The same reading the Worker gives its own stored setting, down to the
+ * ceiling and the tolerance of "10" for 10: the two hosts serve the same deck
+ * to the same player, and a config that means one thing on the laptop and
+ * another in the cloud is a bug that only shows up on the day one of them is
+ * unreachable.
+ */
+const MAX_DAILY_NEW = 100
+function resolveDailyNew(raw) {
+  if (typeof raw !== 'number' && (typeof raw !== 'string' || raw.trim() === '')) return DEFAULT_DAILY_NEW
+  const n = Math.trunc(Number(raw))
+  return Number.isFinite(n) && n >= 0 && n <= MAX_DAILY_NEW ? n : DEFAULT_DAILY_NEW
+}
+const DAILY_NEW = resolveDailyNew(CONFIG.dailyNew)
 
 /**
  * Meta-tagged location catalogs built by index-catalog.mjs, ordered by tier.
@@ -1115,6 +1148,7 @@ const server = createServer(async (req, res) => {
       toLadder(catalogs),
       size,
       now,
+      { dailyNew: DAILY_NEW },
     )
 
     // Not-yet-due metas are this deck's padding: getting one right proves
@@ -1124,30 +1158,70 @@ const server = createServer(async (req, res) => {
     state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name), padding: paddingNames }
     await writeFile(STATE_PATH, JSON.stringify(state, null, 2))
 
-    const due = ranking.filter((r) => r.kind === 'due').length
-    const fresh = ranking.filter((r) => r.kind === 'new').length
+    // Distinct names, not rows: the map floor can publish a second pano
+    // of the same meta, and that repeat is not a second introduction.
+    const due = new Set(ranking.filter((r) => r.kind === 'due').map((r) => r.name)).size
+    const fresh = new Set(ranking.filter((r) => r.kind === 'new').map((r) => r.name)).size
+    // The day's state travels with the counts, because a deck full of filler
+    // and a deck full of work look identical from the outside: `newAllowance`
+    // is what the rolling day still permits and `doneForToday` says nothing
+    // here is owed. The description goes onto the published GeoGuessr map, so
+    // when the queue is empty it says so rather than reciting two zeroes.
+    const stamp = now.toISOString().slice(0, 16)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(
       JSON.stringify({
         trainerMapId: CONFIG.trainerMapId,
         customCoordinates,
-        summary: { due, introduced: fresh, unlockedTiers: stats.unlockedTiers },
+        summary: {
+          due,
+          introduced: fresh,
+          unlockedTiers: stats.unlockedTiers,
+          newAllowance: stats.newAllowance,
+          doneForToday: stats.doneForToday,
+        },
         ranking,
         stats,
-        description: `Auto-generated spaced-repetition deck — ${due} due, ${fresh} new (${now.toISOString().slice(0, 16)})`,
+        description: stats.doneForToday
+          ? `Auto-generated spaced-repetition deck — all done for today (${stamp})`
+          : `Auto-generated spaced-repetition deck — ${due} due, ${fresh} new (${stamp})`,
       }),
     )
     console.log(
-      `[coach] deck: ${ranking.length} metas (${due} due, ${fresh} new, ${paddingNames.length} padding), ${customCoordinates.length} locations`,
+      `[coach] deck: ${ranking.length} metas (${due} due, ${fresh} new, ${paddingNames.length} padding), ` +
+        `${customCoordinates.length} locations — ` +
+        (stats.doneForToday
+          ? 'all done for today'
+          : `${stats.newAllowance} of ${DAILY_NEW} new left today`),
     )
     return
   }
   // Widget status line.
+  //
+  // The allowance is recomputed here rather than read off a deck, because
+  // asking /deck for it would write state.lastDeck: a status read would then
+  // rewrite what the next round is graded against. Same arithmetic rankDeck
+  // does — the day's cap less what the rolling twenty-four hours already spent
+  // — and the same reading of "done": nothing owed, and no new meta may be
+  // introduced, either because the day is spent or because the ladder has
+  // nothing left to show. One `now` for both halves, so the widget can never
+  // be handed a due count and an allowance from two different instants.
   if (req.method === 'GET' && req.url === '/status') {
     const state = await loadState()
-    const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs()), new Date())
+    const now = new Date()
+    const summary = deckSummary(state.deckCards, toLadder(await loadCatalogs()), now)
+    const newAllowance = Math.max(0, DAILY_NEW - newIntroducedToday(state.deckCards, now))
+    const doneForToday = summary.due === 0 && (newAllowance === 0 || summary.unseen === 0)
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ...summary, trainerMapId: CONFIG.trainerMapId }))
+    res.end(
+      JSON.stringify({
+        ...summary,
+        dailyNew: DAILY_NEW,
+        newAllowance,
+        doneForToday,
+        trainerMapId: CONFIG.trainerMapId,
+      }),
+    )
     return
   }
   // The prune list: which metas to drop from (and keep on) the LM personal map.

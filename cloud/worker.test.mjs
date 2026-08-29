@@ -30,6 +30,28 @@ const ROOT = new URL('..', import.meta.url).pathname
 /** The one account the in-memory D1 knows about; the runner below binds it too. */
 const TOKEN = 'test-token-0123456789abcdef'
 
+/**
+ * Accounts that differ only in their config row.
+ *
+ * A token each rather than one token with a config that changes, because the
+ * Worker memoises token→user for five minutes per isolate and the whole suite
+ * runs in one — a second call on the same token would be answered from the
+ * cache with the first call's settings, and the test would pass while
+ * measuring nothing.
+ */
+const TOKENS = {
+  three: 'test-token-daily-three-0000',
+  done: 'test-token-all-done-000000',
+  doneStatus: 'test-token-all-done-status',
+  write: 'test-token-config-write-001',
+  writeZero: 'test-token-config-write-002',
+  writeString: 'test-token-config-write-003',
+  writeMax: 'test-token-config-write-004',
+  reject: 'test-token-config-reject-01',
+  doneDash: 'test-token-all-done-dash-0',
+  partDash: 'test-token-part-day-dash-0',
+}
+
 describe('worker source', () => {
   it('references no name that does not exist', () => {
     let out = ''
@@ -95,6 +117,7 @@ import worker from ${JSON.stringify(join(ROOT, 'cloud/src/worker.mjs'))}
 
 const ROOT = ${JSON.stringify(ROOT)}
 const TOKEN = ${JSON.stringify(TOKEN)}
+const TOKENS = ${JSON.stringify(TOKENS)}
 
 // Nothing in this suite is allowed to touch the network. The only route that
 // would is the deck's Learnable Meta pre-warm, which is fire-and-forget and
@@ -107,8 +130,8 @@ globalThis.fetch = async () => {
  * clue cache that is always empty. Queries are matched on a distinctive
  * fragment of their SQL, which is fragile in exactly the way that is useful —
  * a rewritten query shows up here rather than silently returning nothing. */
-function makeDB(state, rounds = []) {
-  const rows = { state: JSON.stringify(state) }
+function makeDB(state, rounds = [], account = { token: TOKEN, config: DEFAULT_CONFIG }) {
+  const rows = { state: JSON.stringify(state), config: account.config }
   const run = (sql, args) => {
     // Three queries say FROM rounds and they want three different shapes, so
     // each is matched on the projection rather than the table.
@@ -122,9 +145,15 @@ function makeDB(state, rounds = []) {
       }))
     if (sql.includes('SELECT json FROM rounds')) return rounds.map((r) => ({ json: JSON.stringify(r) }))
     if (sql.includes('FROM users WHERE token'))
-      return args[0] === TOKEN
-        ? { id: 1, name: 'Test', config: '{"trainerMapId":"aaaaaaaaaaaaaaaaaaaaaaaa"}', created_at: '2026-01-01T00:00:00.000Z' }
+      return args[0] === account.token
+        ? { id: 1, name: 'Test', config: rows.config, created_at: '2026-01-01T00:00:00.000Z' }
         : null
+    // The config write, so a settings route can be asserted on what it stored
+    // rather than only on what it echoed.
+    if (sql.includes('UPDATE users SET config')) {
+      rows.config = args[0]
+      return null
+    }
     if (sql.includes('FROM states WHERE user_id')) return { json: rows.state }
     if (sql.includes('INTO states')) {
       rows.state = args[1]
@@ -136,6 +165,7 @@ function makeDB(state, rounds = []) {
   }
   return {
     saved: () => JSON.parse(rows.state),
+    savedConfig: () => JSON.parse(rows.config),
     prepare(sql) {
       const answer = (args) => ({
         async first() {
@@ -156,6 +186,9 @@ function makeDB(state, rounds = []) {
 
 const ctx = { waitUntil: () => {} }
 
+/** The config row every account starts on unless a scenario says otherwise. */
+const DEFAULT_CONFIG = '{"trainerMapId":"aaaaaaaaaaaaaaaaaaaaaaaa"}'
+
 /** The static-asset binding, as the Worker uses it: anything not in the map is
  * a 404, which is what makes the SPA fallback run. */
 function makeAssets(files = { '/': '<!doctype html><title>GeoCoach</title>' }) {
@@ -169,10 +202,31 @@ function makeAssets(files = { '/': '<!doctype html><title>GeoCoach</title>' }) {
   }
 }
 
-async function call(path, { headers = {}, state = null, rounds = [], assets = null, keepText = false } = {}) {
-  const db = makeDB(state ?? { countries: {}, confusions: {}, metas: {}, deckCards: {}, lastDeck: null }, rounds)
+async function call(
+  path,
+  {
+    headers = {},
+    state = null,
+    rounds = [],
+    assets = null,
+    keepText = false,
+    method = 'GET',
+    payload = null,
+    token = TOKEN,
+    config = DEFAULT_CONFIG,
+  } = {},
+) {
+  const db = makeDB(
+    state ?? { countries: {}, confusions: {}, metas: {}, deckCards: {}, lastDeck: null },
+    rounds,
+    { token, config },
+  )
   const res = await worker.fetch(
-    new Request('https://geocoach.example' + path, { headers }),
+    new Request('https://geocoach.example' + path, {
+      method,
+      headers: payload === null ? headers : { 'Content-Type': 'application/json', ...headers },
+      body: payload === null ? undefined : JSON.stringify(payload),
+    }),
     assets ? { DB: db, ASSETS: assets } : { DB: db },
     ctx,
   )
@@ -210,11 +264,13 @@ async function call(path, { headers = {}, state = null, rounds = [], assets = nu
     },
     body,
     saved: db.saved(),
+    savedConfig: db.savedConfig(),
   }
 }
 
 const gz = { 'Accept-Encoding': 'gzip, deflate, br' }
-const auth = { Authorization: 'Bearer ' + TOKEN }
+const authFor = (token) => ({ Authorization: 'Bearer ' + token })
+const auth = authFor(TOKEN)
 
 /** Every ring of a FeatureCollection, so closure and vertex counts can be
  * checked without re-implementing the geometry walk in the parent. */
@@ -276,6 +332,16 @@ function dueState(names) {
 
 const dueNames = [...new Set(catalog.locations.map((l) => l.country + ': ' + l.metaName))].slice(0, 12)
 
+/** The first rung in catalog order, deduped, which is the order the ladder
+ * introduces from. Built here off the catalog JSON rather than out of the
+ * scheduler, so the dashboard's preview is checked against the source of the
+ * ordering and not against the code that reads it. */
+const ladderHead = [
+  ...new Set(
+    catalog.locations.map((l) => (l.metaName ? (l.country ? l.country + ': ' + l.metaName : l.metaName) : null)).filter(Boolean),
+  ),
+].slice(0, 24)
+
 /** Ten weeks of play over a handful of metas: every one missed on first sight,
  * then hit from the second exposure on. That shape is the whole point — a
  * progress line replayed honestly has to start at zero, because on day one the
@@ -328,6 +394,39 @@ function playedState(names) {
   return { countries: { BR: { seen: 40, correctCountry: 36 } }, confusions: {}, metas, deckCards, lastDeck: null }
 }
 
+/**
+ * The end of a day's work: every card answered a moment ago, none of them due
+ * again for a month, and each stamped firstSeen inside the rolling window so
+ * the day's new-meta allowance counts as spent. Nothing is owed and nothing
+ * more may be introduced, which is the state doneForToday exists to name.
+ */
+function spentState(names) {
+  const deckCards = {}
+  names.forEach((name) => {
+    deckCards[name] = {
+      due: new Date(Date.now() + 30 * 86400000).toISOString(),
+      stability: 60,
+      difficulty: 5,
+      elapsed_days: 0,
+      scheduled_days: 30,
+      learning_steps: 0,
+      reps: 1,
+      lapses: 0,
+      state: 2,
+      last_review: new Date(Date.now() - 3600000).toISOString(),
+      firstSeen: new Date(Date.now() - 3600000).toISOString(),
+      seen: 1,
+      correct: 1,
+      streak: 1,
+    }
+  })
+  return { countries: {}, confusions: {}, metas: {}, deckCards, lastDeck: null }
+}
+
+/** Everything a settings write must refuse: none of these is a count of metas.
+ * undefined is the field left off the payload entirely. */
+const BAD_DAILY_NEW = [undefined, null, '', 'twenty', -1, 101, 1e9, true, {}, [1]]
+
 const out = {
   optionsPreflight: await call('/api/scope-geo?country=BR', { headers: { ...gz } }).then(() => null),
   country: await call('/api/scope-geo?country=BR', { headers: gz }),
@@ -348,9 +447,84 @@ const out = {
   deckHuge: await call('/deck?n=9999', { headers: auth, state: dueState(dueNames) }),
   deckFresh: await call('/deck', { headers: auth }),
   deckNoToken: await call('/deck'),
+  // A player who asked for three new metas a day, on an account with nothing
+  // due: the deck may introduce three and no more.
+  deckThreeNew: await call('/deck', {
+    headers: authFor(TOKENS.three),
+    token: TOKENS.three,
+    config: '{"dailyNew":3}',
+  }),
+  // Two metas met an hour ago against an allowance of two, neither due again:
+  // the day is over.
+  deckAllDone: await call('/deck', {
+    headers: authFor(TOKENS.done),
+    token: TOKENS.done,
+    config: '{"dailyNew":2}',
+    state: spentState(dueNames.slice(0, 2)),
+  }),
+  status: await call('/status', { headers: auth, state: dueState(dueNames) }),
+  statusAllDone: await call('/status', {
+    headers: authFor(TOKENS.doneStatus),
+    token: TOKENS.doneStatus,
+    config: '{"dailyNew":2}',
+    state: spentState(dueNames.slice(0, 2)),
+  }),
+  configSet: await call('/config', {
+    method: 'POST',
+    payload: { dailyNew: 3 },
+    headers: authFor(TOKENS.write),
+    token: TOKENS.write,
+  }),
+  // Zero is a setting, not an absence: review only, introduce nothing.
+  configZero: await call('/config', {
+    method: 'POST',
+    payload: { dailyNew: 0 },
+    headers: authFor(TOKENS.writeZero),
+    token: TOKENS.writeZero,
+  }),
+  configString: await call('/config', {
+    method: 'POST',
+    payload: { dailyNew: '7' },
+    headers: authFor(TOKENS.writeString),
+    token: TOKENS.writeString,
+  }),
+  configMax: await call('/config', {
+    method: 'POST',
+    payload: { dailyNew: 100 },
+    headers: authFor(TOKENS.writeMax),
+    token: TOKENS.writeMax,
+  }),
+  configNoBody: await call('/config', { method: 'POST', headers: authFor(TOKENS.reject), token: TOKENS.reject }),
+  configNoToken: await call('/config', { method: 'POST', payload: { dailyNew: 3 } }),
+  configRejected: await Promise.all(
+    BAD_DAILY_NEW.map((dailyNew) =>
+      call('/config', {
+        method: 'POST',
+        payload: { dailyNew },
+        headers: authFor(TOKENS.reject),
+        token: TOKENS.reject,
+      }),
+    ),
+  ),
   dashFresh: await call('/api/dashboard', { headers: auth }),
   dashHistory: await call('/api/dashboard', { headers: auth, state: playedState(dueNames.slice(0, 4)), rounds: history(dueNames.slice(0, 4)) }),
   dashNoToken: await call('/api/dashboard'),
+  // The same finished day /status is asked about above, asked of the console
+  // instead: nothing owed, the allowance of two already spent an hour ago.
+  dashAllDone: await call('/api/dashboard', {
+    headers: authFor(TOKENS.doneDash),
+    token: TOKENS.doneDash,
+    config: '{"dailyNew":2}',
+    state: spentState(dueNames.slice(0, 2)),
+  }),
+  // A day half spent: an allowance of five with two clues met an hour ago, so
+  // three remain and the console may name exactly those three.
+  dashPartDay: await call('/api/dashboard', {
+    headers: authFor(TOKENS.partDash),
+    token: TOKENS.partDash,
+    config: '{"dailyNew":5}',
+    state: spentState(dueNames.slice(0, 2)),
+  }),
   loader: await call('/geocoach.user.js', { headers: auth, keepText: true }),
   loaderByQuery: await call('/geocoach.user.js?token=' + TOKEN, { keepText: true }),
   body: await call('/geocoach.body.js', { headers: auth, keepText: true }),
@@ -394,6 +568,9 @@ for (const key of ['country', 'countryPlain', 'region', 'unmatchedRegion', 'cana
   }
 
 out.sample = { panoId: sample.panoId, country: sample.country, metaName: sample.metaName }
+out.ladderHead = ladderHead
+out.playedNames = dueNames.slice(0, 4)
+out.spentNames = dueNames.slice(0, 2)
 process.stdout.write(JSON.stringify(out))
 `
 
@@ -644,15 +821,126 @@ describe('GET /deck', () => {
     expect(last.padding).toEqual(future)
   })
 
-  it('gives a brand-new account a publishable first game', () => {
-    // Nothing due, nothing scheduled, and one new meta per deck: the queue is
-    // one entry long, so the floor tops it up with more panoramas of that one
-    // clue rather than publishing a map GeoGuessr will reject.
-    expect(R.deckFresh.body.customCoordinates.length).toBe(5)
-    expect(new Set(R.deckFresh.body.ranking.map((r) => r.name)).size).toBe(1)
-    expect(R.deckFresh.body.ranking[0].kind).toBe('new')
+  it('gives a brand-new account a full first day of new material', () => {
+    // Nothing due and nothing spent, so the whole daily allowance is available
+    // on the first deck: ten distinct metas, one location each. This used to
+    // be five locations of a single meta, back when the deck introduced one
+    // new meta at a time and the five-location floor had to pad the map out
+    // with more panoramas of that one clue.
+    expect(R.deckFresh.body.customCoordinates.length).toBe(10)
+    const names = R.deckFresh.body.ranking.map((r) => r.name)
+    expect(new Set(names).size).toBe(10)
+    for (const entry of R.deckFresh.body.ranking) expect(entry.kind).toBe('new')
+    expect(R.deckFresh.body.summary.newAllowance).toBe(10)
+    expect(R.deckFresh.body.summary.doneForToday).toBe(false)
     const panos = R.deckFresh.body.customCoordinates.map((l) => l.panoId)
     expect(new Set(panos).size).toBe(panos.length)
+  })
+
+  it('introduces no more new metas than the player configured', () => {
+    // dailyNew: 3 on an account with nothing due. Three metas is the whole
+    // queue, so the map is topped up to the five-location floor from second
+    // panoramas of those same three — never from a fourth meta.
+    const names = R.deckThreeNew.body.ranking.map((r) => r.name)
+    expect(new Set(names).size).toBe(3)
+    for (const entry of R.deckThreeNew.body.ranking) expect(entry.kind).toBe('new')
+    expect(R.deckThreeNew.body.summary.newAllowance).toBe(3)
+    // Five locations off three metas: summary counts published locations, so
+    // the two the floor added are repeats of metas already in the deck rather
+    // than a fourth meta slipping past the allowance.
+    expect(R.deckThreeNew.body.customCoordinates.length).toBe(5)
+    expect(R.deckThreeNew.body.stats.new).toBe(3)
+  })
+
+  it('clears the backlog before introducing anything', () => {
+    // Twelve metas due against a ten-location deck: every slot is review and
+    // not one new meta gets in, however much allowance the day still has.
+    // That is the throttle working — a backlog is unpaid-for introductions.
+    for (const entry of R.deckDefault.body.ranking) expect(entry.kind).toBe('due')
+    expect(R.deckDefault.body.summary.due).toBe(10)
+    expect(R.deckDefault.body.summary.introduced).toBe(0)
+    expect(R.deckDefault.body.summary.newAllowance).toBe(10)
+    expect(R.deckDefault.body.summary.doneForToday).toBe(false)
+    expect(R.deckDefault.body.description).toContain('10 due, 0 new')
+  })
+
+  it('says so when the day is finished', () => {
+    // Nothing owed and the allowance spent an hour ago, so everything the deck
+    // can still publish is filler. "0 due, 0 new" is true and reads like a
+    // broken deck; the description says the thing the player needs to know.
+    const body = R.deckAllDone.body
+    expect(body.summary.doneForToday).toBe(true)
+    expect(body.summary.newAllowance).toBe(0)
+    expect(body.summary.introduced).toBe(0)
+    expect(body.description).toContain('all done for today')
+    expect(body.description).not.toContain('due,')
+    for (const entry of body.ranking) expect(entry.kind).toBe('future')
+  })
+})
+
+/* -------------------------------------------------------------------------
+ * The status widget, and the one knob behind it.
+ * ---------------------------------------------------------------------- */
+
+describe('GET /status', () => {
+  it('reports the day alongside the deck counts', () => {
+    expect(R.status.status).toBe(200)
+    expect(R.status.body.due).toBe(12)
+    // No configured value, so the scheduler's own default stands.
+    expect(R.status.body.dailyNew).toBe(10)
+    expect(R.status.body.newAllowance).toBe(10)
+    expect(R.status.body.doneForToday).toBe(false)
+    expect(R.status.body.trainerMapId).toBe('aaaaaaaaaaaaaaaaaaaaaaaa')
+  })
+
+  it('agrees with the deck about a finished day', () => {
+    // Same state, same account: the widget and the map must never disagree
+    // about whether there is work left, so both work it out the same way.
+    expect(R.statusAllDone.body.dailyNew).toBe(2)
+    expect(R.statusAllDone.body.due).toBe(0)
+    expect(R.statusAllDone.body.newAllowance).toBe(0)
+    expect(R.statusAllDone.body.doneForToday).toBe(true)
+    expect(R.deckAllDone.body.summary.doneForToday).toBe(true)
+  })
+})
+
+describe('POST /config', () => {
+  it('needs a token like every other write', () => {
+    expect(R.configNoToken.status).toBe(401)
+  })
+
+  it('stores the allowance and echoes the row it stored', () => {
+    expect(R.configSet.status).toBe(200)
+    expect(R.configSet.body.ok).toBe(true)
+    expect(R.configSet.body.config.dailyNew).toBe(3)
+    expect(R.configSet.savedConfig.dailyNew).toBe(3)
+    // A patch, not a replacement: the map id the userscript registered has to
+    // survive a settings write.
+    expect(R.configSet.savedConfig.trainerMapId).toBe('aaaaaaaaaaaaaaaaaaaaaaaa')
+  })
+
+  it('takes zero as an answer, and a number that arrived as text', () => {
+    // Zero is "review only today", which is a setting; if it were read as
+    // absent the default would quietly reintroduce ten metas a day.
+    expect(R.configZero.status).toBe(200)
+    expect(R.configZero.savedConfig.dailyNew).toBe(0)
+    // Off an <input>, everything is a string.
+    expect(R.configString.savedConfig.dailyNew).toBe(7)
+    expect(R.configMax.savedConfig.dailyNew).toBe(100)
+  })
+
+  it('refuses what it cannot store exactly, rather than defaulting', () => {
+    // A read can fall back to the default and still serve a deck. A write
+    // cannot: storing 10 for someone who asked for 1000 is a setting that
+    // lies about itself every time it is read back.
+    for (const [i, r] of R.configRejected.entries()) {
+      expect(r.status, 'rejected[' + i + ']').toBe(400)
+      expect(r.body.ok).toBe(false)
+      expect(r.body.error).toContain('dailyNew')
+      // And nothing was written on the way to saying no.
+      expect(r.savedConfig.dailyNew).toBeUndefined()
+    }
+    expect(R.configNoBody.status).toBe(400)
   })
 })
 
@@ -695,6 +983,76 @@ describe('GET /api/dashboard', () => {
     for (let i = 1; i < series.length; i += 1)
       expect(new Date(series[i].t).getTime()).toBeGreaterThan(new Date(series[i - 1].t).getTime())
     for (const point of series) expect(point.held).toBeLessThanOrEqual(R.dashHistory.body.progress.total)
+  })
+
+  it('reports the day beside the deck, not only the deck', () => {
+    // Nothing due and nothing introduced in the last 24h, so the whole default
+    // allowance is still there to spend and the day is not over.
+    const day = R.dashHistory.body.day
+    expect(day.dailyNew).toBe(10)
+    expect(day.newAllowance).toBe(10)
+    expect(day.doneForToday).toBe(false)
+    expect(R.dashHistory.body.deck.due).toBe(0)
+  })
+
+  it('names a finished day the same way /status does', () => {
+    const day = R.dashAllDone.body.day
+    expect(R.dashAllDone.status).toBe(200)
+    expect(day.dailyNew).toBe(2)
+    expect(day.newAllowance).toBe(0)
+    expect(day.doneForToday).toBe(true)
+    // The regression this guards: the console and the map reading the same
+    // account and disagreeing about whether there is any work left. Same
+    // arithmetic, so the same three numbers — compared field by field because
+    // the console also carries a preview list that /status has no use for.
+    expect({ dailyNew: day.dailyNew, newAllowance: day.newAllowance, doneForToday: day.doneForToday }).toEqual({
+      dailyNew: R.statusAllDone.body.dailyNew,
+      newAllowance: R.statusAllDone.body.newAllowance,
+      doneForToday: R.statusAllDone.body.doneForToday,
+    })
+    // And a finished day is still a day with clues left to meet — the deck is
+    // not exhausted, the allowance is.
+    expect(R.dashAllDone.body.deck.unseen).toBeGreaterThan(0)
+  })
+
+  it('names the clues the day is about to introduce, in ladder order', () => {
+    // A fresh account has met nothing, so the preview is simply the head of the
+    // ladder — and it is the ladder's order, not the alphabet or a shuffle.
+    expect(R.dashFresh.body.day.upNext).toEqual(R.ladderHead.slice(0, 10))
+  })
+
+  it('leaves out the clues already met and keeps the rest in order', () => {
+    const expected = R.ladderHead.filter((n) => !R.playedNames.includes(n)).slice(0, 10)
+    expect(R.dashHistory.body.day.upNext).toEqual(expected)
+    for (const name of R.playedNames) expect(R.dashHistory.body.day.upNext).not.toContain(name)
+  })
+
+  it('names no more than the day has left to give', () => {
+    // Five a day, two met an hour ago: three named, and the three the ladder
+    // would actually reach next rather than any three.
+    const day = R.dashPartDay.body.day
+    expect(day.dailyNew).toBe(5)
+    expect(day.newAllowance).toBe(3)
+    expect(day.doneForToday).toBe(false)
+    expect(day.upNext).toEqual(R.ladderHead.filter((n) => !R.spentNames.includes(n)).slice(0, 3))
+  })
+
+  it('names nothing once the allowance is spent', () => {
+    // The whole point of the preview is that it is the allowance said in
+    // names: no allowance, no names, even with a ladder full of unmet clues.
+    expect(R.dashAllDone.body.day.newAllowance).toBe(0)
+    expect(R.dashAllDone.body.day.upNext).toEqual([])
+    expect(R.dashAllDone.body.deck.unseen).toBeGreaterThan(0)
+  })
+
+  it('never names more clues than the day or the deck can supply', () => {
+    // The list and the count are two readings of one number, so they cannot
+    // drift: as many names as the allowance, unless the ladder runs out first.
+    for (const key of ['dashFresh', 'dashHistory', 'dashPartDay', 'dashAllDone']) {
+      const { day, deck } = R[key].body
+      expect(day.upNext.length, key).toBe(Math.min(day.newAllowance, deck.unseen))
+      expect(new Set(day.upNext).size, key).toBe(day.upNext.length)
+    }
   })
 })
 

@@ -188,6 +188,18 @@ export interface DashboardData {
      draw it; Dashboard.tsx falls back to counting solid clues until it lands. */
   progress?: { held: number; total: number; series: HeldPoint[] }
   deck: { due: number; learning: number; unseen: number; introduced: number; total: number; nextDue: string | null }
+  /* The day rather than the deck: the allowance, what is left of it, and
+     whether anything is owed at all. Optional for the same reason progress is —
+     the site and the Worker deploy separately, and a console that announced a
+     finished day off a payload that never carried one would be lying in the
+     one direction that matters. Absent means "say nothing about today". */
+  /* `upNext` is the same reasoning one level down: the meta names the day's
+     remaining allowance would introduce next, in ladder order. Optional on its
+     own account, not just `day`'s — a Worker old enough to send the three
+     numbers but not the list is a real deploy state, and naming clues the
+     scheduler has not chosen would be an invention. Empty when the allowance
+     is spent or the ladder has nothing left unseen. */
+  day?: { dailyNew: number; newAllowance: number; doneForToday: boolean; upNext?: string[] }
   metas: { solid: number; holding: number; shaky: number; total: number; weakest: WeakMeta[] }
   countries: CountryStat[]
   totals: { rounds: number; correctPct: number | null }
@@ -198,6 +210,15 @@ export interface DashboardData {
 export const fetchStats = () => request<{ ok: true } & PublicStats>('/api/stats')
 export const fetchMe = () => request<{ ok: true } & Me>('/me', {}, true)
 export const fetchDashboard = () => request<{ ok: true } & DashboardData>('/api/dashboard', {}, true)
+/** The one setting there is: how many never-seen clues a day may introduce.
+ * The Worker refuses anything it cannot store exactly and says so in a sentence,
+ * so a rejection is worth showing verbatim rather than translating. */
+export const setDailyNew = (n: number) =>
+  request<{ ok: true; config: { dailyNew: number } }>(
+    '/config',
+    { method: 'POST', body: JSON.stringify({ dailyNew: n }) },
+    true,
+  )
 export const signup = (name: string) =>
   request<{ ok: true; token: string; name: string }>('/signup', {
     method: 'POST',

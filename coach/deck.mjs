@@ -111,10 +111,12 @@ export function pickDeckLocations(catalogs, metas, size) {
   for (; at < metas.length && customCoordinates.length < MIN_DECK_LOCATIONS; at++) take(at)
 
   // And if even that ran out, go round again for a second pano from the metas
-  // we do have. A brand-new account is exactly this case: nothing is due,
-  // nothing is scheduled, and the one-new-meta-per-deck cap yields a queue of
-  // length one. Five looks at that one clue in five different places is a good
-  // first lesson and a publishable map; three locations is neither.
+  // we do have. A short ladder is exactly this case: a catalog of three metas
+  // cannot fill five rounds one apiece, however the queue was ranked. Two looks
+  // at the most-overdue clue in different places is a good round and a
+  // publishable map; three locations is neither. (A brand-new account no longer
+  // lands here — with no cards there is nothing spent against today's
+  // allowance, so deck one opens with a full ten new metas.)
   //
   // Stops the moment a full sweep adds nothing, so an empty catalog is an
   // empty deck rather than a spin.
@@ -131,9 +133,19 @@ export function pickDeckLocations(catalogs, metas, size) {
  * The whole deck in one call: rank the cards, then turn the head of that
  * ranking into a publishable map. Both hosts go through here, so a change to
  * either half reaches both of them at once.
+ *
+ * `opts.dailyNew` is the player's configured new-metas-per-day allowance,
+ * passed straight through: it belongs to the host, which is where a user's
+ * settings live, and the scheduler only supplies the default for a host that
+ * has nothing to say.
  */
-export function buildRankedDeck(cards, catalogs, ladder, size, now) {
-  const deck = rankDeck(cards, ladder, { limit: Math.max(size, MIN_DECK_LOCATIONS) }, now)
+export function buildRankedDeck(cards, catalogs, ladder, size, now, opts = {}) {
+  const deck = rankDeck(
+    cards,
+    ladder,
+    { limit: Math.max(size, MIN_DECK_LOCATIONS), dailyNew: opts?.dailyNew },
+    now,
+  )
   const { customCoordinates, ranking } = pickDeckLocations(catalogs, deck.metas, size)
   return { customCoordinates, ranking, metas: deck.metas, stats: deck.stats }
 }

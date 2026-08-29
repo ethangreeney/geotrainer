@@ -14,8 +14,11 @@
  * demo state. Zero LLM calls, as everywhere in this system.
  */
 import {
+  DEFAULT_DAILY_NEW,
   deckSummary,
   gradeRound,
+  newIntroducedToday,
+  nextNewMetas,
   ratingNameFor,
   retrievabilityOf,
 } from '../../coach/scheduler.mjs'
@@ -653,6 +656,39 @@ async function setConfig(env, user, patch) {
   return config
 }
 
+/**
+ * A ceiling on the daily new-meta allowance, because this arrives off the
+ * network. A hundred new metas is already a fortnight of review debt taken on
+ * in one sitting; past that the number is not an ambition, it is a typo.
+ */
+const MAX_DAILY_NEW = 100
+
+/**
+ * The configured allowance, or null if that is not what was passed.
+ *
+ * Zero is a real answer — "review only today" — so an absent value and a
+ * refused one both have to be something other than zero, which is what null
+ * is for. Everything else is a plain integer in range: a fractional 3.7 metas
+ * is nothing, and a negative allowance is not a smaller one.
+ */
+function parseDailyNew(raw) {
+  if (typeof raw !== 'number' && (typeof raw !== 'string' || raw.trim() === '')) return null
+  const n = Math.trunc(Number(raw))
+  return Number.isFinite(n) && n >= 0 && n <= MAX_DAILY_NEW ? n : null
+}
+
+/**
+ * What the scheduler should be told this user's allowance is.
+ *
+ * The read side of the same parse, and deliberately forgiving where the write
+ * side is not: a deck still has to come back for a config row that predates
+ * the setting or was hand-edited into nonsense, and the scheduler's own
+ * default is the honest thing to hand it. The write route refuses instead —
+ * storing 10 for someone who asked for 20 is a setting that lies about itself
+ * for as long as it is stored.
+ */
+const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_NEW
+
 // ---------- dashboard ----------
 
 const pct = (correct, seen) => (seen ? correct / seen : 0)
@@ -740,8 +776,23 @@ async function buildProgress(env, user, live, now) {
 async function buildDashboard(env, user) {
   const now = new Date()
   const state = await loadUserState(env, user.id)
-  const summary = deckSummary(state.deckCards, toLadder(CATALOGS), now)
+  const ladder = toLadder(CATALOGS)
+  const summary = deckSummary(state.deckCards, ladder, now)
   const introduced = Object.keys(state.deckCards).length
+
+  // The day, as opposed to the deck: what the allowance is, how much of it is
+  // left, and whether there is anything owed at all. Same three numbers /status
+  // reports and worked out the same way off the same `now`, because a dashboard
+  // that said the day was over while the map still served due cards would be
+  // the more convincing of the two and the wrong one.
+  const dailyNew = dailyNewOf(user.config)
+  const newAllowance = Math.max(0, dailyNew - newIntroducedToday(state.deckCards, now))
+  const doneForToday = summary.due === 0 && (newAllowance === 0 || summary.unseen === 0)
+  // And which clues that allowance is about to spend itself on. The console
+  // asks the scheduler rather than reading the catalog itself, so the list is
+  // the deck's own next introductions and not a second guess at them; a spent
+  // allowance names nothing, which is what a finished day should say.
+  const upNext = nextNewMetas(state.deckCards, ladder, newAllowance)
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
     metaName,
@@ -817,6 +868,7 @@ async function buildDashboard(env, user) {
       total: introduced + summary.unseen,
       nextDue: summary.nextDue,
     },
+    day: { dailyNew, newAllowance, doneForToday, upNext },
     metas: {
       solid: solid.length,
       holding: metaRows.length - solid.length - shaky.length,
@@ -1159,6 +1211,7 @@ const AUTHED_PATHS = new Set([
   '/plan',
   '/me',
   '/trainer-map',
+  '/config',
   '/api/dashboard',
   '/api/rounds',
   '/api/tlog',
@@ -1472,6 +1525,7 @@ export default {
           toLadder(CATALOGS),
           size,
           now,
+          { dailyNew: dailyNewOf(user.config) },
         )
 
         // Not-yet-due metas are this deck's padding: they only appear when the
@@ -1502,26 +1556,59 @@ export default {
         // `summary` keeps the field names the userscript already logs, mapped
         // onto rankDeck's counts: `introduced` was buildDeck's word for metas
         // entering the deck for the first time, which is rankDeck's `new`.
-        const due = ranking.filter((r) => r.kind === 'due').length
-        const fresh = ranking.filter((r) => r.kind === 'new').length
+        //
+        // newAllowance and doneForToday ride along beside them because they
+        // are the two numbers that are not about this deck: how much new
+        // material the day has left, and whether there is any work owed at
+        // all. A client reading only `summary` — which is every client there
+        // is — would otherwise have no way to tell a light day from a finished
+        // one, and would keep asking for decks that are all filler.
+        // Distinct names, not rows: the map floor can publish a second pano
+        // of the same meta, and that repeat is not a second introduction.
+        const due = new Set(ranking.filter((r) => r.kind === 'due').map((r) => r.name)).size
+        const fresh = new Set(ranking.filter((r) => r.kind === 'new').map((r) => r.name)).size
         return json({
           trainerMapId: user.config.trainerMapId ?? null,
           customCoordinates,
-          summary: { due, introduced: fresh, unlockedTiers: stats.unlockedTiers },
+          summary: {
+            due,
+            introduced: fresh,
+            unlockedTiers: stats.unlockedTiers,
+            newAllowance: stats.newAllowance,
+            doneForToday: stats.doneForToday,
+          },
           // Why these, in the order that decided it. The whole point of a
           // just-in-time deck is that the priority is what GeoGuessr draws
           // from, so the priority has to be inspectable — from the userscript,
           // from a debug view, from a browser tab.
           ranking,
           stats,
-          description: `Auto-generated spaced-repetition deck — ${due} due, ${fresh} new (${now.toISOString().slice(0, 16)})`,
+          // The description is the one line a player reads, on the map page in
+          // GeoGuessr itself. "0 due, 0 new" is a true sentence that reads
+          // like a broken deck, so a day with nothing owed says so in words.
+          description: stats.doneForToday
+            ? `Auto-generated spaced-repetition deck — all done for today (${now.toISOString().slice(0, 16)})`
+            : `Auto-generated spaced-repetition deck — ${due} due, ${fresh} new (${now.toISOString().slice(0, 16)})`,
         })
       }
 
       if (request.method === 'GET' && path === '/status') {
         const state = await loadUserState(env, user.id)
-        const summary = deckSummary(state.deckCards, toLadder(CATALOGS), new Date())
-        return json({ ...summary, trainerMapId: user.config.trainerMapId ?? null })
+        const now = new Date()
+        const summary = deckSummary(state.deckCards, toLadder(CATALOGS), now)
+        // The same two numbers /deck reports, worked out the same way, so the
+        // widget and the map never disagree about whether the day is over:
+        // nothing owed, and either no allowance left or nothing left to
+        // introduce. Building a deck to find that out would be a write.
+        const dailyNew = dailyNewOf(user.config)
+        const newAllowance = Math.max(0, dailyNew - newIntroducedToday(state.deckCards, now))
+        return json({
+          ...summary,
+          dailyNew,
+          newAllowance,
+          doneForToday: summary.due === 0 && (newAllowance === 0 || summary.unseen === 0),
+          trainerMapId: user.config.trainerMapId ?? null,
+        })
       }
 
       if (request.method === 'GET' && path === '/me')
@@ -1543,6 +1630,23 @@ export default {
           return json({ ok: false, error: 'mapId must be a 24-character map id' }, 400)
         await setConfig(env, user, { trainerMapId: mapId })
         return json({ ok: true, trainerMapId: mapId })
+      }
+
+      // The player's own settings, which for now is the one knob: how many
+      // never-seen metas a day may introduce. A write refuses what it cannot
+      // store exactly — see parseDailyNew — and echoes the whole config back,
+      // so the client's picture of its settings comes from the row rather
+      // than from what it hoped the write did.
+      if (request.method === 'POST' && path === '/config') {
+        const body = await request.json().catch(() => null)
+        const dailyNew = parseDailyNew(body?.dailyNew)
+        if (dailyNew === null)
+          return json(
+            { ok: false, error: `dailyNew must be a whole number between 0 and ${MAX_DAILY_NEW}` },
+            400,
+          )
+        const config = await setConfig(env, user, { dailyNew })
+        return json({ ok: true, config })
       }
 
       if (request.method === 'GET' && path === '/api/dashboard')

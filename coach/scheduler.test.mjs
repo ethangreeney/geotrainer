@@ -3,9 +3,10 @@ import { fsrs, State } from 'ts-fsrs'
 import {
   buildDeck,
   deckSummary,
-  DEFAULT_NEW_PER_DECK,
+  DEFAULT_DAILY_NEW,
   gradeRound,
   MASTERY_DAYS,
+  newIntroducedToday,
   rankDeck,
   ratingNameFor,
   unlockedTiers,
@@ -79,6 +80,24 @@ describe('gradeRound', () => {
     expect(Object.keys(cards)).toEqual([T1[0]])
     expect(cards[T1[0]]).toMatchObject({ seen: 1, correct: 1, streak: 1, source: 'round', reps: 1 })
     expect(cards[T1[0]].last_review).toBe(T0.toISOString())
+  })
+
+  it('stamps firstSeen at the introduction and never rewrites it', () => {
+    const born = drill({}, T1[0], true, T0)
+    expect(born[T1[0]].firstSeen).toBe(T0.toISOString())
+
+    const later = drill(born, T1[0], true, plus(T0, 9))
+    expect(later[T1[0]].firstSeen).toBe(T0.toISOString()) // the introduction, not this review
+    expect(later[T1[0]].seen).toBe(2)
+  })
+
+  it('leaves a card graded before firstSeen existed without one', () => {
+    // Backdating would be a guess, and an old introduction read as today's
+    // would eat an allowance the player never spent.
+    const legacy = { [T1[0]]: card({ due: plus(T0, -1).toISOString() }) }
+    const after = drill(legacy, T1[0], true, T0)[T1[0]]
+    expect(after.firstSeen).toBeUndefined()
+    expect(after.seen).toBe(4)
   })
 
   it('serialises to plain JSON so state.json round-trips', () => {
@@ -178,6 +197,43 @@ describe('gradeRound', () => {
     const right = drill({}, T1[0], true, T0)[T1[0]]
     expect(wrong.stability).toBeLessThan(right.stability)
     expect(wrong.streak).toBe(0)
+  })
+})
+
+describe('newIntroducedToday', () => {
+  /** A card stamped as introduced at `when`, the way gradeRound stamps one. */
+  const introducedAt = (when) => ({ ...card({ due: plus(when, 10).toISOString() }), firstSeen: when.toISOString() })
+
+  it('counts nothing for an empty or unstamped table', () => {
+    expect(newIntroducedToday({}, T0)).toBe(0)
+    expect(newIntroducedToday(null, T0)).toBe(0)
+    // every card in state.json predates the field: none of them is today's work
+    expect(newIntroducedToday({ [T1[0]]: card({ due: T0.toISOString() }) }, T0)).toBe(0)
+  })
+
+  it('counts the metas introduced inside the rolling day', () => {
+    const cards = {
+      [T1[0]]: introducedAt(plus(T0, -0.2)),
+      [T1[1]]: introducedAt(plus(T0, -0.9)),
+      [T1[2]]: introducedAt(plus(T0, -3)), // last week's introduction, not today's
+    }
+    expect(newIntroducedToday(cards, T0)).toBe(2)
+  })
+
+  it('ages an introduction out exactly twenty-four hours later', () => {
+    const cards = { [T1[0]]: introducedAt(T0) }
+    expect(newIntroducedToday(cards, plus(T0, 0.99))).toBe(1)
+    expect(newIntroducedToday(cards, plus(T0, 1))).toBe(0)
+  })
+
+  it('rolls with the clock rather than snapping to a date boundary', () => {
+    // Introduced at 23:00 UTC: still today's at 22:00 the next day, gone by
+    // midnight-plus-an-hour. A calendar day would have released the allowance
+    // an hour after it was spent.
+    const cards = { [T1[0]]: introducedAt(at('2026-03-01T23:00:00Z')) }
+    expect(newIntroducedToday(cards, at('2026-03-02T00:30:00Z'))).toBe(1)
+    expect(newIntroducedToday(cards, at('2026-03-02T22:00:00Z'))).toBe(1)
+    expect(newIntroducedToday(cards, at('2026-03-03T00:00:00Z'))).toBe(0)
   })
 })
 
@@ -436,32 +492,101 @@ describe('rankDeck', () => {
   const names = (deck) => deck.metas.map((m) => m.name)
   const kinds = (deck) => deck.metas.map((m) => m.kind)
 
-  it('admits one unseen meta ahead of the review work, and drops the surplus', () => {
+  /** A card stamped as introduced at `when`, the way gradeRound stamps one. */
+  const introducedAt = (name, when) => ({
+    [name]: { ...card({ due: plus(when, 10).toISOString() }), firstSeen: when.toISOString() },
+  })
+
+  it('leads with the review work and fills the rest with new metas', () => {
     const cards = {
       [T1[1]]: card({ due: plus(T0, -30).toISOString(), stability: 2, scheduledDays: 2 }),
       [T2[0]]: card({ due: plus(T0, -10).toISOString(), stability: 5, scheduledDays: 5 }),
     }
+    const unseen = LADDER.filter((n) => !cards[n])
     const deck = rankDeck(cards, CATALOG, { limit: 99 }, T0)
 
-    expect(names(deck)).toEqual([T1[0], T1[1], T2[0]]) // one new, then due by recall
-    expect(kinds(deck)).toEqual(['new', 'due', 'due'])
-    // the other twelve unseen metas are not filler at the tail — they are absent
+    // what is owed, weakest first, and then the day's allowance of new material
+    expect(names(deck)).toEqual([T1[1], T2[0], ...unseen.slice(0, DEFAULT_DAILY_NEW)])
+    expect(kinds(deck)).toEqual(['due', 'due', ...unseen.slice(0, DEFAULT_DAILY_NEW).map(() => 'new')])
+    // the three unseen metas past the allowance are not filler at the tail — they are absent
     expect(deck.stats).toEqual({
-      new: 1,
+      new: 10,
       due: 2,
       future: 0,
       newAvailable: 13,
-      total: 3,
+      newAllowance: 10,
+      doneForToday: false,
+      total: 12,
       unlockedTiers: 1,
     })
   })
 
-  it('admits exactly one unseen meta by default, however deep the backlog', () => {
-    expect(DEFAULT_NEW_PER_DECK).toBe(1)
+  it('admits a day of new metas by default, however deep the backlog', () => {
+    expect(DEFAULT_DAILY_NEW).toBe(10)
     const deck = rankDeck({}, wideCatalog(100), { limit: 99 }, T0)
-    expect(deck.metas).toHaveLength(1)
+    expect(deck.metas).toHaveLength(10)
     expect(deck.metas[0]).toMatchObject({ name: 'meta 0', kind: 'new', priority: 0 })
-    expect(deck.stats).toMatchObject({ new: 1, newAvailable: 100, total: 1 })
+    expect(names(deck)).toEqual(wideCatalog(10)[0].metas) // ladder order, the first ten
+    expect(deck.stats).toMatchObject({ new: 10, newAvailable: 100, newAllowance: 10, total: 10 })
+  })
+
+  it('spends the allowance across the day rather than per deck', () => {
+    const catalog = wideCatalog(100)
+    const spent = (count) =>
+      Object.assign({}, ...Array.from({ length: count }, (_, i) => introducedAt(`meta ${i}`, plus(T0, -0.1))))
+
+    expect(rankDeck(spent(4), catalog, { limit: 99 }, T0).stats).toMatchObject({ newAllowance: 6, new: 6 })
+    expect(rankDeck(spent(10), catalog, { limit: 99 }, T0).stats).toMatchObject({ newAllowance: 0, new: 0 })
+    // never negative, however hard the player pushed
+    expect(rankDeck(spent(14), catalog, { limit: 99 }, T0).stats).toMatchObject({ newAllowance: 0, new: 0 })
+    // and the whole allowance is back once yesterday's introductions age out
+    expect(rankDeck(spent(10), catalog, { limit: 99 }, plus(T0, 1)).stats).toMatchObject({
+      newAllowance: 10,
+      new: 10,
+    })
+  })
+
+  it("takes the host's configured allowance over the default", () => {
+    const catalog = wideCatalog(100)
+    expect(rankDeck({}, catalog, { limit: 99, dailyNew: 3 }, T0).stats).toMatchObject({
+      new: 3,
+      newAllowance: 3,
+    })
+    expect(rankDeck(introducedAt('meta 0', T0), catalog, { limit: 99, dailyNew: 3 }, T0).stats).toMatchObject({
+      new: 2,
+      newAllowance: 2,
+    })
+  })
+
+  it('counts the metas a played round actually introduced', () => {
+    // End to end: gradeRound stamps the introduction, rankDeck reads the stamp.
+    let cards = {}
+    let now = T0
+    for (const name of T1) {
+      cards = gradeRound(cards, { metaName: name, correct: true }, now)
+      now = new Date(now.getTime() + 60_000) // a round apiece
+    }
+    expect(newIntroducedToday(cards, now)).toBe(5)
+    expect(rankDeck(cards, CATALOG, { limit: 99 }, now).stats).toMatchObject({
+      newAllowance: 5,
+      new: 5,
+      newAvailable: 10,
+    })
+  })
+
+  it('gives a full deck of due work no room for new material', () => {
+    // The backlog throttle, and the point of due-first: a fortnight away leaves
+    // more reviews owed than a ten-location map can hold, so nothing new is
+    // introduced until the debt is paid down.
+    const cards = {}
+    for (const [i, name] of LADDER.entries())
+      cards[name] = card({ due: plus(T0, -i - 1).toISOString(), stability: 5, scheduledDays: 5 })
+    delete cards[T3[3]]
+    delete cards[T3[4]]
+
+    const deck = rankDeck(cards, CATALOG, { limit: 10 }, T0)
+    expect(kinds(deck)).toEqual(Array(10).fill('due'))
+    expect(deck.stats).toMatchObject({ new: 0, due: 10, newAvailable: 2, newAllowance: 10, doneForToday: false })
   })
 
   it('returns pure review at newLimit 0, while still reporting the backlog', () => {
@@ -484,9 +609,27 @@ describe('rankDeck', () => {
     const unseen = LADDER.filter((n) => !cards[n])
     const deck = rankDeck(cards, CATALOG, { limit: 99, newLimit: Infinity }, T0)
 
-    expect(names(deck)).toEqual([...unseen, T1[1], T2[0]])
-    expect(kinds(deck)).toEqual([...unseen.map(() => 'new'), 'due', 'due'])
+    expect(names(deck)).toEqual([T1[1], T2[0], ...unseen])
+    expect(kinds(deck)).toEqual(['due', 'due', ...unseen.map(() => 'new')])
     expect(deck.stats).toMatchObject({ new: 13, due: 2, newAvailable: 13, total: 15 })
+  })
+
+  it('lets an explicit newLimit override the day, in both directions', () => {
+    const catalog = wideCatalog(40)
+    const spent = Object.assign(
+      {},
+      ...Array.from({ length: 10 }, (_, i) => introducedAt(`meta ${i}`, plus(T0, -0.1))),
+    )
+    // the day is spent, but the override is the caller's business
+    expect(rankDeck(spent, catalog, { limit: 99, newLimit: 4 }, T0).stats).toMatchObject({
+      new: 4,
+      newAllowance: 0,
+    })
+    // and it steers this deck without rewriting what the day still owes
+    expect(rankDeck({}, catalog, { limit: 99, newLimit: 0 }, T0).stats).toMatchObject({
+      new: 0,
+      newAllowance: 10,
+    })
   })
 
   it('reports the true backlog in newAvailable however small the deck', () => {
@@ -495,7 +638,7 @@ describe('rankDeck', () => {
     expect(deck.stats).toMatchObject({ new: 2, newAvailable: 40, total: 2 })
   })
 
-  it('spends the new slot before any review, even on a one-entry deck', () => {
+  it('spends a one-entry deck on the review it owes, not the new meta', () => {
     const cards = fullTable({
       [T1[0]]: card({ due: plus(T0, -9).toISOString(), stability: 4, scheduledDays: 4 }),
       [T2[1]]: card({ due: plus(T0, -4).toISOString(), stability: 9, scheduledDays: 9 }),
@@ -503,8 +646,9 @@ describe('rankDeck', () => {
     delete cards[T3[4]]
     const deck = rankDeck(cards, CATALOG, { limit: 1 }, T0)
     expect(deck.metas).toHaveLength(1)
-    expect(deck.metas[0]).toMatchObject({ name: T3[4], kind: 'new' })
-    expect(deck.stats).toMatchObject({ new: 1, due: 0, newAvailable: 1, total: 1 })
+    expect(deck.metas[0]).toMatchObject({ name: T1[0], kind: 'due' })
+    // the unseen meta had the allowance for it and still lost to the debt
+    expect(deck.stats).toMatchObject({ new: 0, due: 1, newAvailable: 1, newAllowance: 10, total: 1 })
   })
 
   it('orders due cards by retrievability, weakest memory first', () => {
@@ -552,18 +696,42 @@ describe('rankDeck', () => {
     expect(deck.stats).toMatchObject({ new: 0, due: 0, future: 3, newAvailable: 0, total: 3 })
   })
 
-  it('keeps priority ascending across all three groups', () => {
+  it('calls the day done only once nothing is owed and no new meta may follow', () => {
+    const done = (cards, opts = {}) => rankDeck(cards, CATALOG, { limit: 99, ...opts }, T0).stats.doneForToday
+
+    // work outstanding in either form keeps the session open
+    expect(done(fullTable({ [T1[0]]: card({ due: plus(T0, -1).toISOString() }) }))).toBe(false)
+    expect(done({})).toBe(false) // nothing due, but fifteen metas waiting to be met
+
+    // nothing due and the ladder exhausted: there is no more work to be had
+    expect(done(fullTable())).toBe(true)
+    // nothing due and today's allowance already spent on other metas
+    const spent = Object.assign(
+      {},
+      ...LADDER.slice(0, 10).map((name) => introducedAt(name, plus(T0, -0.1))),
+    )
+    expect(done(spent)).toBe(true)
+    // ...which is a fact about today, not about the ladder: tomorrow it reopens
+    expect(rankDeck(spent, CATALOG, { limit: 99 }, plus(T0, 1)).stats.doneForToday).toBe(false)
+  })
+
+  it('sorts by priority inside each group, and by group across the deck', () => {
     const cards = fullTable({
       [T1[0]]: card({ due: plus(T0, -9).toISOString(), stability: 4, scheduledDays: 4 }),
       [T2[0]]: card({ due: plus(T0, -2).toISOString(), stability: 20, scheduledDays: 20 }),
     })
-    delete cards[T3[0]] // one unseen meta to head the queue
+    delete cards[T3[0]] // one unseen meta, which the group order parks behind the reviews
     const deck = rankDeck(cards, CATALOG, { limit: 99 }, T0)
-    const priorities = deck.metas.map((m) => m.priority)
 
-    expect(kinds(deck)[0]).toBe('new')
-    expect(priorities[0]).toBe(0)
-    expect(priorities).toEqual([...priorities].sort((a, b) => a - b))
+    expect(kinds(deck)).toEqual(['due', 'due', 'new', ...Array(12).fill('future')])
+    for (const kind of ['due', 'new', 'future']) {
+      const within = deck.metas.filter((m) => m.kind === kind).map((m) => m.priority)
+      expect(within).toEqual([...within].sort((a, b) => a - b))
+    }
+    // a new meta reports 0 and still sits behind reviews that report more: the
+    // group is the policy, the number only orders within it
+    expect(deck.metas[2].priority).toBe(0)
+    expect(deck.metas[1].priority).toBeGreaterThan(0)
   })
 
   it('truncates at limit without reordering', () => {
@@ -581,15 +749,18 @@ describe('rankDeck', () => {
     }
   })
 
-  it('returns pure new material from an empty card table, one meta of it', () => {
+  it('returns pure new material from an empty card table, a day of it', () => {
     const deck = rankDeck({}, CATALOG, { limit: 99 }, T0)
-    expect(deck.metas).toEqual([{ name: T1[0], mapId: 'lm-tier1', priority: 0, kind: 'new' }])
+    expect(deck.metas[0]).toEqual({ name: T1[0], mapId: 'lm-tier1', priority: 0, kind: 'new' })
+    expect(names(deck)).toEqual([...T1, ...T2]) // ten, the lowest rungs first
     expect(deck.stats).toEqual({
-      new: 1,
+      new: 10,
       due: 0,
       future: 0,
       newAvailable: 15,
-      total: 1,
+      newAllowance: 10,
+      doneForToday: false,
+      total: 10,
       unlockedTiers: 1,
     })
   })
@@ -632,7 +803,16 @@ describe('rankDeck', () => {
   it('survives an empty catalog', () => {
     expect(rankDeck({}, [], {}, T0)).toEqual({
       metas: [],
-      stats: { new: 0, due: 0, future: 0, newAvailable: 0, total: 0, unlockedTiers: 1 },
+      stats: {
+        new: 0,
+        due: 0,
+        future: 0,
+        newAvailable: 0,
+        newAllowance: 10,
+        doneForToday: true,
+        total: 0,
+        unlockedTiers: 1,
+      },
     })
   })
 })

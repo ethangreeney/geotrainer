@@ -5,6 +5,7 @@ import {
   clearToken,
   fetchDashboard,
   getToken,
+  setDailyNew,
   type CountryStat,
   type DashboardData,
   type HeldPoint,
@@ -400,6 +401,88 @@ function Work({ m }: { m: WeakMeta }) {
   )
 }
 
+/**
+ * The one setting there is: how many never-seen clues a day may introduce.
+ *
+ * It sits under the deck table rather than anywhere near the hero because it
+ * is a number a person changes about twice ever — once when ten a day turns
+ * out to be more than an evening, once when it turns out to be less. So: a
+ * row, not a page.
+ *
+ * The value shown after a write is the one the Worker echoes back, not the one
+ * that was typed. A refused write must not leave the box displaying a setting
+ * nobody has stored — and the Worker's refusal is already a sentence written
+ * for a person, so it is printed as it arrived rather than translated.
+ */
+function NewPerDay({ initial }: { initial: number }) {
+  const [value, setValue] = useState(String(initial))
+  const [saved, setSaved] = useState(initial)
+  const [state, setState] = useState<'idle' | 'saving' | 'saved'>('idle')
+  const [err, setErr] = useState<string | null>(null)
+
+  const commit = async () => {
+    const n = Number(value.trim())
+    /* A box left empty or half-typed is not a request to change anything, and
+       neither is retyping the number already stored. Both put back what is
+       stored rather than spending a round trip to be told so. */
+    if (state === 'saving' || value.trim() === '' || !Number.isFinite(n) || n === saved) {
+      setValue(String(saved))
+      return
+    }
+    setState('saving')
+    setErr(null)
+    try {
+      const { config } = await setDailyNew(n)
+      setSaved(config.dailyNew)
+      setValue(String(config.dailyNew))
+      setState('saved')
+    } catch (e) {
+      /* Left as typed on purpose: the message says what is wrong with this
+         number, and it is easier to fix a number you can still see. */
+      setErr(e instanceof Error ? e.message : 'Could not save that.')
+      setState('idle')
+    }
+  }
+
+  return (
+    <div className="knob">
+      <div className="knobRow">
+        <label className="knobName" htmlFor="dailyNew">
+          New clues per day
+        </label>
+        <input
+          id="dailyNew"
+          className="field knobIn"
+          type="number"
+          min={0}
+          max={100}
+          step={1}
+          inputMode="numeric"
+          value={value}
+          disabled={state === 'saving'}
+          onChange={(e) => {
+            setValue(e.target.value)
+            setState('idle')
+            setErr(null)
+          }}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur()
+          }}
+        />
+        <span className="knobState" role="status">
+          {state === 'saving' ? 'Saving…' : state === 'saved' ? `Saved · ${saved}` : ''}
+        </span>
+      </div>
+      <p className="knobSay">
+        Every new clue costs about ten reviews later on, which is why the default is 10. Set it to 0 to review what
+        you have and meet nothing new.
+      </p>
+      {err && <p className="err">{err}</p>}
+    </div>
+  )
+}
+
 /* ========================================================================== */
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -514,6 +597,28 @@ export default function Dashboard() {
   const held = Math.min(progress.held, progress.total)
   const heldShare = progress.total > 0 ? (held / progress.total) * 100 : 0
 
+  /* What today still asks for, which the deck on its own cannot say: "nothing
+     due" is equally true of a day with ten unmet clues still allowed and of a
+     day that is genuinely finished. `day` is the thing that tells those apart.
+     A Worker too old to send it leaves this line exactly as it has always
+     read — the one unforgivable move here is calling a day done on no
+     evidence, and then watching the map hand over another deck. */
+  const day = data.day
+  /* And which clues that "new left today" is a count of. It is the same
+     allowance said in names instead of a number, so a day that is over — or a
+     Worker too old to send the list — shows nothing rather than a heading over
+     an empty box. */
+  const newToday = day && !day.doneForToday ? (day.upNext ?? []) : []
+  const upNext = day
+    ? `${deck.due.toLocaleString()} due · ${day.newAllowance.toLocaleString()} new left today${
+        next ? ` · next one back ${next}` : ''
+      }`
+    : deck.due > 0
+      ? `${deck.due.toLocaleString()} due now${next ? ` · next one back ${next}` : ''}`
+      : next
+        ? `Nothing due · next one back ${next}`
+        : 'Nothing due yet'
+
   return (
     <>
       <Mast>
@@ -619,12 +724,38 @@ export default function Dashboard() {
               </a>
 
               <p className="upNext">
-                {deck.due > 0
-                  ? `${deck.due.toLocaleString()} due now${next ? ` · next one back ${next}` : ''}`
-                  : next
-                    ? `Nothing due · next one back ${next}`
-                    : 'Nothing due yet'}
+                {day?.doneForToday ? (
+                  <>
+                    <span className="dayDone">✓ Done for today</span>
+                    {next && ` · next one back ${next}`}
+                  </>
+                ) : (
+                  upNext
+                )}
               </p>
+
+              {/* What today will actually teach, named. Quiet on purpose: it
+                  sits under the one line that gets you into a game, and it is
+                  an overview of the day rather than a second headline. */}
+              {newToday.length > 0 && (
+                <div className="nx">
+                  <p className="nxHead">New today · {newToday.length}</p>
+                  <ul className="nxList">
+                    {newToday.map((name) => {
+                      const { country, clue } = splitMeta(name)
+                      return (
+                        <li key={name}>
+                          <span className="nxWhat">{clue}</span>
+                          {country && <span className="nxWhere">{country}</span>}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                  {/* The honest caveat: new clues queue behind what is owed, so
+                      a heavy review day meets fewer of these than are listed. */}
+                  <p className="nxSay">New clues come after the day's due reviews, as room allows.</p>
+                </div>
+              )}
             </section>
 
             {progress.series.length >= 1 && (
@@ -679,6 +810,12 @@ export default function Dashboard() {
                           </div>
                         ))}
                       </div>
+                      {/* The rate the last row of that table empties at, and
+                          the only number on this page you set rather than
+                          earn. It belongs under the deck it governs; an older
+                          Worker sends no `day`, and with no stored value to
+                          show the honest thing is no control at all. */}
+                      {day && <NewPerDay initial={day.dailyNew} />}
                     </div>
                   </div>
 

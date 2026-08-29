@@ -104,8 +104,16 @@ export function gradeRound(cards, round, now) {
   const success = rating !== Rating.Again
   const { card: graded } = scheduler.next(prev ? fromStored(prev) : createEmptyCard(now), now, rating)
 
+  // The moment this meta entered the collection, written once and never
+  // rewritten: it is what the daily new-card allowance is counted off, so a
+  // re-grade must not look like a fresh introduction. Cards graded before the
+  // field existed simply never gain one — backdating them would be a guess, and
+  // an old introduction misread as today's is an allowance spent on nothing.
+  const firstSeen = prev ? prev.firstSeen : now.toISOString()
+
   next[metaName] = {
     ...toStored(graded),
+    ...(firstSeen ? { firstSeen } : {}),
     seen: (prev?.seen ?? 0) + 1,
     correct: (prev?.correct ?? 0) + (success ? 1 : 0),
     // One miss resets the streak: knowing a meta means reading it cold, repeatedly.
@@ -219,47 +227,114 @@ export function buildDeck(cards, catalog, opts = {}, now) {
 }
 
 /**
- * How many never-seen metas a single published deck is allowed to introduce.
+ * How many never-seen metas may be introduced in a day.
  *
  * This is a cap, not a ranking, and the distinction is the whole design. FSRS
  * models forgetting for material already seen; it has no opinion at all about
  * the rate at which new material should arrive, and asking a retrievability
  * number to arbitrate that question is asking it something it cannot answer.
- * Anki, which does answer it, keeps the two entirely separate: a hard daily cap
- * on new cards (default 20) against a review limit (default 200), so new
- * material is about 9% of the day's load and never competes with review on a
- * shared priority scale.
+ * Anki, which does answer it, keeps the two entirely separate: a daily
+ * allowance of new cards (default 20) against a much larger review limit
+ * (default 200), so new material never competes with review on a shared
+ * priority scale. This number is that allowance, transplanted.
  *
  * The reason a cap rather than a priority is that a new card is not one unit of
  * work — the rule of thumb is that each one generates roughly ten future
- * reviews. The introduction rate is the derivative of the review load, so
- * letting it run free is exactly how a deck buries its owner a fortnight later.
+ * reviews. The introduction rate is the derivative of the review load, so what
+ * this number prices is not today's ambition but the fortnight it commits to,
+ * and letting it run free is exactly how a deck buries its owner later.
  * Cognitive-load and scaffolding research says the same thing from the other
  * direction: material is absorbed gradually, against what is already known.
  *
- * And this domain sharpens it. A published deck is one five-round GeoGuessr
- * game. A game of all-new metas is five near-certain misses with nothing known
- * to contrast against — but most of the learning here is discrimination ("this
- * is Estonia and NOT Latvia"), which only happens when known cards share the
- * game. One new meta per deck is 20% new: ahead of Anki's ~9% default and of
- * the player's own measured 8%, deliberately, because there is a real unseen
- * backlog to work through — but still a game that is mostly answerable.
+ * Ten, where Anki's default is twenty, because a review here is not a
+ * flashcard: it is a whole round of GeoGuessr — minutes of play, a pan around
+ * the pano, a pin to place. Ten new metas is on the order of a hundred future
+ * rounds owed, so the conservative half of Anki's default is still a generous
+ * day. It also keeps most of any given game answerable, which matters because
+ * most of the learning here is discrimination ("this is Estonia and NOT
+ * Latvia") and that only happens when known material shares the game.
  *
- * This is the knob. Raise it to introduce faster; `Infinity` removes the cap
- * entirely and restores the front-load-everything behaviour, where the unseen
- * backlog is cleared before review resumes.
+ * And it is a per-user knob, not a law: the hosts pass whatever the player has
+ * configured as `opts.dailyNew`, and this is only what they get for saying
+ * nothing.
  */
-export const DEFAULT_NEW_PER_DECK = 1
+export const DEFAULT_DAILY_NEW = 10
 
 /**
- * Where an unseen meta sits within the deck it was admitted to.
+ * The width of "today", and the reason it is a rolling window rather than a date.
  *
- * Not a knob — DEFAULT_NEW_PER_DECK is the knob, and by the time this number is
- * used the cap has already decided how much new material exists. Zero is simply
- * the honest reading of a card with no memory behind it, and it keeps the
- * exposed `priority` monotonic across the returned list. Intra-deck order is
- * cosmetic anyway: GeoGuessr draws the rounds of a game from the published map
- * in its own order.
+ * A calendar day needs a timezone and there is no honest one to choose here:
+ * the Worker runs in UTC while the player is in New Zealand, so a UTC midnight
+ * lands mid-afternoon for them and would cut a single sitting in half, handing
+ * out a second full allowance in the middle of it. Twenty-four hours ending at
+ * `now` needs no timezone at all, and unlike a fixed boundary it cannot be
+ * gamed by front-loading — spending the day's new metas at five to midnight
+ * does not buy another ten at five past.
+ */
+const ROLLING_DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * How much of today's allowance has already been spent.
+ *
+ * Counts the cards whose `firstSeen` stamp falls inside the rolling day ending
+ * at `now`. Cards with no stamp — everything introduced before that field
+ * existed — count as not-today, which is both the truthful reading (they were
+ * introduced at some unknown past date, almost certainly not in the last
+ * twenty-four hours) and the only safe one: treating an unstamped table as
+ * today's work would zero the allowance on the day this shipped and stop new
+ * material dead.
+ */
+export function newIntroducedToday(cards, now) {
+  const moment = now.getTime()
+  const since = moment - ROLLING_DAY_MS
+  let count = 0
+  for (const card of Object.values(cards ?? {})) {
+    const stamped = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
+    if (Number.isFinite(stamped) && stamped > since && stamped <= moment) count += 1
+  }
+  return count
+}
+
+/**
+ * Which metas the next deck would introduce, named, in the order it would meet
+ * them.
+ *
+ * This is rankDeck's `unseen` group and nothing else: the same unlocked-ladder
+ * walk, the same dedupe at a meta's first and easiest appearance, cut at the
+ * same allowance. It exists so a dashboard can say what today is about to
+ * teach without either building a deck it is not going to play or growing its
+ * own copy of the ladder order — a second copy would drift, and a preview that
+ * disagrees with the map it is previewing is worse than no preview.
+ *
+ * `limit` is the caller's allowance, already worked out (the day's remaining
+ * new-card budget, usually); zero and a fully-met ladder both give back an
+ * empty list, which is the honest answer to "what is next" when nothing is.
+ */
+export function nextNewMetas(cards, catalog, limit) {
+  const table = cards ?? {}
+  const room = Math.max(0, limit ?? 0)
+  const out = []
+  if (!room) return out
+  for (const { name } of unlockedMetas(catalog ?? [], catalog?.length ?? 0)) {
+    if (table[name]) continue
+    out.push(name)
+    if (out.length >= room) break
+  }
+  return out
+}
+
+/**
+ * The priority reported for an unseen meta.
+ *
+ * Not a knob — the daily allowance is the knob, and by the time this number is
+ * used the allowance has already decided how much new material exists. Zero is
+ * simply the honest reading of a card with no memory behind it: nothing is
+ * recallable that has never been seen. It is a label, not a sort key. The
+ * returned list is grouped, not globally sorted by priority — reviews lead a
+ * new meta that reports a lower number than they do — because which group a
+ * meta is in is the policy and `priority` only says why it sits where it does
+ * within its own group. Intra-deck order is cosmetic anyway: GeoGuessr draws
+ * the rounds of a game from the published map in its own order.
  */
 const UNSEEN_PRIORITY = 0
 
@@ -294,24 +369,48 @@ const DEFAULT_LIMIT = 25
  * ordering.
  *
  * Three groups, concatenated, so the separation is structural rather than a
- * numeric coincidence: unseen metas in ladder order (tier ascending, then
+ * numeric coincidence: due cards weakest-memory-first with the longest-overdue
+ * breaking ties, then unseen metas in ladder order (tier ascending, then
  * catalog order, deduped at a meta's first and easiest appearance) but no more
- * than `newLimit` of them, then due cards weakest-memory-first with the
- * longest-overdue breaking ties, then not-yet-due cards on the same key. The
- * third group is filler and behaves like it: it only appears when the caller
- * asks for more entries than there is real work, and it can never displace the
- * first two. `priority` is the key that produced the order, exposed so the
- * Worker or a debugging view can see why a meta landed where it did.
+ * than the day's remaining allowance of them, then not-yet-due cards on the
+ * review key. The third group is filler and behaves like it: it only appears
+ * when the caller asks for more entries than there is real work, and it can
+ * never displace the first two. `priority` is the key that ordered a meta
+ * inside its own group, exposed so the Worker or a debugging view can see why
+ * it landed where it did.
+ *
+ * Due before new is Anki's ordering and it is load-bearing here rather than
+ * cosmetic, because `limit` is small — ten locations, two games. Clear what you
+ * owe; new material moves into whatever room is left. A player returning to a
+ * fortnight's backlog gets a deck of pure review and introduces nothing, which
+ * is not a failure of the deck but the throttle working: the backlog is the
+ * signal that the last few days of introductions have not been paid for yet.
+ * When the reviews are light the same rule fills the rest of the deck with new
+ * metas, up to the allowance.
+ *
+ * That allowance is a day's, not a deck's: `opts.dailyNew` (default
+ * DEFAULT_DAILY_NEW) minus what has already been introduced in the rolling
+ * twenty-four hours, so playing four decks in an evening does not introduce
+ * four decks' worth of new material. `opts.newLimit` overrides the arithmetic
+ * outright, for tests and debugging — `0` for pure review, `Infinity` to
+ * front-load the entire unseen backlog.
  *
  * The unseen surplus is dropped, not demoted. An unseen meta that loses to the
- * cap is simply not in this deck; parking it at the tail as filler would let
- * material the player has never met push out review work that is genuinely
- * owed, which is the thing the cap exists to prevent. `stats.newAvailable`
- * reports how many were waiting, so the backlog stays visible rather than
+ * allowance is simply not in this deck; parking it at the tail as filler would
+ * let material the player has never met push out review work that is genuinely
+ * owed, which is the thing the allowance exists to prevent.
+ * `stats.newAvailable` reports how many were waiting and `stats.newAllowance`
+ * how many the day still permits, so the backlog stays visible rather than
  * silently disappearing.
  *
- * The cap applies before `limit`, so the new slot survives a small deck: asking
- * for one entry against a real backlog yields the new meta, not a review.
+ * `stats.doneForToday` is the other half of that: true when nothing is owed and
+ * no new meta may be introduced — either the allowance is spent or the ladder
+ * has nothing unseen left. It is the "close the tab" signal, and it is why the
+ * queue has an end at all. Everything still returned in that state is filler
+ * the player may play for fun; none of it is work.
+ *
+ * The allowance applies before `limit`, so a small deck does not silently
+ * enlarge it.
  *
  * Unlike buildDeck there is no minimum size and no padding to reach one: if the
  * ladder yields three entries, three come back. Inventing filler to hit a
@@ -320,7 +419,9 @@ const DEFAULT_LIMIT = 25
  */
 export function rankDeck(cards, catalog, opts = {}, now) {
   const limit = Math.max(0, opts?.limit ?? DEFAULT_LIMIT)
-  const newLimit = Math.max(0, opts?.newLimit ?? DEFAULT_NEW_PER_DECK)
+  // What the day has left to give, unless the caller has taken the wheel.
+  const allowance = Math.max(0, (opts?.dailyNew ?? DEFAULT_DAILY_NEW) - newIntroducedToday(cards, now))
+  const newLimit = Math.max(0, opts?.newLimit ?? allowance)
   const table = cards ?? {}
   const entries = unlockedMetas(catalog ?? [], catalog?.length ?? 0)
   const moment = now.getTime()
@@ -345,13 +446,17 @@ export function rankDeck(cards, catalog, opts = {}, now) {
   due.sort(byPriority)
   future.sort(byPriority)
 
-  const metas = [...unseen.slice(0, newLimit), ...due, ...future]
+  const metas = [...due, ...unseen.slice(0, newLimit), ...future]
     .slice(0, limit)
     .map(({ name, mapId, priority, kind }) => ({ name, mapId, priority, kind }))
 
   // The counts describe what is being returned, the same as buildDeck's stats —
-  // except newAvailable, which is deliberately about what did not fit, since a
-  // capped backlog the player cannot see is a backlog they cannot decide about.
+  // except newAvailable and newAllowance, which are deliberately about what did
+  // not fit, since a throttled backlog the player cannot see is a backlog they
+  // cannot decide about. newAllowance is the day's remaining allowance as it
+  // stood before this deck was played, and it reports the day rather than the
+  // caller: an explicit newLimit steers this deck without rewriting what the
+  // day still owes.
   const counted = { new: 0, due: 0, future: 0 }
   for (const meta of metas) counted[meta.kind] += 1
   return {
@@ -359,6 +464,8 @@ export function rankDeck(cards, catalog, opts = {}, now) {
     stats: {
       ...counted,
       newAvailable: unseen.length,
+      newAllowance: allowance,
+      doneForToday: due.length === 0 && (newLimit === 0 || unseen.length === 0),
       total: metas.length,
       unlockedTiers: unlockedTiers(table, catalog),
     },
