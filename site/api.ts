@@ -177,6 +177,29 @@ export interface HeldPoint {
   t: string
   held: number
 }
+/** One clue the day is about to introduce, with the camera that shows it.
+ *
+ * The thumbnail is built client-side, from `panoId` and `heading`:
+ *
+ *   https://streetviewpixels-pa.googleapis.com/v1/thumbnail?cb_client=maps_sv.tactile.gps&w=<w>&h=<h>&panoid=<panoId>&yaw=<heading>&pitch=0
+ *
+ * Keyless, and fine from a browser `<img>` — it only 403s for clients that
+ * send no User-Agent at all (a bare curl, or a Worker fetch), which is exactly
+ * why the Worker hands over the pano and lets the page do the asking.
+ *
+ * `panoId` is null when no bundled catalog has a location for the clue. The
+ * entry stays in the list regardless, because the list's length is the day's
+ * remaining allowance and dropping one would make it disagree with the count
+ * printed beside it. */
+export interface UpNextMeta {
+  /** The meta key, "Country: Clue". */
+  name: string
+  panoId: string | null
+  heading: number | null
+  pitch: number | null
+  lat: number | null
+  lng: number | null
+}
 export interface DashboardData {
   name: string
   generatedAt: string
@@ -187,19 +210,35 @@ export interface DashboardData {
      Optional because the Worker learned to send it after the site learned to
      draw it; Dashboard.tsx falls back to counting solid clues until it lands. */
   progress?: { held: number; total: number; series: HeldPoint[] }
-  deck: { due: number; learning: number; unseen: number; introduced: number; total: number; nextDue: string | null }
+  /* `due` is the reviews owed at the moment the payload was built — the same
+     count, off the same clock and the same test, that decides what a published
+     deck deals. `introduced` is the distinct metas being tracked; `ladderTotal`
+     is every meta the unlocked ladder holds, which is the only honest ceiling
+     to draw a bar against (`total` adds tracked cards to unseen metas, and a
+     clue dropped from a catalog is counted by the first and not the second).
+     `ladderTotal` is optional for the usual reason: the Worker learned to send
+     it after this file learned to name it. */
+  deck: {
+    due: number
+    learning: number
+    unseen: number
+    introduced: number
+    total: number
+    ladderTotal?: number
+    nextDue: string | null
+  }
   /* The day rather than the deck: the allowance, what is left of it, and
      whether anything is owed at all. Optional for the same reason progress is —
      the site and the Worker deploy separately, and a console that announced a
      finished day off a payload that never carried one would be lying in the
      one direction that matters. Absent means "say nothing about today". */
-  /* `upNext` is the same reasoning one level down: the meta names the day's
+  /* `upNext` is the same reasoning one level down: the clues the day's
      remaining allowance would introduce next, in ladder order. Optional on its
      own account, not just `day`'s — a Worker old enough to send the three
      numbers but not the list is a real deploy state, and naming clues the
      scheduler has not chosen would be an invention. Empty when the allowance
      is spent or the ladder has nothing left unseen. */
-  day?: { dailyNew: number; newAllowance: number; doneForToday: boolean; upNext?: string[] }
+  day?: { dailyNew: number; newAllowance: number; doneForToday: boolean; upNext?: UpNextMeta[] }
   metas: { solid: number; holding: number; shaky: number; total: number; weakest: WeakMeta[] }
   countries: CountryStat[]
   totals: { rounds: number; correctPct: number | null }

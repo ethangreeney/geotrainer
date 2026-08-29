@@ -305,6 +305,33 @@ function ringStats(geojson) {
 const catalog = JSON.parse(readFileSync(ROOT + 'coach/catalog/66fda352ee1c8ee4735e1aa8.json', 'utf8'))
 const sample = catalog.locations.find((l) => l.panoId && l.country && l.metaName)
 
+/** metaKeyOf, spelled out rather than imported: the Worker's own convention is
+ * what is under test, so the expectations have to be built from the catalog
+ * files by hand or they only prove the code agrees with itself. */
+const metaKey = (l) => (l.metaName ? (l.country ? l.country + ': ' + l.metaName : l.metaName) : null)
+
+/** Every catalog the Worker bundles, in the import order that is tier order —
+ * so "the first location that teaches this meta" means the same thing here as
+ * it does in the Worker. */
+const CATALOG_FILES = [
+  '66fda352ee1c8ee4735e1aa8.json',
+  '66c0d3feff4dbe492e06174e.json',
+  '67695a0a9c0874b92709eedb.json',
+  '66fda2e27e08dc03b5bb3d6e.json',
+]
+
+/** The first location of every meta across the whole ladder, and how many
+ * distinct metas that ladder holds. The preview's pictures and the dashboard's
+ * denominator are both checked against these. */
+const firstLocation = {}
+for (const file of CATALOG_FILES)
+  for (const l of JSON.parse(readFileSync(ROOT + 'coach/catalog/' + file, 'utf8')).locations) {
+    const key = metaKey(l)
+    if (key && !(key in firstLocation))
+      firstLocation[key] = { panoId: l.panoId, heading: l.heading, pitch: l.pitch, lat: l.lat, lng: l.lng }
+  }
+const ladderMetaTotal = Object.keys(firstLocation).length
+
 /** A state in which a handful of metas are genuinely due, with memories weak
  * enough to separate them, so the ranking has something to order. Every other
  * meta is left unseen. */
@@ -423,6 +450,15 @@ function spentState(names) {
   return { countries: {}, confusions: {}, metas: {}, deckCards, lastDeck: null }
 }
 
+/** All three states at once: six clues genuinely owed, four met and holding,
+ * and the whole rest of the ladder never seen. The dashboard's totals only
+ * mean anything against a table that has more than one kind of card in it. */
+function mixedState(dueOnes, heldOnes) {
+  const due = dueState(dueOnes)
+  const held = playedState(heldOnes)
+  return { ...held, deckCards: { ...due.deckCards, ...held.deckCards } }
+}
+
 /** Everything a settings write must refuse: none of these is a count of metas.
  * undefined is the field left off the payload entirely. */
 const BAD_DAILY_NEW = [undefined, null, '', 'twenty', -1, 101, 1e9, true, {}, [1]]
@@ -519,6 +555,12 @@ const out = {
   }),
   // A day half spent: an allowance of five with two clues met an hour ago, so
   // three remain and the console may name exactly those three.
+  // Some met, some due, the rest unseen — the shape the dashboard's three
+  // totals have to be read off.
+  dashMixed: await call('/api/dashboard', {
+    headers: auth,
+    state: mixedState(dueNames.slice(0, 6), dueNames.slice(6, 10)),
+  }),
   dashPartDay: await call('/api/dashboard', {
     headers: authFor(TOKENS.partDash),
     token: TOKENS.partDash,
@@ -571,6 +613,12 @@ out.sample = { panoId: sample.panoId, country: sample.country, metaName: sample.
 out.ladderHead = ladderHead
 out.playedNames = dueNames.slice(0, 4)
 out.spentNames = dueNames.slice(0, 2)
+out.mixedDueNames = dueNames.slice(0, 6)
+out.mixedHeldNames = dueNames.slice(6, 10)
+out.ladderMetaTotal = ladderMetaTotal
+// Only the previewed metas' locations travel — the whole map is a few hundred
+// entries of coordinates nothing asserts on.
+out.firstLocation = Object.fromEntries(ladderHead.map((n) => [n, firstLocation[n]]))
 process.stdout.write(JSON.stringify(out))
 `
 
@@ -948,6 +996,10 @@ describe('POST /config', () => {
  * The dashboard.
  * ---------------------------------------------------------------------- */
 
+/** The preview's names alone, for the assertions that are about order and
+ * membership rather than about the picture beside each one. */
+const names = (upNext) => upNext.map((m) => m.name)
+
 describe('GET /api/dashboard', () => {
   it('refuses without a token', () => {
     expect(R.dashNoToken.status).toBe(401)
@@ -1018,13 +1070,13 @@ describe('GET /api/dashboard', () => {
   it('names the clues the day is about to introduce, in ladder order', () => {
     // A fresh account has met nothing, so the preview is simply the head of the
     // ladder — and it is the ladder's order, not the alphabet or a shuffle.
-    expect(R.dashFresh.body.day.upNext).toEqual(R.ladderHead.slice(0, 10))
+    expect(names(R.dashFresh.body.day.upNext)).toEqual(R.ladderHead.slice(0, 10))
   })
 
   it('leaves out the clues already met and keeps the rest in order', () => {
     const expected = R.ladderHead.filter((n) => !R.playedNames.includes(n)).slice(0, 10)
-    expect(R.dashHistory.body.day.upNext).toEqual(expected)
-    for (const name of R.playedNames) expect(R.dashHistory.body.day.upNext).not.toContain(name)
+    expect(names(R.dashHistory.body.day.upNext)).toEqual(expected)
+    for (const name of R.playedNames) expect(names(R.dashHistory.body.day.upNext)).not.toContain(name)
   })
 
   it('names no more than the day has left to give', () => {
@@ -1034,7 +1086,28 @@ describe('GET /api/dashboard', () => {
     expect(day.dailyNew).toBe(5)
     expect(day.newAllowance).toBe(3)
     expect(day.doneForToday).toBe(false)
-    expect(day.upNext).toEqual(R.ladderHead.filter((n) => !R.spentNames.includes(n)).slice(0, 3))
+    expect(names(day.upNext)).toEqual(R.ladderHead.filter((n) => !R.spentNames.includes(n)).slice(0, 3))
+  })
+
+  it('carries the camera that shows each clue, not only its name', () => {
+    // Naming a clue is not showing one. Each entry carries the first catalog
+    // location that teaches it — the pano and the yaw the page needs to build
+    // a Street View thumbnail — and "first" is catalog order, so the same clue
+    // shows the same picture on every load.
+    for (const entry of R.dashFresh.body.day.upNext) {
+      const loc = R.firstLocation[entry.name]
+      expect(loc, entry.name).toBeTruthy()
+      expect(entry, entry.name).toEqual({
+        name: entry.name,
+        panoId: loc.panoId,
+        heading: loc.heading,
+        pitch: loc.pitch,
+        lat: loc.lat,
+        lng: loc.lng,
+      })
+      expect(typeof entry.panoId, entry.name).toBe('string')
+      expect(typeof entry.heading, entry.name).toBe('number')
+    }
   })
 
   it('names nothing once the allowance is spent', () => {
@@ -1048,11 +1121,44 @@ describe('GET /api/dashboard', () => {
   it('never names more clues than the day or the deck can supply', () => {
     // The list and the count are two readings of one number, so they cannot
     // drift: as many names as the allowance, unless the ladder runs out first.
-    for (const key of ['dashFresh', 'dashHistory', 'dashPartDay', 'dashAllDone']) {
+    // A clue with no catalog location still occupies its place in the list —
+    // dropping it would shorten the list below the count printed beside it.
+    for (const key of ['dashFresh', 'dashHistory', 'dashMixed', 'dashPartDay', 'dashAllDone']) {
       const { day, deck } = R[key].body
       expect(day.upNext.length, key).toBe(Math.min(day.newAllowance, deck.unseen))
-      expect(new Set(day.upNext).size, key).toBe(day.upNext.length)
+      expect(new Set(names(day.upNext)).size, key).toBe(day.upNext.length)
     }
+  })
+
+  it('carries the three totals a console reads without doing arithmetic', () => {
+    // Six clues owed, four met and holding, everything else unseen.
+    const { deck } = R.dashMixed.body
+    expect(R.dashMixed.status).toBe(200)
+    // (a) distinct metas tracked — one per card in the table, never one per
+    // location, which is the over-count /deck had to be taught to avoid.
+    expect(deck.introduced).toBe(R.mixedDueNames.length + R.mixedHeldNames.length)
+    expect(deck.introduced).toBe(new Set([...R.mixedDueNames, ...R.mixedHeldNames]).size)
+    // (b) the universe the deck can ever draw from: every distinct meta on the
+    // unlocked ladder, counted off the catalog files themselves.
+    expect(deck.ladderTotal).toBe(R.ladderMetaTotal)
+    expect(deck.ladderTotal).toBe(deck.introduced + deck.unseen)
+    // (c) reviews owed at this instant — the six that are due, not the four
+    // that are not due for a month.
+    expect(deck.due).toBe(R.mixedDueNames.length)
+  })
+
+  it('agrees with the deck the map would actually deal', () => {
+    // The number that matters most is the one two endpoints can disagree
+    // about: reviews owed. /status walks the same ladder off the same due
+    // test, so a console promising eight reviews over a map dealing six would
+    // be this assertion failing.
+    expect(R.dashAllDone.body.deck.due).toBe(R.statusAllDone.body.due)
+    expect(R.dashAllDone.body.deck.unseen).toBe(R.statusAllDone.body.unseen)
+    expect(R.dashAllDone.body.deck.ladderTotal).toBe(R.ladderMetaTotal)
+    // A finished day owes nothing, and a ladder full of unmet clues is still
+    // smaller than the ladder itself.
+    expect(R.dashAllDone.body.deck.due).toBe(0)
+    expect(R.dashAllDone.body.deck.unseen).toBeLessThan(R.ladderMetaTotal)
   })
 })
 

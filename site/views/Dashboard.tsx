@@ -741,10 +741,10 @@ export default function Dashboard() {
                 <div className="nx">
                   <p className="nxHead">New today · {newToday.length}</p>
                   <ul className="nxList">
-                    {newToday.map((name) => {
-                      const { country, clue } = splitMeta(name)
+                    {newToday.map((meta) => {
+                      const { country, clue } = splitMeta(meta.name)
                       return (
-                        <li key={name}>
+                        <li key={meta.name}>
                           <span className="nxWhat">{clue}</span>
                           {country && <span className="nxWhere">{country}</span>}
                         </li>

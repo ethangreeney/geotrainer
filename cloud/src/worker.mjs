@@ -72,6 +72,21 @@ const toLadder = (catalogs) =>
     metas: [...new Set(c.locations.map((l) => metaKeyOf(l.country, l.metaName)).filter(Boolean))],
   }))
 
+/**
+ * How many distinct metas the unlocked ladder holds — the universe a deck can
+ * ever draw from, counted the way the scheduler walks it: every rung, deduped
+ * across rungs, because a meta on two maps is one meta and the scheduler keeps
+ * it at its first (easiest) appearance.
+ *
+ * Not the same number as `introduced + unseen`, and that is why it exists. A
+ * card can outlive its meta — a clue renamed or dropped from a catalog leaves
+ * a row in the deck table that no rung lists — so the sum counts it on one
+ * side while the ladder does not have it on the other, and a progress bar
+ * drawn against the sum quietly grows a denominator nobody can ever fill.
+ */
+const ladderMetaCount = (ladder) =>
+  new Set((ladder ?? []).flatMap((rung) => rung?.metas ?? [])).size
+
 const haversineKm = (a, b) => {
   const rad = (d) => (d * Math.PI) / 180
   const dLat = rad(b.lat - a.lat)
@@ -222,9 +237,19 @@ function catalogLocation(panoId) {
   return panoIndex.get(panoId) ?? null
 }
 
-/** The reverse of metaFromCatalogs: a meta key ("Brazil: Pole") back to some
- * location that teaches it. Built once per isolate — the catalogs are bundled,
- * so this is a few hundred entries of pure in-memory work. */
+/** The reverse of metaFromCatalogs: a meta key ("Brazil: Pole") back to the
+ * first location that teaches it. Built once per isolate — the catalogs are
+ * bundled, so this is a few hundred entries of pure in-memory work.
+ *
+ * "First" is catalog order, and first-write-wins across the whole ladder, so
+ * the answer is stable between requests and between isolates: the same clue
+ * shows the same picture today and tomorrow rather than rotating through its
+ * locations. The key is built with the same metaKeyOf(country, metaName) call
+ * toLadder uses, which is the point — the scheduler names a meta and this
+ * lookup finds it by construction, instead of by two spellings agreeing.
+ *
+ * The camera fields ride along because the dashboard's preview wants to show
+ * the clue, not just name it: a Street View thumbnail is a panoId and a yaw. */
 let metaLocations = null
 function locationForMeta(metaName) {
   if (!metaLocations) {
@@ -232,10 +257,38 @@ function locationForMeta(metaName) {
     for (const c of CATALOGS)
       for (const l of c.locations) {
         const key = metaKeyOf(l.country, l.metaName)
-        if (key && !metaLocations.has(key)) metaLocations.set(key, { mapId: c.mapId, panoId: l.panoId })
+        if (key && !metaLocations.has(key))
+          metaLocations.set(key, {
+            mapId: c.mapId,
+            panoId: l.panoId ?? null,
+            heading: l.heading ?? null,
+            pitch: l.pitch ?? null,
+            lat: l.lat ?? null,
+            lng: l.lng ?? null,
+          })
       }
   }
   return metaLocations.get(metaName) ?? null
+}
+
+/**
+ * A meta the day is about to introduce, with the camera that can show it.
+ *
+ * A meta with no location in any catalog still comes back — named, with a null
+ * pano. The list is the allowance said in names, and a preview that silently
+ * dropped one would be a shorter list than the number printed beside it, which
+ * is the one way this display can lie.
+ */
+function upNextEntry(name) {
+  const loc = locationForMeta(name)
+  return {
+    name,
+    panoId: loc?.panoId ?? null,
+    heading: loc?.heading ?? null,
+    pitch: loc?.pitch ?? null,
+    lat: loc?.lat ?? null,
+    lng: loc?.lng ?? null,
+  }
 }
 
 /** The picture that goes with a clue, borrowed from its LM card (cached in D1
@@ -778,7 +831,13 @@ async function buildDashboard(env, user) {
   const state = await loadUserState(env, user.id)
   const ladder = toLadder(CATALOGS)
   const summary = deckSummary(state.deckCards, ladder, now)
+  // Distinct metas being tracked. The card table is keyed by meta name, so its
+  // keys are already the distinct set — the over-count /deck had to fix (a map
+  // can publish two panos of one clue) cannot arise here, because there are no
+  // rows, only keys.
   const introduced = Object.keys(state.deckCards).length
+  // And the whole board those are a part of.
+  const ladderTotal = ladderMetaCount(ladder)
 
   // The day, as opposed to the deck: what the allowance is, how much of it is
   // left, and whether there is anything owed at all. Same three numbers /status
@@ -792,7 +851,11 @@ async function buildDashboard(env, user) {
   // asks the scheduler rather than reading the catalog itself, so the list is
   // the deck's own next introductions and not a second guess at them; a spent
   // allowance names nothing, which is what a finished day should say.
-  const upNext = nextNewMetas(state.deckCards, ladder, newAllowance)
+  // Each one carries the first catalog location that teaches it, so the
+  // console can show the clue rather than only name it. The URL is the
+  // client's to build (see site/api.ts) — the Worker has no business minting
+  // image links it never fetches.
+  const upNext = nextNewMetas(state.deckCards, ladder, newAllowance).map(upNextEntry)
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
     metaName,
@@ -861,11 +924,20 @@ async function buildDashboard(env, user) {
       series,
     },
     deck: {
+      // Reviews owed right now: deckSummary's count, taken off the same `now`
+      // and the same due <= now test rankDeck uses, so the console can never
+      // promise a number of reviews the published map would not deal.
       due: summary.due,
       learning: summary.learning,
       unseen: summary.unseen,
+      // Distinct metas tracked (cards in the table).
       introduced,
       total: introduced + summary.unseen,
+      // Distinct metas in the unlocked ladder — the denominator that is a real
+      // ceiling, unlike `total`, which counts tracked cards the ladder may no
+      // longer list. Kept beside it rather than instead of it: `total` is what
+      // a deployed site is already drawing against.
+      ladderTotal,
       nextDue: summary.nextDue,
     },
     day: { dailyNew, newAllowance, doneForToday, upNext },
