@@ -523,113 +523,350 @@ code {
 @keyframes blip { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.18; } }
 
 /* ============================================================ dashboard === */
-.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s3); margin-top: var(--s4); }
-.grid > .c4 { grid-column: span 4; }
-.grid > .c5 { grid-column: span 5; }
-.grid > .c6 { grid-column: span 6; }
-.grid > .c7 { grid-column: span 7; }
-.grid > .c8 { grid-column: span 8; }
-.grid > .c12 { grid-column: span 12; }
+/* The console is the landing page's language turned inward: the same deep
+   plane, the same lime, the same Archivo at the top of its weight axis for
+   anything a person reads as a quantity, and the same habit of separating
+   things with a hairline rather than boxing them.
+ *
+ * It reads top to bottom as one argument:
+ *   TODAY      — one sentence of instruction, a key, and the three figures
+ *                the day is actually measured in
+ *   NEW TODAY  — the clues about to be introduced, as the photographs they
+ *                are, because a meta is a thing you look at
+ *   HELD AT 90 — the long measure, and the only chart above the fold-line
+ *   the working-out — panels, unchanged in what they say
+ *
+ * No label anywhere here is set in spaced monospaced capitals. Hierarchy is
+ * carried by size and by ink, which is what the rest of the product does. */
 
-/* A column of panels, not a row of pairs. Panels keep their own height and the
-   last one takes whatever slack the column has, so no panel is stretched by a
-   taller neighbour into a half-empty box. */
-.col { display: flex; flex-direction: column; gap: var(--s3); }
-.col > .panel:last-child { flex: 1 1 auto; }
+/* Every section below the hero opens the same way: a title, a note that
+   floats to the right edge, and one hairline holding the two apart. */
+.sec, .deal { padding-top: var(--rhythm); }
 
-/* The hero, and deliberately the only thing above the fold: one number, one
-   rail, one sentence, one button. The rail is the same object as .meter and
-   .stack, at the scale of a headline. */
-.hold { padding: var(--s7) 0 0; max-width: var(--console); }
-.hold h1 { font-size: var(--fs-8); letter-spacing: -0.025em; }
-/* Proportional figures, not tabular. Tabular gives every digit the width of a
-   zero, which at 33px prints "128" with visible gaps inside the number. The
-   rest of this site stays tabular because the rest of it is columns. */
-.hold h1 b {
-  font-weight: 600;
+.secHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s5);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--rule);
+}
+.secHead h2 {
+  font: 600 var(--fs-5)/var(--lh-head) var(--sans);
+  font-variation-settings: 'wdth' 96, 'wght' 640;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.secNote {
+  margin-left: auto;
+  font: 400 var(--fs-3)/var(--lh-dense) var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-4);
+}
+.secNote b { color: var(--ink-2); font-weight: 500; }
+
+/* A display numeral with its sentence beside it, on a shared baseline. */
+.secFig {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+  margin-top: var(--s5);
+}
+.secFig b {
+  font-family: var(--sans);
+  font-size: clamp(40px, 4.6vw, 56px);
+  font-weight: 850;
+  /* naming only 'wght' drops the width axis back to 100% and the figure
+     loosens; both axes are always set together on this face */
+  font-variation-settings: 'wdth' 94, 'wght' 850;
+  line-height: 0.92;
+  letter-spacing: -0.032em;
+  /* proportional, not tabular: at 56px a tabular "71" prints a hole in the
+     middle of the number. The tables below stay tabular; they are columns. */
   font-variant-numeric: proportional-nums;
-  letter-spacing: -0.03em;
   color: var(--lime);
 }
-.holdBar {
-  margin-top: var(--s5);
-  height: 16px;
+.secFig span {
+  max-width: 62ch;
+  font-size: var(--fs-4);
+  line-height: var(--lh-dense);
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------ today */
+/* The first thing on the page is not a score. It is the day's instruction,
+   said in one sentence, with the only two numerals that change overnight lit
+   in the accent — and a key directly under it, because the whole point of the
+   sentence is to get you out of this page and into a game. */
+.today { padding: clamp(30px, 4.4vw, 54px) 0 0; }
+/* words left, the ladder right — the same split the landing uses, so the two
+   pages read as one product rather than two visits. */
+.todayIn {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s6) var(--s8);
+  align-items: start;
+}
+.todayKick {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 600 var(--fs-3)/var(--lh-flat) var(--sans);
+  color: var(--lime);
+}
+.todayKick b { font-weight: 700; }
+
+.todayLine {
+  margin-top: var(--s4);
+  font-family: var(--sans);
+  font-size: clamp(34px, 4.6vw, 60px);
+  font-weight: 850;
+  font-variation-settings: 'wdth' 94, 'wght' 850;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  max-width: 19ch;
+  text-wrap: balance;
+}
+.todayLine b {
+  font-weight: inherit;
+  font-variant-numeric: proportional-nums;
+  color: var(--lime);
+}
+.today.is-done .todayLine { color: var(--ink); max-width: 14ch; }
+
+.todaySay {
+  margin-top: var(--s4);
+  max-width: 56ch;
+  font-size: var(--fs-4);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.todayCta {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  flex-wrap: wrap;
+  margin-top: var(--s6);
+}
+
+/* ----------------------------------------------------------------- ladder */
+/* One square per clue on the ladder, lit in scheduler order. The squares are
+   deliberately small: the point is the shape of the whole thing next to the
+   lit part of it, not any single clue. */
+.ladder { margin: 0; }
+.ladderCap {
+  margin-bottom: var(--s3);
+  font: 400 var(--fs-2)/var(--lh-flat) var(--sans);
+  color: var(--ink-4);
+}
+.ladderCap b { font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ladderGrid {
+  display: grid;
+  grid-template-columns: repeat(26, 10px);
+  gap: 3px;
+}
+.lc {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--nodata);
+}
+.lc.solid { background: var(--lime); }
+.lc.hold { background: var(--o3); }
+.lc.shaky { background: var(--amber); }
+.ladderKey {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 5px var(--s4);
+  justify-content: start;
+  margin-top: var(--s4);
+  font: 400 var(--fs-2)/var(--lh-flat) var(--sans);
+  color: var(--ink-4);
+}
+.ladderKey span { display: flex; align-items: center; gap: 6px; }
+.ladderKey .lc { width: 8px; height: 8px; }
+
+/* The three figures the day is measured in. A band, not three cards: the
+   hairlines between them are the only thing separating one from the next, so
+   the row reads as one instrument with three needles. */
+.tallies {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: clamp(34px, 4.6vw, 58px);
+  border-top: 1px solid var(--rule);
+}
+.tally {
+  padding: var(--s5) var(--s5) var(--s2) var(--s5);
+  border-left: 1px solid var(--rule-soft);
+}
+/* the first figure keeps the shell's own left edge */
+.tally:first-child { border-left: 0; padding-left: 0; }
+
+.tallyName { font: 500 var(--fs-3)/var(--lh-flat) var(--sans); color: var(--ink-3); }
+.tallyNum { display: flex; align-items: baseline; gap: var(--s2); margin-top: var(--s3); }
+.tallyNum b {
+  font-family: var(--sans);
+  font-size: clamp(38px, 4.2vw, 52px);
+  font-weight: 850;
+  font-variation-settings: 'wdth' 94, 'wght' 850;
+  line-height: 0.9;
+  letter-spacing: -0.032em;
+  font-variant-numeric: proportional-nums;
+  color: var(--ink);
+}
+.tallyNum span {
+  font: 400 var(--fs-4)/1 var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-4);
+}
+/* A fixed height so the sentence under every figure sits on one line across
+   the band, whether that figure drew a rail, a row of marks, or nothing. */
+.tallyViz { min-height: 13px; margin-top: var(--s4); }
+.tallySay {
+  margin-top: var(--s3);
+  max-width: 32ch;
+  font-size: var(--fs-2);
+  line-height: var(--lh-dense);
+  color: var(--ink-4);
+}
+
+/* a proportion */
+.rail {
+  display: block;
+  height: 9px;
   border-radius: 999px;
   background: var(--well);
   box-shadow: var(--press);
   overflow: hidden;
 }
-.holdBar i {
+.rail i {
   display: block;
   height: 100%;
-  min-width: 3px;
   border-radius: 999px;
   background: var(--lime-grad);
   transition: width 0.5s var(--ease);
 }
-/* Nothing held yet is a starting line, not a fault: the rail keeps its shape
-   and shows the notch the first card will land in. */
-.holdBar.at0 { box-shadow: var(--press), inset 0 0 0 1px var(--rule-soft); }
-.holdBar.at0 i { min-width: 0; }
-.hold .say { margin-top: var(--s3); color: var(--ink-3); font-size: var(--fs-4); max-width: 56ch; }
-.hold .btn { margin-top: var(--s6); }
-/* the one line that gets you off this page and into a game */
-.upNext {
-  margin-top: var(--s4);
-  font: 400 var(--fs-3)/var(--lh-dense) var(--sans);
+/* ...and a count, drawn as one mark per card rather than as a digit. The
+   digit is already directly above in display type; this is its shape, which
+   is the part read without reading. Unlit marks are a budget half spent. */
+.pips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.pips i {
+  width: 7px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--well);
+  box-shadow: var(--press);
+}
+.pips i.on { background: var(--lime-grad); box-shadow: none; }
+.pips.warm i.on { background: var(--amber-grad); }
+.pips b {
+  margin-left: 3px;
+  font: 500 var(--fs-2)/1 var(--mono);
   font-variant-numeric: tabular-nums;
   color: var(--ink-4);
 }
-.holdCta { display: flex; align-items: center; gap: var(--s5); flex-wrap: wrap; margin-top: var(--s6); }
-.holdCta .btn { margin-top: 0; }
 
-/* The empty console: the same hero, then the three things that happen after
-   the first round. Numbered because they are a sequence, not a feature list. */
-.beats {
+/* -------------------------------------------------------------- new today */
+/* The day's allowance, dealt face up. A clue is a bollard's stripe or the
+   holes in a pole — things you recognise rather than things you know the name
+   of — so the row is photographs first and words second, and it runs off the
+   right edge of the shell because a hand is still being dealt. */
+.dealRail {
   list-style: none;
-  padding: 0;
-  margin: var(--s7) 0 0;
-  border-top: 1px solid var(--rule);
-  max-width: var(--measure);
-}
-.beats li {
-  display: grid;
-  grid-template-columns: 2ch minmax(0, 1fr);
+  display: flex;
   gap: var(--s4);
-  padding: var(--s4) 0;
-  border-bottom: 1px solid var(--rule-soft);
-  font-size: var(--fs-4);
-  color: var(--ink-3);
+  margin-top: var(--s5);
+  /* a ul carries 40px of list indent by default; the hand has to start on the
+     same line as the heading above it */
+  padding: 0 0 var(--s4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
 }
-.beats li b { color: var(--ink); font-weight: 600; }
-.beats li .no {
-  font: 500 var(--fs-1)/1.7 var(--mono);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.08em;
+.dealRail::-webkit-scrollbar { display: none; }
+/* the edge only softens while there is another card behind it */
+.dealRail.is-more { mask-image: linear-gradient(90deg, #000 calc(100% - 96px), transparent 100%); }
+
+/* A short hand fills the width; a long one runs off the edge and scrolls.
+   One flex line does both: grow, never shrink, and stop growing before a
+   lone card turns into a billboard. */
+.dealCard {
+  flex: 1 0 234px;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  scroll-snap-align: start;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--lift-sm);
+  overflow: hidden;
+  transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.dealCard:hover { transform: translateY(-5px); box-shadow: var(--lift); }
+
+/* dealt, rather than drawn: each card lands a beat after the one to its left.
+   Rotating them instead read as a layout bug at any angle small enough to be
+   tasteful, so the deal is in the timing, not in the geometry. */
+@keyframes dealt {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+.dealCard { animation: dealt 0.42s var(--ease) both; }
+.dealCard:nth-child(2) { animation-delay: 0.06s; }
+.dealCard:nth-child(3) { animation-delay: 0.12s; }
+.dealCard:nth-child(4) { animation-delay: 0.18s; }
+.dealCard:nth-child(5) { animation-delay: 0.24s; }
+.dealCard:nth-child(n + 6) { animation-delay: 0.3s; }
+
+.dealShot {
+  position: relative;
+  display: block;
+  aspect-ratio: 4 / 3;
+  background: var(--well);
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.dealShot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* No catalogued location: the slot stays, because the length of this row is
+   the number printed above it. It just has nothing to show. */
+.dealDark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 var(--s4);
+  text-align: center;
+  font: 400 var(--fs-2)/var(--lh-dense) var(--sans);
   color: var(--ink-4);
+  background: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 6px);
+}
+/* the order the ladder will hand them over in */
+.dealNo {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+  background: rgba(5, 0, 25, 0.6);
+  backdrop-filter: blur(6px);
+  font: 500 var(--fs-1)/1 var(--mono);
+  color: var(--ink-2);
 }
 
-.climb { padding-top: var(--rhythm); max-width: var(--console); }
+.dealTxt { display: block; flex: 1; padding: var(--s3) 14px var(--s4); }
+.dealWhat { display: block; font: 600 var(--fs-4)/var(--lh-head) var(--sans); color: var(--ink); }
+.dealWhere { display: block; margin-top: 4px; font: 400 var(--fs-2)/var(--lh-flat) var(--sans); color: var(--ink-4); }
 
-/* The sign-out confirm. It sits at the top of the console rather than in a
-   modal because it is not an interruption to dismiss — it is the account link,
-   which is the thing the person came here to be given one last chance to keep. */
-.leave { margin-top: var(--s6); max-width: var(--console); padding: var(--s6); }
-/* The console's h2 is a small section label; this one is a
-   sentence, so it opts out of that treatment rather than shouting. */
-.leave h2 {
-  font: 700 var(--fs-6)/var(--lh-head) var(--sans);
-  letter-spacing: -0.01em;
-  color: var(--ink-1);
-}
-.leave p { margin-top: var(--s3); max-width: 62ch; color: var(--ink-3); font-size: var(--fs-4); }
-.leaveCta { display: flex; align-items: center; gap: var(--s5); flex-wrap: wrap; margin-top: var(--s5); }
+.dealSay { margin-top: var(--s1); font: 400 var(--fs-2)/var(--lh-dense) var(--sans); color: var(--ink-4); }
+.dealDone { margin-top: var(--s5); max-width: 54ch; font-size: var(--fs-4); line-height: 1.55; color: var(--ink-3); }
 
-.climb h2 { color: var(--ink-3); }
-/* The SVG is only drawn once the box has been measured, so the box has to be
-   the height the chart will be — otherwise the page reflows under the reader
-   on the first frame. */
-.climb .fig { margin-top: var(--s3); min-height: 204px; }
+/* ------------------------------------------------------------------ climb */
+.climb .fig { margin-top: var(--s5); min-height: 208px; }
+/* the chart's floor — the one surface on this page that is not a panel */
+.climb .plot { fill: var(--well); }
 .climb .hint { margin-top: var(--s3); }
 
 /* The chart's hover readout. Absolute inside .fig rather than fixed to the
@@ -646,10 +883,7 @@ code {
   white-space: nowrap;
   box-shadow: var(--lift-sm);
 }
-.figTip .h {
-  font: 600 var(--fs-2)/var(--lh-flat) var(--sans);
-  color: var(--ink-4);
-}
+.figTip .h { font: 600 var(--fs-2)/var(--lh-flat) var(--sans); color: var(--ink-4); }
 .figTip .v {
   display: block;
   margin-top: var(--s1);
@@ -667,37 +901,83 @@ code {
 .tick { font-size: var(--fs-1); }
 .lbl { font-size: var(--fs-2); }
 
-/* Everything the console used to open with. Closed by default: the answer to
-   "how am I doing" is above, and this is the working-out. */
-.more { margin-top: var(--rhythm); border-top: 1px solid var(--rule); }
-.more > summary {
-  list-style: none;
-  cursor: pointer;
-  width: fit-content;
-  padding: var(--s4) 0 var(--s1);
-  font: 600 var(--fs-3)/var(--lh-flat) var(--sans);
-  color: var(--ink-4);
-  transition: color 0.15s var(--ease);
+/* --------------------------------------------------------- the working-out */
+.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s4); margin-top: var(--rhythm); }
+.grid > .c5 { grid-column: span 5; }
+.grid > .c7 { grid-column: span 7; }
+.grid > .c12 { grid-column: span 12; }
+
+/* A column of panels, not a row of pairs. Panels keep their own height and the
+   last one takes whatever slack the column has, so no panel is stretched by a
+   taller neighbour into a half-empty box. */
+.col { display: flex; flex-direction: column; gap: var(--s4); }
+.col > .panel:last-child { flex: 1 1 auto; }
+
+.panel > header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  padding: var(--s4) 18px;
+  border-bottom: 1px solid var(--rule-soft);
 }
-.more > summary::-webkit-details-marker { display: none; }
-.more > summary::after { content: ' +'; }
-.more[open] > summary::after { content: ' –'; }
-.more > summary:hover { color: var(--ink-2); }
-.more > summary:focus-visible { outline-offset: 4px; border-radius: var(--r-sm); }
+.panel > header h2 {
+  flex: none;
+  font: 600 var(--fs-4)/var(--lh-head) var(--sans);
+  letter-spacing: -0.006em;
+  color: var(--ink);
+}
+.panel > header .note {
+  margin-left: auto;
+  text-align: right;
+  font: 400 var(--fs-2)/var(--lh-dense) var(--sans);
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+.panel > header .note b { color: var(--ink-2); font-weight: 500; }
+.panel .body { padding: var(--s4) 18px 18px; min-width: 0; }
+.panel .body.flush { padding: 0; }
+
+/* dense tables */
+.tbl { width: 100%; }
+.tbl .r {
+  display: grid;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) 18px;
+  border-top: 1px solid var(--rule-soft);
+  font-size: var(--fs-3);
+}
+.tbl .r:first-child { border-top: 0; }
+.tbl .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbl .num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-3); font-size: var(--fs-2); }
+.tbl .rt { text-align: right; }
 
 /* deck composition: one stacked rail plus its key */
 .stack { display: flex; height: 10px; border-radius: 999px; overflow: hidden; box-shadow: var(--press); background: var(--well); }
 .stack i { display: block; height: 100%; }
+
+/* deck breakdown rows: label, rail, count */
+.dk { margin-top: var(--s4); }
+.dk .r { grid-template-columns: minmax(0, 1fr) 108px 52px; padding: 9px 0; }
+.dk .meter { background: rgba(255, 255, 255, 0.09); }
+.dk .r:first-child { border-top: 1px solid var(--rule-soft); }
+
+/* the diverging scale, written out under the country chart */
+.ramp { display: flex; align-items: center; gap: 9px; margin-top: var(--s4); flex-wrap: wrap; }
+.ramp .sw { display: flex; }
+.ramp .sw i { width: 17px; height: var(--s2); }
+.ramp .sw i:first-child { border-radius: 2px 0 0 2px; }
+.ramp .sw i:last-child { border-radius: 0 2px 2px 0; }
 
 /* The slipping list: picture, name, hit rate — a row, not a poster.
    Named .wk, not .slip: theme.css already spends .slip on the amber pill. */
 .wks { display: flex; flex-direction: column; }
 .wk {
   display: grid;
-  grid-template-columns: 54px minmax(0, 1fr) 96px;
+  grid-template-columns: 78px minmax(0, 1fr) 116px;
   align-items: center;
-  gap: var(--s3);
-  padding: 9px 13px;
+  gap: var(--s4);
+  padding: 11px 18px;
   border-top: 1px solid var(--rule-soft);
   transition: background 0.15s var(--ease);
 }
@@ -706,8 +986,8 @@ a.wk:hover { background: rgba(255, 255, 255, 0.04); }
 a.wk:active { background: rgba(255, 255, 255, 0.02); }
 a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .wk .shot {
-  width: 54px;
-  height: 40px;
+  width: 78px;
+  height: 56px;
   border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--well);
@@ -717,40 +997,57 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 }
 .wk .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .wk .shot.none { box-shadow: var(--press), inset 0 0 0 1px var(--rule-soft); }
-.wk .where { font: 500 var(--fs-2)/var(--lh-flat) var(--sans); color: var(--ink-4); }
-.wk .what { display: block; margin-top: var(--s1); font: 600 var(--fs-3)/var(--lh-head) var(--sans); }
 .wk .nm { min-width: 0; }
-.wk .nm .where, .wk .nm .what { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk .what { display: block; font: 600 var(--fs-3)/var(--lh-head) var(--sans); color: var(--ink); }
+.wk .where { display: block; margin-top: 2px; font: 400 var(--fs-2)/var(--lh-flat) var(--sans); color: var(--ink-4); }
+.wk .nm .where, .wk .nm .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wk .rt { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
-.wk .rt .meter { width: 100%; }
+.wk .rt .meter { width: 100%; background: rgba(255, 255, 255, 0.09); }
 .wk .pc { font: 500 var(--fs-3)/var(--lh-flat) var(--mono); font-variant-numeric: tabular-nums; color: var(--amber-2); }
+.wk .seen { font: 400 var(--fs-1)/var(--lh-flat) var(--sans); color: var(--ink-4); white-space: nowrap; }
 
-/* deck breakdown rows: label, rail, count */
-.dk .r { grid-template-columns: minmax(0, 1fr) 74px 52px; padding: 7px 0; }
-.dk .r:first-child { border-top: 1px solid var(--rule-soft); }
+/* the round log, behind its own fold: it is a receipt, not a finding */
+.more { margin-top: var(--rhythm); border-top: 1px solid var(--rule); }
+.more > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s4);
+  padding: var(--s5) 0;
+  font: 600 var(--fs-4)/var(--lh-flat) var(--sans);
+  color: var(--ink-2);
+  transition: color 0.15s var(--ease);
+}
+.more > summary::-webkit-details-marker { display: none; }
+/* the affordance sits at the far end of the row, where the eye lands after
+   reading the count, not glued to the word */
+.more > summary::after {
+  content: '+';
+  margin-left: auto;
+  font: 400 var(--fs-5)/1 var(--sans);
+  color: var(--ink-4);
+}
+.more[open] > summary::after { content: '–'; }
+.more > summary:hover { color: var(--ink); }
+.more > summary:hover::after { color: var(--ink-2); }
+.moreNote { font: 400 var(--fs-2)/var(--lh-flat) var(--sans); color: var(--ink-4); }
+.more > summary:focus-visible { outline-offset: 4px; border-radius: var(--r-sm); }
 
-/* the diverging scale, written out under the country chart */
-.ramp { display: flex; align-items: center; gap: 9px; margin-top: var(--s3); flex-wrap: wrap; }
-.ramp .sw { display: flex; }
-.ramp .sw i { width: 17px; height: var(--s2); }
-.ramp .sw i:first-child { border-radius: 2px 0 0 2px; }
-.ramp .sw i:last-child { border-radius: 0 2px 2px 0; }
-
-/* the round log */
 .log .r {
   display: grid;
   grid-template-columns: 18px minmax(0, 1.1fr) minmax(0, 1.35fr) 96px 72px 58px;
   align-items: center;
   gap: var(--s3);
-  padding: 7px 13px;
+  padding: 8px 18px;
   border-top: 1px solid var(--rule-soft);
   font-size: var(--fs-3);
 }
 .log .r.head {
   border-top: 0;
   border-bottom: 1px solid var(--rule);
-  padding: var(--s2) 13px;
-  font: 600 var(--fs-2)/var(--lh-flat) var(--sans);
+  padding: var(--s3) 18px;
+  font: 500 var(--fs-2)/var(--lh-flat) var(--sans);
   color: var(--ink-4);
 }
 /* A tick or a cross, not a green dot and an amber dot: colour is never the
@@ -764,78 +1061,44 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .log .r .num { font: 400 var(--fs-2)/var(--lh-dense) var(--mono); color: var(--ink-4); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .log .r .rt { text-align: right; }
 
-.empty { color: var(--ink-4); font: 400 var(--fs-3)/var(--lh-dense) var(--sans); padding: var(--s5) 13px; }
+.empty { color: var(--ink-4); font: 400 var(--fs-3)/var(--lh-dense) var(--sans); padding: var(--s5) 18px; }
 
-/* The dashboard is a network read. A blank page for the length of that read is
-   the slow-connection first impression, so the hero's own shape is drawn in
-   grey and swapped for the real one when the answer lands. */
-.skel { border-radius: var(--r-sm); background: var(--well); box-shadow: var(--press); position: relative; overflow: hidden; }
-.skel::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.045), transparent);
-  transform: translateX(-100%);
-  animation: sweep 1.5s var(--ease) infinite;
+/* The empty console: the same hero, then the three things that happen after
+   the first round. Numbered because they are a sequence, not a feature list. */
+.beats { list-style: none; padding: 0; margin: var(--s5) 0 0; max-width: var(--measure); }
+.beats li {
+  display: grid;
+  grid-template-columns: 2.4ch minmax(0, 1fr);
+  gap: var(--s4);
+  padding: var(--s4) 0;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: var(--fs-4);
+  line-height: 1.55;
+  color: var(--ink-3);
 }
-@keyframes sweep { to { transform: translateX(100%); } }
-.skelHold { padding: var(--s7) 0 0; max-width: 720px; }
-.skelHold .t { height: 30px; }
-.skelHold .t + .t { margin-top: var(--s3); }
-.skelHold .bar { height: 16px; border-radius: 999px; margin-top: var(--s5); }
-.skelHold .p { height: 13px; margin-top: var(--s5); }
-.skelHold .key { height: 40px; width: 168px; border-radius: var(--r-md); margin-top: var(--s6); }
-
-/* A failed read gets a panel and a way out, not a sentence in the void. */
-.blown { margin-top: var(--s7); max-width: 56ch; padding: var(--s5); }
-.blown h1 { font-size: var(--fs-6); }
-.blown p { margin-top: var(--s3); color: var(--ink-3); font-size: var(--fs-4); }
-.blown .btn { margin-top: var(--s5); }
-
-/* =========================================================== responsive === */
-@media (max-width: 1020px) {
-  .grid > .c4, .grid > .c5, .grid > .c6, .grid > .c7, .grid > .c8 { grid-column: span 12; }
-  .log .r { grid-template-columns: 18px minmax(0, 1fr) 72px 58px; row-gap: 3px; }
-  .log .r.head { display: none; }
-  .log .r .place { grid-column: 2; }
-  .log .r .clue { grid-column: 2 / -1; grid-row: 2; }
-}
-@media (max-width: 620px) {
-  .stepBody { padding-left: 0; }
-  .stepBody form { flex-direction: column; }
-  .wk { grid-template-columns: 44px minmax(0, 1fr) 78px; }
-  .wk .shot { width: 44px; height: 34px; }
-  .holdCta { gap: var(--s3); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .waiting i, .skel::after { animation: none; }
-  .btn, .btn .arr, .stepBlock, .holdBar i, .wk, .mark .chip { transition: none; }
-  .btn:hover { transform: none; }
-  .btn:hover .arr { transform: none; }
-}
-
-/* ========================================================== today, and one knob === */
-/* Two additions to the console, appended so they can be lifted out whole.
-   Nothing here invents a colour: the finished-day mark is the same lime the
-   card uses for "got it", and the settings row is the existing .field on the
-   existing rules. */
-
-/* The end of a day's work, said inside the .upNext line rather than beside it,
-   so a finished day and an unfinished one occupy the same place on the page. */
-.dayDone {
+.beats li b { color: var(--ink); font-weight: 600; }
+.beats li .no {
+  font: 500 var(--fs-2)/1.7 var(--mono);
+  letter-spacing: 0.06em;
   color: var(--lime);
-  font-weight: 500;
-  letter-spacing: 0.04em;
 }
+
+/* The sign-out confirm. It sits at the top of the console rather than in a
+   modal because it is not an interruption to dismiss — it is the account link,
+   which is the thing the person came here to be given one last chance to keep. */
+.leave { margin-top: var(--s6); max-width: var(--console); padding: var(--s6); }
+.leave h2 {
+  font: 700 var(--fs-6)/var(--lh-head) var(--sans);
+  letter-spacing: -0.01em;
+  color: var(--ink-1);
+}
+.leave p { margin-top: var(--s3); max-width: 62ch; color: var(--ink-3); font-size: var(--fs-4); }
+.leaveCta { display: flex; align-items: center; gap: var(--s5); flex-wrap: wrap; margin-top: var(--s5); }
 
 /* The one setting, under the deck table it governs. A hairline above it,
    because it is a different kind of thing from the rows it follows: those are
    measurements, this is an instruction. */
-.knob {
-  margin-top: var(--s3);
-  padding-top: var(--s3);
-  border-top: 1px solid var(--rule-soft);
-}
+.knob { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--rule-soft); }
 .knobRow { display: flex; align-items: center; gap: var(--s3); }
 .knobName { font-size: var(--fs-3); color: var(--ink-2); }
 /* Wide enough for three digits and the spinner, and no wider — a full-width
@@ -852,63 +1115,87 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .knobState {
   flex: none;
   min-width: 8ch;
-  font: 400 var(--fs-1)/var(--lh-flat) var(--mono);
-  letter-spacing: 0.06em;
+  font: 400 var(--fs-2)/var(--lh-flat) var(--sans);
+  font-variant-numeric: tabular-nums;
   color: var(--ink-4);
 }
-.knobSay {
-  margin-top: var(--s2);
-  max-width: 46ch;
-  font-size: var(--fs-2);
-  line-height: var(--lh-dense);
-  color: var(--ink-4);
-}
+.knobSay { margin-top: var(--s3); max-width: 46ch; font-size: var(--fs-2); line-height: var(--lh-dense); color: var(--ink-4); }
 .knob .err { margin-top: var(--s2); font-size: var(--fs-2); }
 
-/* ================================================= what today will teach === */
-/* The day's allowance, said in names instead of a number, directly under the
-   line that counts it. Deliberately the quietest thing in the hero: same mono
-   voice as .upNext, a hairline to hold it together, and no colour of its own —
-   it is an overview of the day, and the number above it is still the headline.
+/* The dashboard is a network read. A blank page for the length of that read is
+   the slow-connection first impression, so the shape of the answer is drawn in
+   grey and swapped for the real one when it lands. */
+.skel { border-radius: var(--r-sm); background: var(--well); box-shadow: var(--press); position: relative; overflow: hidden; }
+.skel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.045), transparent);
+  transform: translateX(-100%);
+  animation: sweep 1.5s var(--ease) infinite;
+}
+@keyframes sweep { to { transform: translateX(100%); } }
+.skelHold { padding: clamp(30px, 4.4vw, 54px) 0 0; }
+.skelHold .kick { height: 13px; width: 76px; }
+.skelHold .t { height: 44px; margin-top: var(--s4); max-width: 620px; }
+.skelHold .t + .t { max-width: 340px; }
+.skelHold .key { height: 40px; width: 168px; border-radius: var(--r-md); margin-top: var(--s6); }
+.skelRow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s5); margin-top: clamp(34px, 4.6vw, 58px); }
+.skelRow .col { height: 116px; border-radius: var(--r-md); }
+.skelRow.cards { grid-template-columns: repeat(4, 234px); gap: var(--s4); overflow: hidden; }
+.skelRow.cards .card { height: 250px; border-radius: var(--r-lg); }
 
-   The clue leads and the country trails it, because the clue is what is being
-   learnt and the country is where to look for it. Wrapped rather than
-   scrolled: ten of these are two or three short lines, not a list to page
-   through. */
-.nx {
-  margin-top: var(--s4);
-  padding-top: var(--s3);
-  border-top: 1px solid var(--rule-soft);
-  max-width: 56ch;
+/* A failed read gets a panel and a way out, not a sentence in the void. */
+.blown { margin-top: var(--s7); max-width: 56ch; padding: var(--s5); }
+.blown h1 { font-size: var(--fs-6); }
+.blown p { margin-top: var(--s3); color: var(--ink-3); font-size: var(--fs-4); }
+.blown .btn { margin-top: var(--s5); }
+
+/* =========================================================== responsive === */
+/* The ladder is a fixed 335px of squares. Once the words beside it are down to
+   about six per line the sentence stops being a sentence, so below this the
+   ladder drops underneath and gets the full width instead. */
+@media (max-width: 940px) {
+  .todayIn { grid-template-columns: minmax(0, 1fr); }
+  /* Stacked, the ladder has the whole width — so let it run as wide as it
+     fits rather than staying a tall 26-wide column with dead space beside it. */
+  .ladderGrid { grid-template-columns: repeat(auto-fill, 10px); }
 }
-.nxHead {
-  font: 400 var(--fs-1)/var(--lh-flat) var(--mono);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-4);
+@media (max-width: 1020px) {
+  .grid > .c5, .grid > .c7 { grid-column: span 12; }
+  .log .r { grid-template-columns: 18px minmax(0, 1fr) 72px 58px; row-gap: 3px; }
+  .log .r.head { display: none; }
+  .log .r .place { grid-column: 2; }
+  .log .r .clue { grid-column: 2 / -1; grid-row: 2; }
 }
-.nxList {
-  list-style: none;
-  padding: 0;
-  margin: var(--s2) 0 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s1) var(--s4);
+/* Three display numerals will not sit side by side on a phone. Stacked, the
+   hairline between them turns from a wall into a floor. */
+@media (max-width: 760px) {
+  .tallies { grid-template-columns: minmax(0, 1fr); }
+  .tally { border-left: 0; padding: var(--s5) 0; border-top: 1px solid var(--rule-soft); }
+  .tally:first-child { border-top: 0; }
+  .tallySay { max-width: 44ch; }
+  .skelRow { grid-template-columns: minmax(0, 1fr); }
 }
-.nxList li {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s1);
-  font-size: var(--fs-3);
-  line-height: var(--lh-dense);
+@media (max-width: 620px) {
+  .stepBody { padding-left: 0; }
+  .stepBody form { flex-direction: column; }
+  .dealCard { flex-basis: 200px; }
+  .wk { grid-template-columns: 62px minmax(0, 1fr) 92px; gap: var(--s3); padding: 11px var(--s4); }
+  .wk .shot { width: 62px; height: 46px; }
+  .panel > header, .panel .body { padding-left: var(--s4); padding-right: var(--s4); }
+  .tbl .r, .log .r, .log .r.head, .empty { padding-left: var(--s4); padding-right: var(--s4); }
+  .dk .r { padding-left: 0; padding-right: 0; }
+  .todayCta { gap: var(--s3); }
 }
-.nxWhat { color: var(--ink-2); }
-.nxWhere { font-size: var(--fs-2); color: var(--ink-4); }
-.nxSay {
-  margin-top: var(--s2);
-  font: 400 var(--fs-2)/var(--lh-dense) var(--sans);
-  color: var(--ink-4);
+@media (prefers-reduced-motion: reduce) {
+  .waiting i, .skel::after { animation: none; }
+  .btn, .btn .arr, .stepBlock, .rail i, .wk, .mark .chip, .dealCard { transition: none; }
+  .btn:hover { transform: none; }
+  .btn:hover .arr { transform: none; }
+  /* the fan is a still image under this setting: cards lie flat and stay put */
+  .dealCard { animation: none; }
+  .dealCard:hover { transform: none; }
 }
 
 /* ============================================================== landing === */

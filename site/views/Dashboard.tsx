@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Foot, Link, Mast, navigate } from '../router'
 import {
   ApiError,
@@ -10,8 +10,10 @@ import {
   type DashboardData,
   type HeldPoint,
   type RoundStat,
+  type UpNextMeta,
   type WeakMeta,
 } from '../api'
+import { demoData } from '../demo'
 import { useWidth } from '../measure'
 
 const MIN = 60_000
@@ -56,6 +58,31 @@ function splitMeta(name: string) {
   return i < 0 ? { country: null, clue: name } : { country: name.slice(0, i), clue: name.slice(i + 2) }
 }
 
+const n = (v: number) => v.toLocaleString()
+const s = (v: number) => (v === 1 ? '' : 's')
+
+/**
+ * The camera that shows a clue, as a picture.
+ *
+ * Keyless and undocumented, but stable, and the only way to put the actual
+ * imagery of an unseen clue on this page: the Worker cannot fetch it (the
+ * endpoint 403s anything that sends no User-Agent) so it hands over the pano
+ * id and the browser does the asking. Requested at twice the drawn size, since
+ * the cards are small and every one of these is a texture — a pole, a line, a
+ * kerb — that falls apart when it is resampled down from nothing.
+ */
+function thumb(panoId: string, heading: number | null, w: number, h: number) {
+  const p = new URLSearchParams({
+    cb_client: 'maps_sv.tactile.gps',
+    w: String(w),
+    h: String(h),
+    panoid: panoId,
+    yaw: String(heading ?? 0),
+    pitch: '0',
+  })
+  return `https://streetviewpixels-pa.googleapis.com/v1/thumbnail?${p}`
+}
+
 /* ==========================================================================
    Figures. All hand-drawn SVG on theme.css's validated ramps: the diverging
    amber<->blue scale for "how right am I here", the lime ordinal ramp for
@@ -76,7 +103,7 @@ const bucket = (acc: number) =>
 function niceStep(span: number) {
   const raw = Math.max(span / 4, 1)
   const mag = Math.pow(10, Math.floor(Math.log10(raw)))
-  return [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) ?? 10 * mag
+  return [1, 2, 2.5, 5, 10].map((m) => m * mag).find((st) => st >= raw) ?? 10 * mag
 }
 
 function ticksTo(top: number) {
@@ -117,12 +144,15 @@ function Climb({ series, total }: { series: HeldPoint[]; total: number }) {
   const [box, W] = useWidth()
   const [at, setAt] = useState<number | null>(null)
   const x0 = 44
-  const y0 = 10
+  const y0 = 12
+  /* A fortnight of a slow-moving count: the shape is the subject, so the box
+     is a band rather than a square. Taller than this and the half of it under
+     the line is just empty floor. */
   const h = 168
   /* The right gutter is the end label's, so the current value never sits on
      top of the line that produced it. */
   const gutter = 62
-  const H = y0 + h + 26
+  const H = y0 + h + 28
   const w = Math.max(60, W - x0 - gutter)
   const top = ceilingFor(series, total)
   const lone = series.length < 2
@@ -155,6 +185,10 @@ function Climb({ series, total }: { series: HeldPoint[]; total: number }) {
             series[0].held
           } rising to ${last.held} of ${total}.`}
         >
+          {/* A floor for the wash to sit on. Without it the fill fades into the
+              page itself and a fortnight of climbing reads as a grey smudge. */}
+          <rect className="plot" x={x0} y={y0} width={w} height={h} rx={8} />
+
           {ticksTo(top).map((t) => (
             <g key={t}>
               <line className="gridline" x1={x0} x2={x0 + w} y1={sy(t)} y2={sy(t)} />
@@ -172,39 +206,40 @@ function Climb({ series, total }: { series: HeldPoint[]; total: number }) {
             <>
               <defs>
                 <linearGradient id="climbWash" x1="0" y1={y0} x2="0" y2={y0 + h} gradientUnits="userSpaceOnUse">
-                  <stop offset="0%" stopColor="var(--o4)" stopOpacity={0.24} />
-                  <stop offset="100%" stopColor="var(--o4)" stopOpacity={0.02} />
+                  <stop offset="0%" stopColor="var(--lime)" stopOpacity={0.5} />
+                  <stop offset="60%" stopColor="var(--lime)" stopOpacity={0.13} />
+                  <stop offset="100%" stopColor="var(--lime)" stopOpacity={0.03} />
                 </linearGradient>
               </defs>
               <path
                 d={`${line} L${sx(series.length - 1)} ${y0 + h} L${x0} ${y0 + h} Z`}
                 fill="url(#climbWash)"
               />
-              <path d={line} fill="none" stroke="var(--o4)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+              <path d={line} fill="none" stroke="var(--lime)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
             </>
           )}
 
           {shown && !lone && (
             <>
               <line className="crosshair" x1={sx(at!)} x2={sx(at!)} y1={y0} y2={y0 + h} />
-              <circle cx={sx(at!)} cy={sy(shown.held)} r={4} fill="var(--o4)" stroke="var(--plane)" strokeWidth={2} />
+              <circle cx={sx(at!)} cy={sy(shown.held)} r={4} fill="var(--lime)" stroke="var(--plane)" strokeWidth={2} />
             </>
           )}
 
           {/* The end marker wears a ring in the surface colour so it stays a
               disc where it crosses the axis or the gridline behind it. */}
-          <circle cx={sx(series.length - 1)} cy={sy(last.held)} r={4.5} fill="var(--o4)"
+          <circle cx={sx(series.length - 1)} cy={sy(last.held)} r={4.5} fill="var(--lime)"
             stroke="var(--plane)" strokeWidth={2} />
           <text className="endLabel" x={sx(series.length - 1) + 11} y={sy(last.held) + 4}>
             {last.held.toLocaleString()}
           </text>
 
           <line className="axis" x1={x0} x2={x0 + w} y1={y0 + h} y2={y0 + h} />
-          <text className="tick" x={x0} y={y0 + h + 17}>
+          <text className="tick" x={x0} y={y0 + h + 18}>
             {day(series[0].t)}
           </text>
           {!lone && (
-            <text className="tick" x={x0 + w} y={y0 + h + 17} textAnchor="end">
+            <text className="tick" x={x0 + w} y={y0 + h + 18} textAnchor="end">
               {day(last.t)}
             </text>
           )}
@@ -251,9 +286,9 @@ function Countries({ rows }: { rows: CountryStat[] }) {
   const [box, W] = useWidth()
   const top = rows.slice(0, 12)
   const max = Math.max(...top.map((c) => c.rounds), 1)
-  const rowH = 27
-  const x0 = 104
-  const w = Math.max(60, W - x0 - 72) // the right gutter holds "41 · 90%"
+  const rowH = 29
+  const x0 = 112
+  const w = Math.max(60, W - x0 - 76) // the right gutter holds "41 · 90%"
   const h = top.length * rowH + 10
   return (
     <>
@@ -268,11 +303,11 @@ function Countries({ rows }: { rows: CountryStat[] }) {
           const bw = Math.max(2, (c.rounds / max) * w)
           return (
             <g key={c.code}>
-              <text className="lbl" x={x0 - 8} y={y + 17} textAnchor="end">
+              <text className="lbl" x={x0 - 10} y={y + 18} textAnchor="end">
                 {clean(c.name).length > 15 ? clean(c.name).slice(0, 14) + '…' : clean(c.name)}
               </text>
-              <rect x={x0} y={y + 5} width={bw} height={16} rx={2} fill={DV[bucket(acc)]} />
-              <text className="tick" x={x0 + bw + 7} y={y + 17.5}>
+              <rect x={x0} y={y + 5} width={bw} height={17} rx={2.5} fill={DV[bucket(acc)]} />
+              <text className="tick" x={x0 + bw + 8} y={y + 18} >
                 {c.rounds} · {Math.round(acc * 100)}%
               </text>
             </g>
@@ -298,13 +333,13 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
   const [box, W] = useWidth()
   const pts = rounds.filter((r) => r.score !== null).slice(0, 24).reverse()
   if (pts.length < 3) return <p className="empty">Not enough scored rounds yet.</p>
-  const x0 = 30
-  const y0 = 6
+  const x0 = 32
+  const y0 = 8
   /* The plot stops short of the frame so the mean can be labelled in a gutter
      instead of on top of the bars it is describing. */
-  const w = Math.max(60, W - x0 - 76)
-  const h = 150
-  const H = h + 32
+  const w = Math.max(60, W - x0 - 82)
+  const h = 186
+  const H = h + 34
   const band = w / pts.length
   const mean = pts.reduce((a, r) => a + (r.score ?? 0), 0) / pts.length
   const sy = (v: number) => (v / 5000) * h
@@ -317,7 +352,7 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
         {[0, 2500, 5000].map((t) => (
           <g key={t}>
             <line className="gridline" x1={x0} x2={x0 + w} y1={y0 + h - sy(t)} y2={y0 + h - sy(t)} />
-            <text className="tick" x={x0 - 6} y={y0 + h - sy(t) + 3.5} textAnchor="end">
+            <text className="tick" x={x0 - 7} y={y0 + h - sy(t) + 3.5} textAnchor="end">
               {t / 1000}k
             </text>
           </g>
@@ -327,12 +362,12 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
           return (
             <rect
               key={r.id}
-              x={x0 + i * band + band * 0.2}
+              x={x0 + i * band + band * 0.18}
               y={y0 + h - sy(v)}
-              width={band * 0.6}
+              width={band * 0.64}
               height={Math.max(1, sy(v))}
-              rx={1.5}
-              fill={r.correct ? 'var(--o4)' : 'var(--o1)'}
+              rx={2}
+              fill={r.correct ? 'var(--o4)' : 'var(--d2)'}
             />
           )
         })}
@@ -344,14 +379,14 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
           y2={y0 + h - sy(mean)}
           strokeDasharray="3 3"
         />
-        <text className="tick" x={x0 + w + 7} y={y0 + h - sy(mean) + 3.5}>
+        <text className="tick" x={x0 + w + 8} y={y0 + h - sy(mean) + 3.5}>
           mean {Math.round(mean).toLocaleString()}
         </text>
         <line className="axis" x1={x0} x2={x0 + w} y1={y0 + h} y2={y0 + h} />
-        <text className="tick" x={x0} y={y0 + h + 16}>
+        <text className="tick" x={x0} y={y0 + h + 17}>
           oldest
         </text>
-        <text className="tick" x={x0 + w} y={y0 + h + 16} textAnchor="end">
+        <text className="tick" x={x0 + w} y={y0 + h + 17} textAnchor="end">
           latest
         </text>
       </svg>
@@ -362,7 +397,7 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
           <i style={{ background: 'var(--o4)' }} /> Country called right
         </span>
         <span>
-          <i style={{ background: 'var(--o1)' }} /> Called wrong
+          <i style={{ background: 'var(--d2)' }} /> Called wrong
         </span>
       </div>
     </>
@@ -381,13 +416,16 @@ function Work({ m }: { m: WeakMeta }) {
         {m.image && <img src={m.image} alt="" loading="lazy" decoding="async" />}
       </span>
       <span className="nm">
-        {country && <span className="where">{country}</span>}
         <span className="what">{clue}</span>
+        {country && <span className="where">{country}</span>}
       </span>
       <span className="rt">
         <span className="pc mono">{pct}%</span>
         <span className="meter warm">
           <i style={{ width: `${pct}%` }} />
+        </span>
+        <span className="seen">
+          {m.correct} of {m.seen} called right
         </span>
       </span>
     </>
@@ -421,18 +459,18 @@ function NewPerDay({ initial }: { initial: number }) {
   const [err, setErr] = useState<string | null>(null)
 
   const commit = async () => {
-    const n = Number(value.trim())
+    const num = Number(value.trim())
     /* A box left empty or half-typed is not a request to change anything, and
        neither is retyping the number already stored. Both put back what is
        stored rather than spending a round trip to be told so. */
-    if (state === 'saving' || value.trim() === '' || !Number.isFinite(n) || n === saved) {
+    if (state === 'saving' || value.trim() === '' || !Number.isFinite(num) || num === saved) {
       setValue(String(saved))
       return
     }
     setState('saving')
     setErr(null)
     try {
-      const { config } = await setDailyNew(n)
+      const { config } = await setDailyNew(num)
       setSaved(config.dailyNew)
       setValue(String(config.dailyNew))
       setState('saved')
@@ -483,12 +521,211 @@ function NewPerDay({ initial }: { initial: number }) {
   )
 }
 
+/* ==========================================================================
+   Today.
+   ========================================================================== */
+
+/**
+ * A count drawn as things rather than as a digit — one mark per card.
+ *
+ * The digit is already directly above, in display type; this is the shape of
+ * the number, which is the part a person reads without reading. `total` is the
+ * budget where there is one (the day's new-clue allowance draws its spent half
+ * as unlit marks) and equal to `lit` where there is not.
+ */
+function Pips({ lit, total, warm }: { lit: number; total: number; warm?: boolean }) {
+  const cap = 22
+  const shown = Math.min(total, cap)
+  const over = total - shown
+  return (
+    <span className={'pips' + (warm ? ' warm' : '')} aria-hidden>
+      {Array.from({ length: shown }, (_, i) => (
+        <i key={i} className={i < lit ? 'on' : ''} />
+      ))}
+      {over > 0 && <b>+{n(over)}</b>}
+    </span>
+  )
+}
+
+/** One of the three figures the day is measured in. */
+function Tally({
+  name,
+  value,
+  of,
+  viz,
+  say,
+}: {
+  name: string
+  value: number
+  of?: string
+  viz: React.ReactNode
+  say: string
+}) {
+  return (
+    <div className="tally">
+      <p className="tallyName">{name}</p>
+      <p className="tallyNum">
+        <b>{n(value)}</b>
+        {of && <span>{of}</span>}
+      </p>
+      <div className="tallyViz">{viz}</div>
+      <p className="tallySay">{say}</p>
+    </div>
+  )
+}
+
+/**
+ * The clues today is about to introduce, as the photographs they actually are.
+ *
+ * A meta is a thing you look at — a bollard's stripe, a pole's holes, the
+ * colour of an outer line — and a list of its names is a list of words for
+ * things you have not seen. So the day's allowance is dealt face-up: one card
+ * per clue, in the order the ladder will hand them over, each carrying the
+ * Street View frame the clue was catalogued from.
+ *
+ * A clue whose catalogs hold no location keeps its slot and loses its picture,
+ * because the length of this row is the number printed above it and dropping a
+ * card would make the two disagree.
+ */
+/* --------------------------------------------------------------------------
+   The whole ladder, one square per clue.
+
+   Every other figure on this page is a count of something you cannot see the
+   size of. This is the size: 370 squares, lit in the order the scheduler
+   thinks of them — holding, bedding in, shaky, and then the long dark tail of
+   everything you have not been shown yet. It is the one picture that answers
+   "how much of this is there" without a sentence.
+   -------------------------------------------------------------------------- */
+function Ladder({ solid, holding, shaky, total }: { solid: number; holding: number; shaky: number; total: number }) {
+  const seen = solid + holding + shaky
+  const unseen = Math.max(0, total - seen)
+  const runs: Array<[string, number]> = [
+    ['solid', solid],
+    ['hold', holding],
+    ['shaky', shaky],
+    ['unseen', unseen],
+  ]
+  return (
+    <figure className="ladder">
+      <figcaption className="ladderCap">
+        <b>{n(total)}</b> clues on the ladder
+      </figcaption>
+      <div
+        className="ladderGrid"
+        role="img"
+        aria-label={`${n(total)} clues: ${n(solid)} holding at ninety per cent, ${n(holding)} bedding in, ${n(
+          shaky,
+        )} shaky, ${n(unseen)} not yet seen.`}
+      >
+        {runs.flatMap(([k, count]) =>
+          Array.from({ length: count }, (_, i) => <i className={`lc ${k}`} key={`${k}${i}`} />),
+        )}
+      </div>
+      {seen === 0 ? (
+        /* An untouched ladder has nothing to bucket — four zeroes in a legend
+           read as a broken page, not a fresh one. */
+        <div className="ladderKey" aria-hidden>
+          <span>
+            <i className="lc unseen" />
+            {n(unseen)} clues, none met yet
+          </span>
+        </div>
+      ) : (
+      <div className="ladderKey" aria-hidden>
+        <span>
+          <i className="lc solid" />
+          {n(solid)} holding
+        </span>
+        <span>
+          <i className="lc hold" />
+          {n(holding)} bedding in
+        </span>
+        <span>
+          <i className="lc shaky" />
+          {n(shaky)} shaky
+        </span>
+        <span>
+          <i className="lc unseen" />
+          {n(unseen)} not yet seen
+        </span>
+      </div>
+      )}
+    </figure>
+  )
+}
+
+function Deal({ list, dailyNew }: { list: UpNextMeta[]; dailyNew: number }) {
+  /* A hand of four fills the shell; ten runs off the end of it. The fade only
+     appears when there is genuinely something past the edge, so a full stop
+     never gets dressed up as a continuation. */
+  const rail = useRef<HTMLUListElement | null>(null)
+  const [more, setMore] = useState(false)
+  useEffect(() => {
+    const el = rail.current
+    if (!el) return
+    const read = () => setMore(el.scrollWidth - el.clientWidth - el.scrollLeft > 8)
+    read()
+    const ro = new ResizeObserver(read)
+    ro.observe(el)
+    el.addEventListener('scroll', read, { passive: true })
+    return () => {
+      ro.disconnect()
+      el.removeEventListener('scroll', read)
+    }
+  }, [list.length])
+
+  return (
+    <section className="deal">
+      <div className="secHead">
+        <h2>New today</h2>
+        <span className="secNote">
+          {n(list.length)} of {n(dailyNew)} a day · dealt in ladder order
+        </span>
+      </div>
+      <ul className={'dealRail' + (more ? ' is-more' : '')} ref={rail}>
+        {list.map((m, i) => {
+          const { country, clue } = splitMeta(m.name)
+          return (
+            <li className="dealCard" key={m.name}>
+              <span className="dealShot">
+                {m.panoId ? (
+                  <img src={thumb(m.panoId, m.heading, 480, 360)} alt="" loading="lazy" decoding="async" />
+                ) : (
+                  <span className="dealDark">No frame catalogued</span>
+                )}
+                <span className="dealNo mono" aria-hidden>
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+              </span>
+              <span className="dealTxt">
+                <span className="dealWhat">{clue}</span>
+                {country && <span className="dealWhere">{country}</span>}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+      {/* The honest caveat: new clues queue behind what is owed, so a heavy
+          review day meets fewer of these than are laid out here. */}
+      <p className="dealSay">New clues come after the day's due reviews, as room allows.</p>
+    </section>
+  )
+}
+
 /* ========================================================================== */
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    /* Dev only, and compiled out of a production build: the signed-in console
+       cannot be opened without an account, so `?demo=…` stands a realistic
+       payload in front of the network read. See demo.ts. */
+    const fake = demoData()
+    if (fake) {
+      setData(fake)
+      return
+    }
     if (!getToken()) {
       navigate('/start')
       return
@@ -551,11 +788,21 @@ export default function Dashboard() {
             Loading your dashboard…
           </p>
           <div className="skelHold" aria-hidden>
+            <div className="skel kick" />
             <div className="skel t" />
-            <div className="skel t" style={{ width: '58%' }} />
-            <div className="skel bar" />
-            <div className="skel p" style={{ width: '76%' }} />
+            <div className="skel t" style={{ width: '46%' }} />
             <div className="skel key" />
+            <div className="skelRow">
+              <div className="skel col" />
+              <div className="skel col" />
+              <div className="skel col" />
+            </div>
+            <div className="skelRow cards">
+              <div className="skel card" />
+              <div className="skel card" />
+              <div className="skel card" />
+              <div className="skel card" />
+            </div>
           </div>
         </div>
       </>
@@ -587,7 +834,6 @@ export default function Dashboard() {
   const pct = totals.correctPct === null ? null : Math.round(totals.correctPct)
   const next = whenNext(deck.nextDue)
   const log = recent.slice(0, 16)
-  const seenShare = deck.total > 0 ? (deck.introduced / deck.total) * 100 : 0
 
   /* TEMPORARY. The Worker learned to send progress{} after this view learned to
      draw it; until that ships, stand in the count of clues holding solid, which
@@ -595,29 +841,67 @@ export default function Dashboard() {
      code around it — once /api/dashboard always answers with progress. */
   const progress = data.progress ?? { held: metas.solid, total: deck.total, series: [] as HeldPoint[] }
   const held = Math.min(progress.held, progress.total)
-  const heldShare = progress.total > 0 ? (held / progress.total) * 100 : 0
+
+  /* The honest ceiling: every meta the unlocked ladder holds. `deck.total` adds
+     tracked cards to unseen metas, so a clue dropped from a catalog is counted
+     by the first and not the second — a denominator that drifts upward as the
+     catalogs change. An older Worker sends no ladderTotal and gets the old one. */
+  const ladder = deck.ladderTotal ?? deck.total
+  const trackedShare = ladder > 0 ? Math.min(100, (deck.introduced / ladder) * 100) : 0
+  const seenShare = deck.total > 0 ? (deck.introduced / deck.total) * 100 : 0
 
   /* What today still asks for, which the deck on its own cannot say: "nothing
      due" is equally true of a day with ten unmet clues still allowed and of a
      day that is genuinely finished. `day` is the thing that tells those apart.
-     A Worker too old to send it leaves this line exactly as it has always
-     read — the one unforgivable move here is calling a day done on no
-     evidence, and then watching the map hand over another deck. */
-  const day = data.day
-  /* And which clues that "new left today" is a count of. It is the same
-     allowance said in names instead of a number, so a day that is over — or a
-     Worker too old to send the list — shows nothing rather than a heading over
-     an empty box. */
-  const newToday = day && !day.doneForToday ? (day.upNext ?? []) : []
-  const upNext = day
-    ? `${deck.due.toLocaleString()} due · ${day.newAllowance.toLocaleString()} new left today${
-        next ? ` · next one back ${next}` : ''
-      }`
-    : deck.due > 0
-      ? `${deck.due.toLocaleString()} due now${next ? ` · next one back ${next}` : ''}`
-      : next
-        ? `Nothing due · next one back ${next}`
-        : 'Nothing due yet'
+     A Worker too old to send it leaves this line reading as it always has —
+     the one unforgivable move here is calling a day done on no evidence, and
+     then watching the map hand over another deck. */
+  const dayInfo = data.day
+  const done = !!dayInfo?.doneForToday
+  const fresh = dayInfo && !done ? dayInfo.newAllowance : 0
+  /* And which clues that count is a count of. It is the same allowance said in
+     names instead of a number, so a day that is over — or a Worker too old to
+     send the list — shows nothing rather than a heading over an empty box. */
+  const newToday = dayInfo && !done ? (dayInfo.upNext ?? []) : []
+
+  const reviews = (
+    <>
+      <b>{n(deck.due)}</b> review{s(deck.due)}
+    </>
+  )
+  const meets = (
+    <>
+      <b>{n(fresh)}</b> new clue{s(fresh)}
+    </>
+  )
+  /* One sentence, and it is the whole of the day's instruction. The numerals
+     are lit because they are the part that changes between one morning and the
+     next; the words around them almost never do. */
+  const statement = done ? (
+    <>Done for today.</>
+  ) : deck.due > 0 && fresh > 0 ? (
+    <>{reviews}, then {meets}.</>
+  ) : deck.due > 0 ? (
+    <>{reviews} to clear.</>
+  ) : fresh > 0 ? (
+    <>{meets} to meet.</>
+  ) : (
+    <>Nothing owed right now.</>
+  )
+
+  const aside = done
+    ? next
+      ? `Nothing scheduled until the next card comes back ${next}.`
+      : 'Nothing scheduled. Extra rounds still count.'
+    : deck.due > 0 && fresh > 0
+      ? 'New clues come after the reviews, as room allows.'
+      : deck.due > 0
+        ? "Today's new clues are spent — this is the review backlog."
+        : fresh > 0
+          ? 'Nothing owed, so the whole session is new ground.'
+          : next
+            ? `The next card comes back ${next}.`
+            : 'Play a round and the schedule starts filling itself in.'
 
   return (
     <>
@@ -650,52 +934,125 @@ export default function Dashboard() {
             </div>
           </section>
         )}
-        {empty ? (
-          /* The first screen everyone who signs up sees, and it has to read as
-             a starting line rather than as a scoreline of nought. Same hero as
-             the played-in console — same number, same rail, same sentence —
-             because it is the same measure, only at the start of it. */
-          <section className="hold">
-            <p className="kicker">Starting line</p>
-            <h1>
-              <b>0</b> of {deck.total.toLocaleString()} clues held at 90%
-            </h1>
-            <div
-              className="holdBar at0"
-              role="img"
-              aria-label={`None of the ${deck.total} clues in your deck are held yet`}
-            >
-              <i style={{ width: '0%' }} />
-            </div>
-            <p className="say">
-              Every clue in the deck starts here. One round played with the userscript running moves this number, and
-              it keeps moving on its own after that.
-            </p>
 
-            <div className="holdCta">
+        {/* ------------------------------------------------------------ today */}
+        <section className={'today' + (done ? ' is-done' : '')}>
+          <div className="todayIn">
+            <div className="todayWords">
+          <p className="todayKick">
+            {done && <b aria-hidden>✓</b>}
+            {empty ? 'Starting line' : 'Today'}
+          </p>
+          <h1 className="todayLine">{empty ? <>Nothing logged yet.</> : statement}</h1>
+          <p className="todaySay">
+            {empty
+              ? 'Install the userscript and play one round. It grades itself, and this page starts keeping score of what you can actually call.'
+              : aside}
+          </p>
+          <div className="todayCta">
+            {empty ? (
               <Link to="/start" className="btn big">
                 Finish setup <span className="arr">→</span>
               </Link>
-              <span className="hint">Two minutes, and only once.</span>
+            ) : (
+              <a className="btn big" href="https://www.geoguessr.com/" target="_blank" rel="noreferrer">
+                Play a round <span className="arr">→</span>
+              </a>
+            )}
+            <span className="hint">
+              {empty ? 'Two minutes, and only once.' : 'Your trainer map is already rebuilt and waiting.'}
+            </span>
+          </div>
             </div>
 
+            <Ladder solid={metas.solid} holding={metas.holding} shaky={metas.shaky} total={ladder} />
+          </div>
+
+          <div className="tallies">
+            <Tally
+              name="Clues tracked"
+              value={deck.introduced}
+              of={`of ${n(ladder)}`}
+              viz={
+                <span className="rail" aria-hidden>
+                  <i style={{ width: `${trackedShare}%` }} />
+                </span>
+              }
+              say={
+                deck.introduced === 0
+                  ? 'The ladder is untouched.'
+                  : `${Math.round(trackedShare)}% of the ladder met at least once.`
+              }
+            />
+            <Tally
+              name="Reviews due now"
+              value={deck.due}
+              viz={deck.due > 0 ? <Pips lit={deck.due} total={deck.due} warm /> : null}
+              say={
+                deck.due > 0
+                  ? 'Owed at this minute, weakest first.'
+                  : next
+                    ? `Clear. Next one back ${next}.`
+                    : 'Clear.'
+              }
+            />
+            <Tally
+              name="New clues today"
+              value={fresh}
+              of={dayInfo ? `of ${n(dayInfo.dailyNew)}` : undefined}
+              viz={dayInfo ? <Pips lit={fresh} total={dayInfo.dailyNew} /> : null}
+              say={
+                !dayInfo
+                  ? 'Not reported by the server yet.'
+                  : done
+                    ? "Today's allowance is spent."
+                    : fresh > 0
+                      ? `${n(dayInfo.dailyNew - fresh)} already met today.`
+                      : 'The allowance is spent for today.'
+              }
+            />
+          </div>
+        </section>
+
+        {/* ----------------------------------------------- what today teaches */}
+        {newToday.length > 0 && <Deal list={newToday} dailyNew={dayInfo?.dailyNew ?? newToday.length} />}
+        {done && (
+          <section className="deal">
+            <div className="secHead">
+              <h2>New today</h2>
+              <span className="secNote">nothing left to deal</span>
+            </div>
+            <p className="dealDone">
+              Every clue the day had room for has been introduced. The next hand is dealt tomorrow.
+            </p>
+          </section>
+        )}
+
+        {empty ? (
+          /* The first screen everyone who signs up sees, and it has to read as
+             a starting line rather than as a scoreline of nought. */
+          <section className="sec">
+            <div className="secHead">
+              <h2>What happens next</h2>
+              <span className="secNote">three things, and then it runs itself</span>
+            </div>
             <ol className="beats">
               <li>
-                <span className="no">01</span>
+                <span className="no mono">01</span>
                 <span>
                   <b>Play GeoGuessr as usual.</b> The userscript captures each round as it ends. Nothing to press, no
                   second app to keep open.
                 </span>
               </li>
               <li>
-                <span className="no">02</span>
+                <span className="no mono">02</span>
                 <span>
                   <b>Your pin is the grade.</b> Clues you called right get pushed months out; the ones you missed come
                   back within days.
                 </span>
               </li>
               <li>
-                <span className="no">03</span>
+                <span className="no mono">03</span>
                 <span>
                   <b>The map rebuilds itself.</b> Your trainer map is republished after every game, so the next round is
                   already the one you needed.
@@ -705,62 +1062,19 @@ export default function Dashboard() {
           </section>
         ) : (
           <>
-            {/* The whole page in one figure: how much of the world you can
-                actually call right now. Everything else is behind Details. */}
-            <section className="hold">
-              <h1>
-                <b>{held.toLocaleString()}</b> of {progress.total.toLocaleString()} clues held at 90%
-              </h1>
-              <div className="holdBar" role="img"
-                aria-label={`${held} of ${progress.total} clues held at ninety per cent recall`}>
-                <i style={{ width: `${heldShare}%` }} />
-              </div>
-              <p className="say">
-                Clues you would get right if they came up this minute. It falls again when you stop playing.
-              </p>
-
-              <a className="btn big" href="https://www.geoguessr.com/" target="_blank" rel="noreferrer">
-                Play a round <span className="arr">→</span>
-              </a>
-
-              <p className="upNext">
-                {day?.doneForToday ? (
-                  <>
-                    <span className="dayDone">✓ Done for today</span>
-                    {next && ` · next one back ${next}`}
-                  </>
-                ) : (
-                  upNext
-                )}
-              </p>
-
-              {/* What today will actually teach, named. Quiet on purpose: it
-                  sits under the one line that gets you into a game, and it is
-                  an overview of the day rather than a second headline. */}
-              {newToday.length > 0 && (
-                <div className="nx">
-                  <p className="nxHead">New today · {newToday.length}</p>
-                  <ul className="nxList">
-                    {newToday.map((meta) => {
-                      const { country, clue } = splitMeta(meta.name)
-                      return (
-                        <li key={meta.name}>
-                          <span className="nxWhat">{clue}</span>
-                          {country && <span className="nxWhere">{country}</span>}
-                        </li>
-                      )
-                    })}
-                  </ul>
-                  {/* The honest caveat: new clues queue behind what is owed, so
-                      a heavy review day meets fewer of these than are listed. */}
-                  <p className="nxSay">New clues come after the day's due reviews, as room allows.</p>
-                </div>
-              )}
-            </section>
-
+            {/* The long measure: not what you did today, but what has stuck. */}
             {progress.series.length >= 1 && (
-              <section className="climb">
-                <h2>Held at 90%, over time</h2>
+              <section className="sec climb">
+                <div className="secHead">
+                  <h2>Held at 90%</h2>
+                  <span className="secNote">a live reading — it falls again when you stop playing</span>
+                </div>
+                <p className="secFig">
+                  <b>{n(held)}</b>
+                  <span>
+                    of {n(progress.total)} clues you would get right if they came up this minute
+                  </span>
+                </p>
                 <Climb series={progress.series} total={progress.total} />
                 {progress.series.length === 1 && (
                   <p className="hint">One reading so far. The line joins up once you have played on a second day.</p>
@@ -768,152 +1082,15 @@ export default function Dashboard() {
               </section>
             )}
 
-            {/* Everything the console used to open with, one click away. */}
-            <details className="more">
-              <summary>Details</summary>
-
-              <div className="grid">
-                <div className="col c5">
-                  <div className="panel">
-                    <header>
-                      <h2>Deck</h2>
-                      <span className="note">
-                        <b>{deck.introduced.toLocaleString()}</b> of {deck.total.toLocaleString()} introduced
-                      </span>
-                    </header>
-                    <div className="body">
-                      <div className="stack" aria-hidden>
-                        <i style={{ width: `${seenShare}%`, background: 'var(--o3)' }} />
-                        <i style={{ width: `${100 - seenShare}%`, background: 'var(--nodata)' }} />
-                      </div>
-                      <div className="legend">
-                        <span>
-                          <i style={{ background: 'var(--o3)' }} /> Introduced
-                        </span>
-                        <span>
-                          <i style={{ background: 'var(--nodata)' }} /> Not yet seen
-                        </span>
-                      </div>
-                      <div className="tbl dk" style={{ marginTop: 12 }}>
-                        {[
-                          { k: 'Due now', v: deck.due, of: deck.introduced, warm: true },
-                          { k: 'Bedding in', v: deck.learning, of: deck.introduced, warm: true },
-                          { k: 'Holding solid', v: metas.solid, of: metas.total, warm: false },
-                          { k: 'Not yet seen', v: deck.unseen, of: deck.total, warm: false },
-                        ].map((r) => (
-                          <div className="r" key={r.k}>
-                            <span className="nm">{r.k}</span>
-                            <span className={'meter' + (r.warm ? ' warm' : '')}>
-                              <i style={{ width: `${r.of > 0 ? Math.min(100, (r.v / r.of) * 100) : 0}%` }} />
-                            </span>
-                            <span className="num rt">{r.v.toLocaleString()}</span>
-                          </div>
-                        ))}
-                      </div>
-                      {/* The rate the last row of that table empties at, and
-                          the only number on this page you set rather than
-                          earn. It belongs under the deck it governs; an older
-                          Worker sends no `day`, and with no stored value to
-                          show the honest thing is no control at all. */}
-                      {day && <NewPerDay initial={day.dailyNew} />}
-                    </div>
-                  </div>
-
-                  <div className="panel">
-                    <header>
-                      <h2>Where you play</h2>
-                      <span className="note">rounds, shaded by hit rate</span>
-                    </header>
-                    <div className="body">
-                      {byRounds.length === 0 ? <p className="empty">No countries yet.</p> : <Countries rows={byRounds} />}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="col c7">
-                  <div className="panel">
-                    <header>
-                      <h2>Rounds</h2>
-                      <span className="note">
-                        <b>{totals.rounds.toLocaleString()}</b> played
-                      </span>
-                    </header>
-                    <div className="body">
-                      <div className="tbl dk">
-                        <div className="r">
-                          <span className="nm">Country called right</span>
-                          <span className="meter">
-                            <i style={{ width: `${pct ?? 0}%` }} />
-                          </span>
-                          <span className="num rt">{pct === null ? '—' : `${pct}%`}</span>
-                        </div>
-                        <div className="r">
-                          <span className="nm">Countries played</span>
-                          <span />
-                          <span className="num rt">{byRounds.length}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="panel">
-                    <header>
-                      <h2>Recent scores</h2>
-                      <span className="note">last {Math.min(recent.length, 24)} rounds</span>
-                    </header>
-                    <div className="body">
-                      <Scores rounds={recent} />
-                    </div>
-                  </div>
-
-                </div>
-
-                <div className="panel c12">
-                  <header>
-                    <h2>Round log</h2>
-                    <span className="note">last {log.length}</span>
-                  </header>
-                  <div className="body flush">
-                    <div className="log">
-                      <div className="r head" aria-hidden>
-                        <span />
-                        <span>Location</span>
-                        <span>Clue</span>
-                        <span className="rt">Distance</span>
-                        <span className="rt">When</span>
-                      </div>
-                      {log.map((r) => (
-                        <div className="r" key={r.id}>
-                          {/* A glyph, not a coloured disc. Right and wrong used
-                              to be carried by hue alone, with the words shut
-                              inside a title attribute only a mouse could reach. */}
-                          <span className={'mk ' + (r.correct ? 'ok' : 'no')}>
-                            <span aria-hidden>{r.correct ? '✓' : '✕'}</span>
-                            <span className="sr">
-                              {r.correct ? 'Country called right' : 'Country called wrong'}
-                            </span>
-                          </span>
-                          <span className="place">
-                            {r.country ? clean(r.country) : 'Unknown'}
-                            {!r.correct && r.guessCountry && <s> — read as {clean(r.guessCountry)}</s>}
-                          </span>
-                          <span className="clue">{r.metaName ?? '—'}</span>
-                          <span className="num rt">
-                            {r.distanceKm === null ? '—' : `${Math.round(r.distanceKm).toLocaleString()} km`}
-                          </span>
-                          <span className="num rt">{ago(r.ts)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Last thing on the page on purpose. A clue the deck has not
-                    got into you yet is a thing to practise, not a scoreline. */}
+            <div className="grid">
+              <div className="col c7">
+                {/* A clue the deck has not got into you yet is a thing to
+                    practise, not a scoreline — so it leads the working-out. */}
                 {metas.weakest.length > 0 && (
-                  <div className="panel c12">
+                  <div className="panel">
                     <header>
                       <h2>Worth another look</h2>
-                      <span className="note">clues the deck will bring back first</span>
+                      <span className="note">the clues coming back first</span>
                     </header>
                     <div className="body flush">
                       <div className="wks">
@@ -924,6 +1101,125 @@ export default function Dashboard() {
                     </div>
                   </div>
                 )}
+
+                <div className="panel">
+                  <header>
+                    <h2>Recent scores</h2>
+                    <span className="note">
+                      <b>{n(totals.rounds)}</b> rounds · {pct === null ? '—' : `${pct}%`} called right
+                    </span>
+                  </header>
+                  <div className="body">
+                    <Scores rounds={recent} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="col c5">
+              <div className="panel">
+                <header>
+                  <h2>Deck</h2>
+                  <span className="note">
+                    <b>{n(deck.introduced)}</b> of {n(ladder)} introduced
+                  </span>
+                </header>
+                <div className="body">
+                  <div className="stack" aria-hidden>
+                    <i style={{ width: `${seenShare}%`, background: 'var(--o3)' }} />
+                    <i style={{ width: `${100 - seenShare}%`, background: 'var(--nodata)' }} />
+                  </div>
+                  <div className="legend">
+                    <span>
+                      <i style={{ background: 'var(--o3)' }} /> Introduced
+                    </span>
+                    <span>
+                      <i style={{ background: 'var(--nodata)' }} /> Not yet seen
+                    </span>
+                  </div>
+                  <div className="tbl dk">
+                    {[
+                      /* The same buckets the ladder legend names, so the two
+                         panels can never disagree about what "bedding in"
+                         counts. deck.learning is a scheduler internal the
+                         reader has no other name for; it stays off the page. */
+                      { k: 'Due now', v: deck.due, of: deck.introduced, warm: true },
+                      { k: 'Shaky', v: metas.shaky, of: deck.introduced, warm: true },
+                      { k: 'Bedding in', v: metas.holding, of: deck.introduced, warm: false },
+                      { k: 'Holding solid', v: metas.solid, of: deck.introduced, warm: false },
+                      { k: 'Not yet seen', v: deck.unseen, of: deck.total, warm: false },
+                    ].map((r) => (
+                      <div className="r" key={r.k}>
+                        <span className="nm">{r.k}</span>
+                        <span className={'meter' + (r.warm ? ' warm' : '')}>
+                          <i style={{ width: `${r.of > 0 ? Math.min(100, (r.v / r.of) * 100) : 0}%` }} />
+                        </span>
+                        <span className="num rt">{n(r.v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {/* The rate the last row of that table empties at, and the
+                      only number on this page you set rather than earn. An
+                      older Worker sends no `day`, and with no stored value to
+                      show the honest thing is no control at all. */}
+                  {dayInfo && <NewPerDay initial={dayInfo.dailyNew} />}
+                </div>
+              </div>
+
+              <div className="panel">
+                <header>
+                  <h2>Where you play</h2>
+                  <span className="note">
+                    <b>{n(byRounds.length)}</b> countries · shaded by hit rate
+                  </span>
+                </header>
+                <div className="body">
+                  {byRounds.length === 0 ? <p className="empty">No countries yet.</p> : <Countries rows={byRounds} />}
+                </div>
+              </div>
+              </div>
+            </div>
+
+            <details className="more">
+              <summary>
+                Round log
+                <span className="moreNote">
+                  {n(log.length)} of {n(totals.rounds)} rounds · newest first
+                </span>
+              </summary>
+              <div className="panel">
+                <div className="body flush">
+                  <div className="log">
+                    <div className="r head" aria-hidden>
+                      <span />
+                      <span>Location</span>
+                      <span>Clue</span>
+                      <span className="rt">Distance</span>
+                      <span className="rt">When</span>
+                    </div>
+                    {log.map((r) => (
+                      <div className="r" key={r.id}>
+                        {/* A glyph, not a coloured disc. Right and wrong used
+                            to be carried by hue alone, with the words shut
+                            inside a title attribute only a mouse could reach. */}
+                        <span className={'mk ' + (r.correct ? 'ok' : 'no')}>
+                          <span aria-hidden>{r.correct ? '✓' : '✕'}</span>
+                          <span className="sr">
+                            {r.correct ? 'Country called right' : 'Country called wrong'}
+                          </span>
+                        </span>
+                        <span className="place">
+                          {r.country ? clean(r.country) : 'Unknown'}
+                          {!r.correct && r.guessCountry && <s> — read as {clean(r.guessCountry)}</s>}
+                        </span>
+                        <span className="clue">{r.metaName ?? '—'}</span>
+                        <span className="num rt">
+                          {r.distanceKm === null ? '—' : `${n(Math.round(r.distanceKm))} km`}
+                        </span>
+                        <span className="num rt">{ago(r.ts)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </details>
           </>
