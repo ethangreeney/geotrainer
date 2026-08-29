@@ -115,6 +115,28 @@ const GB_API = 'https://www.geoboundaries.org/api/current/gbOpen'
 // derived from it at build time.
 const GB_TOL = LODS[LODS.length - 1].tol
 
+/**
+ * Territories Natural Earth folds into their sovereign, and the codes they have
+ * of their own.
+ *
+ * The name-to-code table below is built out of Natural Earth, so a place
+ * Natural Earth does not treat as a country cannot be looked up in it:
+ * "Reunion" resolves to nothing, geoBoundaries' REU is never asked for, and a
+ * round played there reverse-geocodes to "??" and cannot be graded at all.
+ * That happened. The catalogs name two such places; these are their ISO codes,
+ * straight from the standard rather than from either dataset.
+ *
+ * Christmas Island is here without a boundary behind it: geoBoundaries has no
+ * CXR at either level. It stays so the entry says what was looked for, and so a
+ * later geoBoundaries release is picked up without anyone remembering to look —
+ * the fetch reports it as "Natural Earth only" and build.mjs rescues the island
+ * from Natural Earth's subdivision file, where it is drawn but left uncoded.
+ */
+const FOLDED = {
+  reunion: { cc: 'RE', iso3: 'REU' },
+  christmasisland: { cc: 'CX', iso3: 'CXR' },
+}
+
 /** Which countries the deck can put on screen: every country the location
  * catalogs cover, plus every country a curated scope names. Read from the raw
  * files rather than from built output, since this runs before the build. */
@@ -148,7 +170,7 @@ async function neededCountries() {
   const out = new Map()
   const unknown = []
   for (const name of names) {
-    const hit = codes.get(key(name))
+    const hit = codes.get(key(name)) ?? FOLDED[key(name)]
     if (hit) out.set(hit.cc, hit.iso3)
     else unknown.push(name)
   }
@@ -165,7 +187,11 @@ async function gbSource(iso3) {
     if (!res?.ok) continue
     const meta = await res.json()
     const url = meta.tjDownloadURL ?? meta.gjDownloadURL?.replace(/\.geojson$/, '.topojson')
-    if (url) return { level, url }
+    // What geoBoundaries calls the country, kept because for a territory
+    // Natural Earth folds into its sovereign this is the only name there is:
+    // nothing else on disk knows that RE is called Réunion, and a country with
+    // no name draws its overlay labelled "RE".
+    if (url) return { level, url, names: [...new Set([meta.boundaryName, meta.boundaryCanonical].filter(Boolean))] }
   }
   return null
 }
@@ -190,7 +216,7 @@ async function gbCountry(cc, iso3) {
         geometry: f.geometry,
       }))
       if (!features.length) throw new Error('no features')
-      const json = JSON.stringify({ iso3, level: src.level, features })
+      const json = JSON.stringify({ iso3, level: src.level, names: src.names, features })
       await writeFile(path + '.part', json)
       await rename(path + '.part', path)
       return { cc, level: src.level, units: features.length, bytes: json.length }

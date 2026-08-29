@@ -61,6 +61,28 @@ const iso2 = (p) => {
   return null
 }
 
+/**
+ * Territories Natural Earth draws but refuses to code, keyed by the `geonunit`
+ * it draws them under.
+ *
+ * The placeholder rule above is right in general and wrong in exactly this
+ * case. Christmas Island is in the subdivision file with its outline intact and
+ * `iso_a2: "-1"`, filed under an admin called "Indian Ocean Territories"; the
+ * country file has that grouping as a dependency of Australia and nothing else.
+ * So the island is dropped at both levels, and a round played there
+ * reverse-geocodes to "??" — no country, no grade, no overlay. That happened.
+ * geoBoundaries has no CXR to fall back on, so the shape Natural Earth already
+ * drew is the only one there is; naming it lets the rest of the build treat it
+ * like any other small territory whose parts exist but whose whole does not.
+ *
+ * Keyed on `geonunit` rather than on the name, because `geonunit` is the
+ * territory itself while `admin` is the grouping — "Indian Ocean Territories"
+ * covers two islands a thousand kilometres apart, and only one of them is this.
+ */
+const NE_TERRITORY = new Map([['christmasisland', 'CX']])
+const territoryCode = (p) =>
+  NE_TERRITORY.get(String(p.geonunit ?? '').toLowerCase().replace(/[^a-z]/g, '')) ?? null
+
 for (const dir of ['admin0', 'admin1', 'merged']) {
   rmSync(join(HERE, dir), { recursive: true, force: true })
   for (const lod of LODS) mkdirSync(join(HERE, dir, 'l' + lod.id), { recursive: true })
@@ -133,7 +155,8 @@ const parentNames = new Map()
 
 for (const f of load('ne_10m_admin_1_states_provinces.geojson').features) {
   const p = f.properties
-  const code = iso2(p)
+  const own = iso2(p)
+  const code = own ?? territoryCode(p)
   if (!code) continue
   const names = new Set()
   for (const k of ['name', ...LOCALE]) {
@@ -157,7 +180,11 @@ for (const f of load('ne_10m_admin_1_states_provinces.geojson').features) {
     groups: [p.region, p.geonunit].filter((g) => typeof g === 'string' && g.trim()),
   })
   if (!parentNames.has(code)) parentNames.set(code, new Set())
-  for (const k of ['admin', 'geonunit']) if (typeof p[k] === 'string' && p[k].trim()) parentNames.get(code).add(p[k])
+  // The first name in the set is what a synthesized country ends up called, so
+  // a rescued territory leads with its own `geonunit` and not with the grouping
+  // it was filed under.
+  for (const k of own ? ['admin', 'geonunit'] : ['geonunit', 'admin'])
+    if (typeof p[k] === 'string' && p[k].trim()) parentNames.get(code).add(p[k])
 }
 
 /* ── geoBoundaries ──────────────────────────────────────────────────────── */
@@ -333,9 +360,14 @@ for (const file of existsSync(GB) ? readdirSync(GB).filter((f) => f.endsWith('.j
   // Whatever this country is already called, from the country file if Natural
   // Earth has one and from its own subdivisions if not — geoBoundaries knows
   // one name per unit and the scopes were written against every spelling.
+  // geoBoundaries' own name for the country is the last resort and the only one
+  // for a territory neither Natural Earth file codes: nothing else on disk
+  // knows that RE is called Réunion, and a country with no name draws its
+  // overlay labelled "RE" and answers to nothing a catalog might say.
   const known = index.countries[code]
-  const countryName = known?.name ?? [...(parentNames.get(code) ?? [])][0] ?? code
-  const countryNames = known?.names ?? [...(parentNames.get(code) ?? [])]
+  const fallback = [...(parentNames.get(code) ?? []), ...(gb.names ?? [])]
+  const countryName = known?.name ?? fallback[0] ?? code
+  const countryNames = known?.names ?? fallback
   const wasSynthesized = !known
 
   // A territory with nothing to subdivide — Bermuda, American Samoa — arrives as

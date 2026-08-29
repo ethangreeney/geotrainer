@@ -5,7 +5,7 @@
  * locate.mjs reads the first two; outline.mjs reads all three; the Worker
  * bundles them at deploy time.
  *
- *   node coach/geo/pack.mjs      (after build.mjs; ~2s, writes coach/geo/pack/)
+ *   node coach/geo/pack.mjs      (after build.mjs; ~1 min, writes coach/geo/pack/)
  *
  * Format, per file: a uint32 header length, that many bytes of JSON naming the
  * features in order, then one varint stream — per feature a ring count, per
@@ -14,12 +14,9 @@
  * metres at a time, so almost every coordinate fits in one byte where a JSON
  * decimal takes eight.
  *
- * The country pack uses the middle rung of the ladder (~275m). The coarsest
- * rung loses whole islands and hands border towns to the wrong side — measured
- * against captured rounds it put a Finnish round in Sweden and a Lao one in
- * Thailand, which is exactly the failure this system cannot afford. The
- * subdivision pack uses the coarsest rung on purpose: it only decides whether a
- * guess landed inside a meta's scope, and those scopes are whole states.
+ * Which rung of the detail ladder each shape is packed at is decided per
+ * shape — see RUNGS below. Nothing in the format records the choice, because
+ * nothing downstream needs it: a feature is plain geometry either way.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -33,14 +30,51 @@ export const COUNTRY_PACK = join(PACK_DIR, 'admin0.bin')
 export const REGION_PACK = join(PACK_DIR, 'admin1.bin')
 export const MERGED_PACK = join(PACK_DIR, 'merged.bin')
 
-const COUNTRY_LOD = 'l1'
-const REGION_LOD = 'l0'
-// The dissolved shapes ride at the same rung as the subdivisions they are made
-// of: a merge is only ever drawn where its parts would have been.
-const MERGED_LOD = 'l0'
-// 1/2000° ≈ 55m — finer than either rung's own simplification, so quantising
-// costs nothing, and coarse enough that most deltas stay inside one byte.
-const SCALE = 2000
+/**
+ * The two rungs a shape may be packed at, coarse first.
+ *
+ * The packs used to carry one rung apiece — countries at l1, subdivisions and
+ * merges at l0 — and the serving path can only ever *thin* what the pack holds.
+ * So a client zoomed in past z=8 and asking for LOD 2 got LOD 1 at best for a
+ * country and LOD 0 for a region, and no amount of zooming made the outline
+ * finer. Worse, simplifyAt drops any ring smaller than ten tolerances across,
+ * which at l0 is 0.2° — twenty-two kilometres. Every offshore island a region
+ * owns simply was not in the pack, which is what "small islands look
+ * low-resolution" actually was: they were not low-resolution, they were gone.
+ *
+ * l2 everywhere is not affordable — the country pack alone would be 14MB and
+ * Canada's provinces another 5MB — so the rung is chosen per shape against a
+ * flat byte budget. That is the right axis: what makes l2 expensive is a long
+ * coastline, and a long coastline is exactly what a big shape has. Malta, the
+ * Faroes and Vanuatu are nowhere near the budget and take the fine rung; Canada
+ * and Indonesia are far past it and stay where they were. Nothing gets worse
+ * than it is today, and 90% of shapes get an order of magnitude better.
+ *
+ * The budget doubles as the serving-cost ceiling. buildScopeGeo re-simplifies
+ * the whole outline on every request, so the largest shape in the pack is the
+ * Worker's worst case; capping the packed bytes caps that too, and the shapes
+ * that stay at l1 are precisely the ones already at l1 today.
+ */
+const RUNGS = ['l1', 'l2']
+const FEATURE_BUDGET = 64 * 1024
+
+/**
+ * 1/20000° ≈ 5.5m.
+ *
+ * This used to be 1/2000° (~55m) with a comment claiming it was finer than
+ * either rung's own simplification. That was true while the finest rung in any
+ * pack was l1 (0.0025°, ~275m) and false the moment l2 (0.0003°, ~33m) went in:
+ * a 55m grid rounds a 33m tolerance into noise, and the detail the finer slice
+ * was read for would have been destroyed at pack time. Six times finer than the
+ * tolerance it carries is the same margin 1/2000° gave l1, so the claim holds
+ * again.
+ *
+ * The scale is written into each pack's header and read back by loadPack, so
+ * the readers need no change and the hit-test grid, the offshore reach and the
+ * printed decimals all follow it — outline.mjs derives its decimal places from
+ * this number rather than assuming four.
+ */
+const SCALE = 20000
 
 class Writer {
   constructor() {
@@ -61,45 +95,77 @@ class Writer {
 const polygonsOf = (geometry) =>
   geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates
 
+/** One geometry's stretch of the varint stream, and how many polygons it is —
+ * the header needs one place index per polygon, and a shape has a different
+ * number of them at each rung. */
+function encodeGeometry(geometry) {
+  const w = new Writer()
+  let polygons = 0
+  for (const rings of polygonsOf(geometry)) {
+    polygons++
+    w.uint(rings.length)
+    for (const ring of rings) {
+      w.uint(ring.length)
+      let px = 0
+      let py = 0
+      for (const [lng, lat] of ring) {
+        const x = Math.round(lng * SCALE)
+        const y = Math.round(lat * SCALE)
+        w.int(x - px)
+        w.int(y - py)
+        px = x
+        py = y
+      }
+    }
+  }
+  return { bytes: w.out, polygons }
+}
+
+/**
+ * The finest rung this shape can afford, and the geometry to pack.
+ *
+ * The coarse rung is measured first and the fine one is fetched only when the
+ * coarse one already fits: a finer simplification is never smaller, so a shape
+ * over budget at l1 is over budget at l2 too, and Canada's 43MB of l2 JSON is
+ * never parsed at all.
+ */
+function pick(coarse, finer) {
+  if (encodeGeometry(coarse).bytes.length <= FEATURE_BUDGET) {
+    const fine = finer()
+    if (fine && encodeGeometry(fine).bytes.length <= FEATURE_BUDGET)
+      return { lod: RUNGS[1], geometry: fine }
+  }
+  return { lod: RUNGS[0], geometry: coarse }
+}
+
 /** One entry per polygon, not per feature: a country's islands are separate
  * claims on the map, and keeping them apart lets the smallest-shape-wins rule
  * pick an island out of the sovereign that also covers it. */
 function encode(entries, kind) {
-  const w = new Writer()
   // The names live in a table and each polygon carries an index into it: a
   // country contributes hundreds of polygons and spelling "United States of
   // America" once beats spelling it four hundred times.
   const places = []
   const seen = new Map()
   const features = []
+  // One buffer per feature rather than one array of bytes for the whole pack:
+  // a pack's stream runs to millions of bytes and there is no spreading that
+  // into a call without overflowing the stack.
+  const chunks = []
   for (const { meta, geometry } of entries) {
-    const key = meta.code + '\u0000' + meta.name
+    const key = meta.code + '\0' + meta.name
     if (!seen.has(key)) {
       seen.set(key, places.length)
       places.push(meta.names ? [meta.code, meta.name, meta.names] : [meta.code, meta.name])
     }
-    for (const rings of polygonsOf(geometry)) {
-      features.push(seen.get(key))
-      w.uint(rings.length)
-      for (const ring of rings) {
-        w.uint(ring.length)
-        let px = 0
-        let py = 0
-        for (const [lng, lat] of ring) {
-          const x = Math.round(lng * SCALE)
-          const y = Math.round(lat * SCALE)
-          w.int(x - px)
-          w.int(y - py)
-          px = x
-          py = y
-        }
-      }
-    }
+    const { bytes, polygons } = encodeGeometry(geometry)
+    for (let i = 0; i < polygons; i++) features.push(seen.get(key))
+    chunks.push(Buffer.from(bytes))
   }
   const head = Buffer.from(JSON.stringify({ scale: SCALE, kind, places, features }), 'utf8')
   const len = Buffer.alloc(4)
   len.writeUInt32LE(head.length)
-  return Buffer.concat([len, head, Buffer.from(w.out)])
+  return Buffer.concat([len, head, ...chunks])
 }
 
 const readSlice = (dir, lod, file) => {
@@ -107,13 +173,18 @@ const readSlice = (dir, lod, file) => {
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null
 }
 
-function countries() {
-  const dir = join(HERE, 'admin0', COUNTRY_LOD)
+/** Every country geoBoundaries has a shape for, each at the finest rung it can
+ * afford. */
+export function countries() {
+  const dir = join(HERE, 'admin0', RUNGS[0])
   return readdirSync(dir)
     .filter((f) => f.endsWith('.json'))
     .map((f) => {
       const c = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      return { meta: { code: c.code, name: c.name }, geometry: c.geometry }
+      return {
+        meta: { code: c.code, name: c.name },
+        ...pick(c.geometry, () => readSlice('admin0', RUNGS[1], f)?.geometry),
+      }
     })
 }
 
@@ -138,19 +209,43 @@ const scopeSpellings = new Set(
     .map(norm),
 )
 
+/**
+ * The one country's slice at the fine rung, read at most once however many of
+ * its shapes ask for it, and indexed by whatever identifies a shape across
+ * rungs. build.mjs writes every rung from the same list in the same order, so
+ * the key is only ever a guard against that changing.
+ */
+function fineIndex(load, keyOf) {
+  let index
+  return (key) => {
+    if (index === undefined) {
+      index = new Map()
+      for (const f of load() ?? []) index.set(keyOf(f), f)
+    }
+    return index.get(key)
+  }
+}
+
 /** Subdivisions travel with all their spellings, because the one a scope is
  * written against is not always the one geoBoundaries uses: it spells South
  * Africa's Northern Cape "Nothern Cape", and a scope saying "Northern Cape"
  * graded every correct guess in the province out of scope for as long as the
  * pack carried that one name alone. The scope's own spelling leads, so a
  * dossier names the province the way the card does. */
-function regions() {
+export function regions() {
   const out = []
   for (const code of scopedCountries()) {
-    for (const f of readSlice('admin1', REGION_LOD, code + '.json') ?? []) {
+    const fine = fineIndex(
+      () => readSlice('admin1', RUNGS[1], code + '.json'),
+      (f) => f.id ?? f.name,
+    )
+    for (const f of readSlice('admin1', RUNGS[0], code + '.json') ?? []) {
       const names = f.names?.length ? f.names : [f.name]
       const name = names.find((n) => scopeSpellings.has(norm(n))) ?? f.name
-      out.push({ meta: { code, name, names }, geometry: f.geometry })
+      out.push({
+        meta: { code, name, names },
+        ...pick(f.geometry, () => fine(f.id ?? f.name)?.geometry),
+      })
     }
   }
   return out
@@ -171,14 +266,20 @@ function regions() {
  * The display name (with the accents, joined by +) stays in the name slot,
  * which is what the overlay's label is built from.
  */
-function merges() {
-  const dir = join(HERE, 'merged', MERGED_LOD)
+export function merges() {
+  const dir = join(HERE, 'merged', RUNGS[0])
   const out = []
   for (const file of existsSync(dir) ? readdirSync(dir).sort() : []) {
     if (!file.endsWith('.json')) continue
     const code = file.slice(0, -5)
-    for (const m of Object.values(readSlice('merged', MERGED_LOD, file) ?? {}))
-      out.push({ meta: { code, name: m.name, names: m.names.map(norm) }, geometry: m.geometry })
+    let fine
+    const sets = readSlice('merged', RUNGS[0], file) ?? {}
+    for (const [sig, m] of Object.entries(sets)) {
+      out.push({
+        meta: { code, name: m.name, names: m.names.map(norm) },
+        ...pick(m.geometry, () => (fine ??= readSlice('merged', RUNGS[1], file) ?? {})[sig]?.geometry),
+      })
+    }
   }
   return out
 }
@@ -195,9 +296,11 @@ export function writePacks() {
   ]) {
     const buf = encode(entries, kind)
     writeFileSync(path, buf)
-    // The country pack is bundled into the Worker, whose whole script has to
-    // stay under 3MB gzipped alongside the meta catalogs. Worth watching.
-    console.log(`${label}: ${entries.length} features, ${(buf.length / 1e6).toFixed(2)} MB`)
+    const rungs = RUNGS.map((r) => `${entries.filter((e) => e.lod === r).length} ${r}`).join(', ')
+    // The three packs are bundled into the Worker, whose whole script has to
+    // stay well under Cloudflare's ceiling alongside the meta catalogs. Worth
+    // watching, and the rung split is what moves it.
+    console.log(`${label}: ${entries.length} features (${rungs}), ${(buf.length / 1e6).toFixed(2)} MB`)
   }
 }
 

@@ -17,11 +17,12 @@
  * Like the rest of the boundary suite, the built half skips rather than fails
  * when the packs are absent — they are gitignored, and a fresh clone has none.
  */
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { loadPack } from './locate.mjs'
+import { merges } from './pack.mjs'
 import { loadMergedPack, norm, scopeOutline } from './outline.mjs'
 import { norm as normOnDisk } from './resolve.mjs'
 
@@ -108,10 +109,11 @@ describe('scopeOutline', () => {
   })
 
   it.runIf(built)('has no shape at all for a country with no boundary on file', () => {
-    // ZZ is what a failed geocode asks for, and Réunion is a real country code
-    // the geoBoundaries snapshot simply omits. Both are "no overlay", not
-    // "try again".
-    for (const code of ['ZZ', '', 'RE']) {
+    // ZZ is what a failed geocode asks for, and CC is a real country code the
+    // sources between them draw nothing for — Natural Earth files the Cocos
+    // Islands under an uncoded administration and geoBoundaries has no CCK.
+    // Both are "no overlay", not "try again".
+    for (const code of ['ZZ', '', 'CC']) {
       const r = outline(code, ['anything'])
       expect(r.ok, code).toBe(false)
       expect(r.kind, code).toBe('none')
@@ -137,6 +139,7 @@ describe('scopeOutline', () => {
   })
 
   it.runIf(built)('answers with coordinates, in degrees, closed and in range', () => {
+    const places = 10 ** Math.ceil(Math.log10(packs.merged.scale))
     const r = outline('BR', ['Paraná', 'Santa Catarina', 'Rio Grande do Sul'])
     const g = r.geojson.features[0].geometry
     const polygons = g.type === 'Polygon' ? [g.coordinates] : g.coordinates
@@ -147,10 +150,11 @@ describe('scopeOutline', () => {
         for (const [lng, lat] of ring) {
           expect(Math.abs(lng)).toBeLessThanOrEqual(180)
           expect(Math.abs(lat)).toBeLessThanOrEqual(90)
-          // The pack quantises to a 1/2000° grid; four decimals is exactly
-          // what that can express, and claiming more would be invention.
-          expect(Math.round(lng * 1e4) / 1e4).toBe(lng)
-          expect(Math.round(lat * 1e4) / 1e4).toBe(lat)
+          // Coordinates carry exactly the decimals the pack's own grid can
+          // express and no more, whatever that grid is set to; claiming more
+          // would be invention.
+          expect(Math.round(lng * places) / places).toBe(lng)
+          expect(Math.round(lat * places) / places).toBe(lat)
         }
       }
     // Southern Brazil, and nowhere near anywhere else.
@@ -161,38 +165,37 @@ describe('scopeOutline', () => {
 })
 
 describe('loadMergedPack', () => {
-  const dir = join(HERE, 'merged', 'l0')
-  const slices = built && existsSync(dir)
+  // What pack.mjs packs, not what any one rung holds: each shape is packed at
+  // the finest rung it fits the budget at, so there is no single directory on
+  // disk the pack can be held against any more.
+  const source = built ? merges() : []
 
   /** Every dissolved shape build.mjs wrote, back out of the pack with the same
    * polygons, the same rings and the same vertices — within the grid it was
    * quantised onto, which is the only precision the pack ever claimed. */
-  it.runIf(slices)('round-trips every shape pack.mjs wrote', () => {
+  it.runIf(source.length > 0)('round-trips every shape pack.mjs wrote', () => {
+    const grid = 0.5 / packs.merged.scale
     let checked = 0
-    for (const file of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
-      const code = file.slice(0, -5)
-      const merges = packs.merged.byCountry.get(code) ?? []
-      for (const raw of Object.values(JSON.parse(readFileSync(join(dir, file), 'utf8')))) {
-        const got = merges.find((m) => m.name === raw.name)
-        expect(got, `${code} ${raw.name}`).toBeTruthy()
-        // The names it covers are the lookup key, and they are stored already
-        // normalised — one per part, in the order build.mjs dissolved them.
-        expect(got.keys).toEqual(raw.names.map(norm))
-        const polygons = raw.geometry.type === 'Polygon' ? [raw.geometry.coordinates] : raw.geometry.coordinates
-        expect(got.polygons.length, `${code} ${raw.name}`).toBe(polygons.length)
-        polygons.forEach((rings, p) => {
-          expect(got.polygons[p].rings.length).toBe(rings.length)
-          rings.forEach((ring, k) => {
-            const { xs, ys } = got.polygons[p].rings[k]
-            expect(xs.length).toBe(ring.length)
-            for (let i = 0; i < ring.length; i++) {
-              expect(Math.abs(xs[i] / packs.merged.scale - ring[i][0])).toBeLessThanOrEqual(0.0005)
-              expect(Math.abs(ys[i] / packs.merged.scale - ring[i][1])).toBeLessThanOrEqual(0.0005)
-            }
-          })
+    for (const { meta, geometry } of source) {
+      const got = (packs.merged.byCountry.get(meta.code) ?? []).find((m) => m.name === meta.name)
+      expect(got, `${meta.code} ${meta.name}`).toBeTruthy()
+      // The names it covers are the lookup key, and they are stored already
+      // normalised — one per part, in the order build.mjs dissolved them.
+      expect(got.keys).toEqual(meta.names)
+      const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates
+      expect(got.polygons.length, `${meta.code} ${meta.name}`).toBe(polygons.length)
+      polygons.forEach((rings, p) => {
+        expect(got.polygons[p].rings.length).toBe(rings.length)
+        rings.forEach((ring, k) => {
+          const { xs, ys } = got.polygons[p].rings[k]
+          expect(xs.length).toBe(ring.length)
+          for (let i = 0; i < ring.length; i++) {
+            expect(Math.abs(xs[i] / packs.merged.scale - ring[i][0])).toBeLessThanOrEqual(grid)
+            expect(Math.abs(ys[i] / packs.merged.scale - ring[i][1])).toBeLessThanOrEqual(grid)
+          }
         })
-        checked++
-      }
+      })
+      checked++
     }
     expect(checked).toBeGreaterThan(0)
   })

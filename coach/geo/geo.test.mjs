@@ -745,8 +745,12 @@ describe.skipIf(!built)('the built slices', () => {
   })
 
   it('says nothing rather than something wrong about a country it has no file for', () => {
+    // ZZ is what a failed geocode asks for. CC is a real code the sources
+    // between them draw nothing for: Natural Earth files the Cocos Islands
+    // under the same uncoded "Indian Ocean Territories" admin as Christmas
+    // Island, and only the one the deck has actually played is rescued.
     expect(countryShape('ZZ')).toBe(null)
-    expect(countryShape('CX')).toBe(null)
+    expect(countryShape('CC')).toBe(null)
     const { matched, missing } = regionShapes('ZZ', ['Anywhere'])
     expect(matched).toEqual([])
     expect(missing).toEqual(['Anywhere'])
