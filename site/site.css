@@ -900,6 +900,7 @@ code {
    real pixels (measure.ts), so this is 11px on the glass. */
 .tick { font-size: var(--fs-1); }
 .lbl { font-size: var(--fs-2); }
+.sub { font: 400 var(--fs-1)/1 var(--sans); fill: var(--ink-4); }
 
 /* --------------------------------------------------------- the working-out */
 .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s4); margin-top: var(--rhythm); }
@@ -963,6 +964,13 @@ code {
 .dk .r:first-child { border-top: 1px solid var(--rule-soft); }
 
 /* the diverging scale, written out under the country chart */
+/* The duel-cost list lives inside the same panel as the play map — a second
+   reading of the same countries, so a sub-heading rather than a new panel. */
+.duels { margin-top: var(--s5); padding-top: var(--s4); border-top: 1px solid var(--line); }
+.duelHead { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s3); flex-wrap: wrap; }
+.duelHead h3 { font-size: 0.95rem; font-weight: 600; margin: 0; }
+.duelHead .note { font: 400 var(--fs-2)/var(--lh-dense) var(--sans); color: var(--ink-4); }
+
 .ramp { display: flex; align-items: center; gap: 9px; margin-top: var(--s4); flex-wrap: wrap; }
 .ramp .sw { display: flex; }
 .ramp .sw i { width: 17px; height: var(--s2); }

@@ -7,6 +7,7 @@ import {
   gradeRound,
   MASTERY_DAYS,
   newIntroducedToday,
+  nextNewMetas,
   rankDeck,
   reviewsCompletedToday,
   ratingNameFor,
@@ -280,10 +281,23 @@ describe('reviewsCompletedToday', () => {
     let cards = gradeRound({}, { metaName: T1[0] }, T0)
     cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, 0.01))
     cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, 0.02))
-    // Introduced in the same window, so it is still the allowance's card.
-    expect(reviewsCompletedToday(cards, plus(T0, 0.03))).toBe(0)
-    // A day later the introduction has aged out and the last answer has too.
+    expect(reviewsCompletedToday(cards, plus(T0, 0.03))).toBe(1)
+    // A day later the last answer has aged out of the window.
     expect(reviewsCompletedToday(cards, plus(T0, 1.5))).toBe(0)
+  })
+
+  it('exempts the introduction itself, and only the introduction', () => {
+    // A card whose one and only grade is its introduction is the allowance's
+    // work, not a review —
+    const introducedOnly = gradeRound({}, { metaName: T1[0] }, T0)
+    expect(reviewsCompletedToday(introducedOnly, plus(T0, 0.01))).toBe(0)
+    // — but answering it again later the same day is a review. This is the
+    // shrinking-bar bug: the old rule dropped these answers entirely, so the
+    // due count fell while "done" stood still and the bar's total shrank as
+    // the player cleared their own new cards.
+    const reviewedAgain = gradeRound(introducedOnly, { metaName: T1[0], correct: true }, plus(T0, 0.2))
+    expect(reviewsCompletedToday(reviewedAgain, plus(T0, 0.25))).toBe(1)
+    expect(newIntroducedToday(reviewedAgain, plus(T0, 0.25))).toBe(1)
   })
 
   it('sees the grade gradeRound actually wrote', () => {
@@ -923,5 +937,90 @@ describe('deckSummary', () => {
     const deck = buildDeck(cards, CATALOG, { minNew: 0, minSize: 0 }, T0)
     expect(summary.due).toBe(deck.stats.due)
     expect(summary.unlockedTiers).toBe(deck.stats.unlockedTiers)
+  })
+})
+
+describe('rankDeck with duel weights', () => {
+  // Country-prefixed names, the way every catalog meta is actually named —
+  // the prefix is what the weights key on.
+  const WCAT = [
+    {
+      mapId: 'lm-weighted',
+      name: 'Weighted',
+      tier: 1,
+      metas: ['Mexico: one', 'Mexico: two', 'Mexico: three', 'Brazil: one', 'Brazil: two', 'Russia: one'],
+    },
+  ]
+  const newNames = (deck) => deck.metas.filter((m) => m.kind === 'new').map((m) => m.name)
+  /** A card born inside the rolling day ending at T0, holding a slot against
+   * its country's interleave cap. */
+  const dealtToday = () => ({
+    ...card({ due: plus(T0, 10).toISOString() }),
+    firstSeen: at('2026-02-28T20:00:00Z').toISOString(),
+  })
+
+  it('keeps the ladder order when no weights are given', () => {
+    const deck = rankDeck({}, WCAT, { limit: 99 }, T0)
+    expect(newNames(deck)).toEqual([
+      'Mexico: one',
+      'Mexico: two',
+      'Mexico: three',
+      'Brazil: one',
+      'Brazil: two',
+      'Russia: one',
+    ])
+  })
+
+  it('leads with the countries that cost the most, ladder order inside each', () => {
+    const deck = rankDeck({}, WCAT, { limit: 99, newWeights: { Brazil: 9000, Russia: 400 } }, T0)
+    expect(newNames(deck)).toEqual([
+      'Brazil: one',
+      'Brazil: two',
+      'Russia: one',
+      'Mexico: one',
+      'Mexico: two',
+      'Mexico: three',
+    ])
+  })
+
+  it('defers a third clue from one country behind everyone still under the cap', () => {
+    const deck = rankDeck({}, WCAT, { limit: 99, newWeights: { Mexico: 9000 } }, T0)
+    // Mexico leads on weight, but its third clue waits for the other
+    // countries — the all-Mexico run this ordering exists to end.
+    expect(newNames(deck)).toEqual([
+      'Mexico: one',
+      'Mexico: two',
+      'Brazil: one',
+      'Brazil: two',
+      'Russia: one',
+      'Mexico: three',
+    ])
+  })
+
+  it("counts clues already introduced today against the country's cap", () => {
+    const cards = { 'Mexico: dealt-a': dealtToday(), 'Mexico: dealt-b': dealtToday() }
+    const deck = rankDeck(cards, WCAT, { limit: 99, newWeights: { Mexico: 9000 } }, T0)
+    // Two Mexican clues this morning means every unseen Mexican clue defers,
+    // however heavy the weight.
+    expect(newNames(deck)).toEqual([
+      'Brazil: one',
+      'Brazil: two',
+      'Russia: one',
+      'Mexico: one',
+      'Mexico: two',
+      'Mexico: three',
+    ])
+  })
+
+  it('spends the allowance anyway when only capped countries remain', () => {
+    const only = [{ mapId: 'lm-mx', name: 'MX', tier: 1, metas: ['Mexico: one', 'Mexico: two', 'Mexico: three', 'Mexico: four'] }]
+    const deck = rankDeck({}, only, { limit: 99, newWeights: { Mexico: 1 } }, T0)
+    expect(newNames(deck)).toEqual(['Mexico: one', 'Mexico: two', 'Mexico: three', 'Mexico: four'])
+  })
+
+  it('previews exactly what the deck would deal, given the same weights', () => {
+    const opts = { newWeights: { Brazil: 9000, Russia: 400 } }
+    const deck = rankDeck({}, WCAT, { limit: 99, ...opts }, T0)
+    expect(nextNewMetas({}, WCAT, 4, opts, T0)).toEqual(newNames(deck).slice(0, 4))
   })
 })

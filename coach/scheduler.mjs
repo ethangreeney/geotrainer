@@ -305,10 +305,19 @@ export function newIntroducedToday(cards, now) {
  * It reads `last_review`, which is FSRS's own stamp and is only written by
  * gradeRound, so the count is exactly "cards this day actually graded".
  * Padding rounds are ungraded and correctly invisible here: free practice is
- * not work owed. Cards introduced inside the same window are excluded rather
- * than double-counted — they are what newIntroducedToday is already reporting,
- * and the whole point of the two numbers is that they are the two different
- * kinds of work a session is made of.
+ * not work owed.
+ *
+ * A card whose only grade is its introduction is not a review — that grade is
+ * what newIntroducedToday is already reporting, and the whole point of the
+ * two numbers is that they are the two different kinds of work a session is
+ * made of. But only the introduction itself is exempt: a card dealt this
+ * morning that climbs back into the due queue and gets answered again this
+ * afternoon was reviewed, full stop. Excluding everything introduced today —
+ * the old rule — made those answers vanish: the due count fell as the player
+ * cleared them while "done" stood still, and the bar's total shrank in front
+ * of the one person watching it fill. `last_review` after `firstSeen` is the
+ * test, because the introduction writes both stamps from one clock and every
+ * later grade moves only the first.
  *
  * This counts cards, not answers: a card answered twice today is one card of
  * the day's work, which is what makes `done + still-due` a stable total for a
@@ -322,10 +331,80 @@ export function reviewsCompletedToday(cards, now) {
     const at = card?.last_review ? new Date(card.last_review).getTime() : NaN
     if (!Number.isFinite(at) || at <= since || at > moment) continue
     const born = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
-    if (Number.isFinite(born) && born > since && born <= moment) continue
+    if (Number.isFinite(born) && at <= born) continue
     count += 1
   }
   return count
+}
+
+/**
+ * How many new clues from one country a rolling day may introduce, when a
+ * weighted order is in effect. The weights sort whole countries, so the worst
+ * country would otherwise fill the entire allowance by itself — ten Brazilian
+ * clues in one sitting is a cram session wearing the deck's clothes. Two per
+ * country keeps the costliest countries leading the queue while the day still
+ * meets more than one of them. It is a soft cap: a country over its two steps
+ * aside, it is not sent home.
+ */
+export const NEW_PER_COUNTRY = 2
+
+/** The country a meta teaches, read off its own name — catalog metas are named
+ * `Country: clue`, and a name with no prefix is its own country of one.
+ * Trimmed, because the catalogs really do contain both "Russia" and "Russia "
+ * and a cap that counts those separately deals three Russian clues where it
+ * promised two. */
+const metaCountry = (name) => {
+  const i = name.indexOf(':')
+  return (i === -1 ? name : name.slice(0, i)).trim()
+}
+
+/**
+ * Orders the unseen queue by where the player's duels bleed points.
+ *
+ * `weights` maps a catalog country name to one number — the caller's measure
+ * of what that country costs, in practice summed duel points lost to it.
+ * Heaviest country first. Within a country, and across everything at weight
+ * zero, the original ladder order holds (the sort is stable on the incoming
+ * index), so tiers still put a clue's easiest appearance first and a player
+ * with no duel history gets exactly the unweighted scheduler.
+ *
+ * Then the interleave: a country already dealt NEW_PER_COUNTRY new clues in
+ * the rolling day — counting clues introduced earlier today, read off
+ * `firstSeen` the same way the allowance reads it — defers the rest of its
+ * queue until every other country has had its turn. Deferred, not dropped:
+ * the surplus re-queues behind the countries still under the cap, so a day
+ * with allowance left and only one country left still spends it.
+ *
+ * No `weights` means no opinion: the entries come back untouched, in the
+ * ladder order every caller relied on before weights existed.
+ */
+function orderUnseen(entries, cards, weights, now) {
+  if (!weights) return entries
+  const ranked = entries
+    .map((entry, i) => ({ entry, i, w: weights[metaCountry(entry.name)] ?? 0 }))
+    .sort((a, b) => b.w - a.w || a.i - b.i)
+    .map(({ entry }) => entry)
+
+  const moment = now.getTime()
+  const since = moment - ROLLING_DAY_MS
+  const dealt = {}
+  for (const [name, card] of Object.entries(cards ?? {})) {
+    const stamped = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
+    if (!Number.isFinite(stamped) || stamped <= since || stamped > moment) continue
+    const country = metaCountry(name)
+    dealt[country] = (dealt[country] ?? 0) + 1
+  }
+
+  const head = []
+  const overflow = []
+  for (const entry of ranked) {
+    const country = metaCountry(entry.name)
+    if ((dealt[country] ?? 0) < NEW_PER_COUNTRY) {
+      dealt[country] = (dealt[country] ?? 0) + 1
+      head.push(entry)
+    } else overflow.push(entry)
+  }
+  return [...head, ...overflow]
 }
 
 /**
@@ -333,8 +412,10 @@ export function reviewsCompletedToday(cards, now) {
  * them.
  *
  * This is rankDeck's `unseen` group and nothing else: the same unlocked-ladder
- * walk, the same dedupe at a meta's first and easiest appearance, cut at the
- * same allowance. It exists so a dashboard can say what today is about to
+ * walk, the same dedupe at a meta's first and easiest appearance, the same
+ * weighted reorder when the caller passes `opts.newWeights`, cut at the same
+ * allowance. Pass the same weights the deck build gets, or the preview names
+ * clues the deck will not deal. It exists so a dashboard can say what today is about to
  * teach without either building a deck it is not going to play or growing its
  * own copy of the ladder order — a second copy would drift, and a preview that
  * disagrees with the map it is previewing is worse than no preview.
@@ -343,17 +424,14 @@ export function reviewsCompletedToday(cards, now) {
  * new-card budget, usually); zero and a fully-met ladder both give back an
  * empty list, which is the honest answer to "what is next" when nothing is.
  */
-export function nextNewMetas(cards, catalog, limit) {
+export function nextNewMetas(cards, catalog, limit, opts = {}, now = new Date()) {
   const table = cards ?? {}
   const room = Math.max(0, limit ?? 0)
-  const out = []
-  if (!room) return out
-  for (const { name } of unlockedMetas(catalog ?? [], catalog?.length ?? 0)) {
-    if (table[name]) continue
-    out.push(name)
-    if (out.length >= room) break
-  }
-  return out
+  if (!room) return []
+  const unseen = unlockedMetas(catalog ?? [], catalog?.length ?? 0).filter((e) => !table[e.name])
+  return orderUnseen(unseen, table, opts?.newWeights, now)
+    .slice(0, room)
+    .map(({ name }) => name)
 }
 
 /**
@@ -406,7 +484,9 @@ const DEFAULT_LIMIT = 25
  * breaking ties, then unseen metas in ladder order (tier ascending, then
  * catalog order, deduped at a meta's first and easiest appearance) but no more
  * than the day's remaining allowance of them, then not-yet-due cards on the
- * review key. The third group is filler and behaves like it: it only appears
+ * review key. `opts.newWeights` reorders that middle group by country cost —
+ * see orderUnseen — and only that group; what is owed and what is filler never
+ * move for it. The third group is filler and behaves like it: it only appears
  * when the caller asks for more entries than there is real work, and it can
  * never displace the first two. `priority` is the key that ordered a meta
  * inside its own group, exposed so the Worker or a debugging view can see why
@@ -479,7 +559,7 @@ export function rankDeck(cards, catalog, opts = {}, now) {
   due.sort(byPriority)
   future.sort(byPriority)
 
-  const metas = [...due, ...unseen.slice(0, newLimit), ...future]
+  const metas = [...due, ...orderUnseen(unseen, table, opts?.newWeights, now).slice(0, newLimit), ...future]
     .slice(0, limit)
     .map(({ name, mapId, priority, kind }) => ({ name, mapId, priority, kind }))
 

@@ -329,6 +329,58 @@ function Countries({ rows }: { rows: CountryStat[] }) {
   )
 }
 
+/* Where ranked duels actually bleed points, country by country. The deck's
+   new-clue order is built from exactly these numbers, so this list is the
+   dealing order's explanation: the top row is why tomorrow's clues come from
+   where they do. A region is only ever named here when the Worker judged the
+   sample big enough to mean something — a "worst region" seen twice would
+   flip with every game and teach nothing. */
+function Duels({ rows }: { rows: CountryStat[] }) {
+  const [box, W] = useWidth()
+  const max = Math.max(...rows.map((c) => c.duelLost ?? 0), 1)
+  const x0 = 112
+  const w = Math.max(60, W - x0 - 76) // the right gutter holds "21k pts"
+  const k = (v: number) => (v >= 9950 ? `${(v / 1000).toFixed(v >= 99500 ? 0 : 1)}k` : n(v))
+  /* A named region earns its row a second, muted line under the bar — set
+     there, at full row width, because no gutter in a half-column panel is
+     wide enough for "38.9k pts · mostly Krasnoyarsk Krai" beside a near-max
+     bar without the name sailing past the panel edge. */
+  const rowH = (c: CountryStat) => (c.worstRegion ? 45 : 29)
+  const ys = rows.reduce<number[]>((a, c, i) => (a.push(i ? a[i - 1] + rowH(rows[i - 1])! : 2), a), [])
+  const h = ys[rows.length - 1]! + rowH(rows[rows.length - 1]!) + 8
+  return (
+    <div className="fig" ref={box}>
+      {W > 0 && (
+        <svg className="chart" width={W} height={h} viewBox={`0 0 ${W} ${h}`} role="img"
+          aria-label="Points lost in ranked duels, per country">
+          <line className="axis" x1={x0} x2={x0} y1={2} y2={h - 8} />
+          {rows.map((c, i) => {
+            const y = ys[i]!
+            const lost = c.duelLost ?? 0
+            const bw = Math.max(2, (lost / max) * w)
+            return (
+              <g key={c.code}>
+                <text className="lbl" x={x0 - 10} y={y + 18} textAnchor="end">
+                  {clean(c.name).length > 15 ? clean(c.name).slice(0, 14) + '\u2026' : clean(c.name)}
+                </text>
+                <rect x={x0} y={y + 5} width={bw} height={17} rx={2.5} fill={DV[1]} />
+                <text className="tick" x={x0 + bw + 8} y={y + 18}>
+                  {k(lost)} pts
+                </text>
+                {c.worstRegion && (
+                  <text className="sub" x={x0} y={y + 36}>
+                    mostly {clean(c.worstRegion.name)}
+                  </text>
+                )}
+              </g>
+            )
+          })}
+        </svg>
+      )}
+    </div>
+  )
+}
+
 function Scores({ rounds }: { rounds: RoundStat[] }) {
   const [box, W] = useWidth()
   const pts = rounds.filter((r) => r.score !== null).slice(0, 24).reverse()
@@ -654,7 +706,7 @@ function Ladder({ solid, holding, shaky, total }: { solid: number; holding: numb
   )
 }
 
-function Deal({ list, dailyNew }: { list: UpNextMeta[]; dailyNew: number }) {
+function Deal({ list, dailyNew, duelDriven }: { list: UpNextMeta[]; dailyNew: number; duelDriven: boolean }) {
   /* A hand of four fills the shell; ten runs off the end of it. The fade only
      appears when there is genuinely something past the edge, so a full stop
      never gets dressed up as a continuation. */
@@ -679,7 +731,7 @@ function Deal({ list, dailyNew }: { list: UpNextMeta[]; dailyNew: number }) {
       <div className="secHead">
         <h2>New today</h2>
         <span className="secNote">
-          {n(list.length)} of {n(dailyNew)} a day · dealt in ladder order
+          {n(list.length)} of {n(dailyNew)} a day · dealt {duelDriven ? 'where duels cost you' : 'in ladder order'}
         </span>
       </div>
       <ul className={'dealRail' + (more ? ' is-more' : '')} ref={rail}>
@@ -748,6 +800,14 @@ export default function Dashboard() {
   )
   const byRounds = useMemo(
     () => [...(data?.countries ?? [])].sort((a, b) => b.rounds - a.rounds),
+    [data],
+  )
+  const byDuelLoss = useMemo(
+    () =>
+      [...(data?.countries ?? [])]
+        .filter((c) => (c.duelLost ?? 0) > 0)
+        .sort((a, b) => (b.duelLost ?? 0) - (a.duelLost ?? 0))
+        .slice(0, 6),
     [data],
   )
 
@@ -1015,7 +1075,7 @@ export default function Dashboard() {
         </section>
 
         {/* ----------------------------------------------- what today teaches */}
-        {newToday.length > 0 && <Deal list={newToday} dailyNew={dayInfo?.dailyNew ?? newToday.length} />}
+        {newToday.length > 0 && <Deal list={newToday} dailyNew={dayInfo?.dailyNew ?? newToday.length} duelDriven={byDuelLoss.length > 0} />}
         {done && (
           <section className="deal">
             <div className="secHead">
@@ -1174,6 +1234,15 @@ export default function Dashboard() {
                 </header>
                 <div className="body">
                   {byRounds.length === 0 ? <p className="empty">No countries yet.</p> : <Countries rows={byRounds} />}
+                  {byDuelLoss.length > 0 && (
+                    <div className="duels">
+                      <div className="duelHead">
+                        <h3>Where duels cost you</h3>
+                        <span className="note">new clues are dealt from the top of this list</span>
+                      </div>
+                      <Duels rows={byDuelLoss} />
+                    </div>
+                  )}
                 </div>
               </div>
               </div>

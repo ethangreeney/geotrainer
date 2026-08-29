@@ -87,6 +87,16 @@ async function appendTlog(lines) {
 // The full Plonk It scrape lives in the app; the dossier embeds the relevant
 // slice so a coaching session needs no repo lookups to cite real clues.
 const CLUES = JSON.parse(await readFile(join(ROOT, '..', 'src', 'data', 'clues.json'), 'utf8'))
+// Catalog country name → ISO code, same file the Worker bundles, so the
+// laptop's fallback deck ranks its new clues by the same duel losses.
+const META_COUNTRY_CODES = JSON.parse(await readFile(join(ROOT, 'meta-countries.json'), 'utf8'))
+
+const duelWeightsOf = (state) => {
+  const weights = {}
+  for (const [name, cc] of Object.entries(META_COUNTRY_CODES))
+    weights[name] = state.countries?.[cc]?.duelLost ?? 0
+  return weights
+}
 const cluesFor = (cc) =>
   CLUES.filter((c) => c.country === cc).map(({ category, description, notes, source }) => ({
     category,
@@ -748,6 +758,10 @@ async function handleRound(payload) {
   const row = (state.countries[cc] ??= { seen: 0, correctCountry: 0 })
   row.seen += 1
   if (correctCountry) row.correctCountry += 1
+  if (round.mode === 'duel' && Number.isFinite(round.score)) {
+    row.duelSeen = (row.duelSeen ?? 0) + 1
+    row.duelLost = (row.duelLost ?? 0) + (5000 - round.score)
+  }
   if (guessed && !correctCountry) {
     const pair = `${cc}>${guessed.code}`
     state.confusions[pair] = (state.confusions[pair] ?? 0) + 1
@@ -1189,7 +1203,7 @@ const server = createServer(async (req, res) => {
       toLadder(catalogs),
       size,
       now,
-      { dailyNew: DAILY_NEW },
+      { dailyNew: DAILY_NEW, newWeights: duelWeightsOf(state) },
     )
 
     // Not-yet-due metas are this deck's padding: getting one right proves

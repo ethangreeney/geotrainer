@@ -56,19 +56,22 @@ const WEAKEST = [
   { metaName: 'Mongolia: Unique car', seen: 8, correct: 4, lapses: 2, pano: '3jY81kSZFnX2ZatFBPuqgQ', head: 329.2 },
 ].map(({ pano, head, ...m }) => ({ ...m, image: shot(pano, head) }))
 
+/* Duel losses are heaviest where play is frequent AND accuracy is poor —
+   Russia's 38 rounds at 55% cost more than Cambodia's 12 at 25% — and only
+   Brazil and Russia have pooled enough rounds in one region to name it. */
 const COUNTRIES: CountryStat[] = [
-  { code: 'BR', name: 'Brazil', rounds: 61, correct: 47 },
-  { code: 'US', name: 'United States', rounds: 54, correct: 44 },
-  { code: 'JP', name: 'Japan', rounds: 41, correct: 37 },
-  { code: 'RU', name: 'Russia', rounds: 38, correct: 21 },
-  { code: 'ZA', name: 'South Africa', rounds: 33, correct: 19 },
-  { code: 'FR', name: 'France', rounds: 29, correct: 22 },
-  { code: 'ID', name: 'Indonesia', rounds: 26, correct: 11 },
-  { code: 'PL', name: 'Poland', rounds: 24, correct: 13 },
-  { code: 'MX', name: 'Mexico', rounds: 22, correct: 14 },
-  { code: 'TR', name: 'Turkey', rounds: 19, correct: 8 },
-  { code: 'PE', name: 'Peru', rounds: 17, correct: 6 },
-  { code: 'KH', name: 'Cambodia', rounds: 12, correct: 3 },
+  { code: 'BR', name: 'Brazil', rounds: 61, correct: 47, duels: 26, duelLost: 64882, worstRegion: { name: 'Minas Gerais', n: 6, lost: 14200 } },
+  { code: 'US', name: 'United States', rounds: 54, correct: 44, duels: 18, duelLost: 22400, worstRegion: null },
+  { code: 'JP', name: 'Japan', rounds: 41, correct: 37, duels: 9, duelLost: 6100, worstRegion: null },
+  { code: 'RU', name: 'Russia', rounds: 38, correct: 21, duels: 14, duelLost: 38900, worstRegion: { name: 'Krasnoyarsk Krai', n: 5, lost: 11800 } },
+  { code: 'ZA', name: 'South Africa', rounds: 33, correct: 19, duels: 7, duelLost: 12300, worstRegion: null },
+  { code: 'FR', name: 'France', rounds: 29, correct: 22, duels: 5, duelLost: 4100, worstRegion: null },
+  { code: 'ID', name: 'Indonesia', rounds: 26, correct: 11, duels: 6, duelLost: 15800, worstRegion: null },
+  { code: 'PL', name: 'Poland', rounds: 24, correct: 13, duels: 3, duelLost: 5900, worstRegion: null },
+  { code: 'MX', name: 'Mexico', rounds: 22, correct: 14, duels: 4, duelLost: 7300, worstRegion: null },
+  { code: 'TR', name: 'Turkey', rounds: 19, correct: 8, duels: 2, duelLost: 4800, worstRegion: null },
+  { code: 'PE', name: 'Peru', rounds: 17, correct: 6, duels: 2, duelLost: 6200, worstRegion: null },
+  { code: 'KH', name: 'Cambodia', rounds: 12, correct: 3, duels: 1, duelLost: 3400, worstRegion: null },
 ]
 
 /* One reading a day for a fortnight, climbing the way a real one does — up

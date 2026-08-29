@@ -147,8 +147,22 @@ globalThis.fetch = async () => {
 function makeDB(state, rounds = [], account = { token: TOKEN, config: DEFAULT_CONFIG }) {
   const rows = { state: JSON.stringify(state), config: account.config }
   const run = (sql, args) => {
-    // Three queries say FROM rounds and they want three different shapes, so
-    // each is matched on the projection rather than the table.
+    // Four queries say FROM rounds and they want four different shapes, so
+    // each is matched on the projection rather than the table. The region
+    // aggregate is computed for real, because the dashboard's minimum-sample
+    // gate is the thing its tests exist to check.
+    if (sql.includes("'$.answer.region'")) {
+      const agg = new Map()
+      for (const r of rounds) {
+        if (r.mode !== 'duel' || !Number.isFinite(r.score) || !r.answer?.region) continue
+        const key = r.answer.code + '\u0000' + r.answer.region
+        const row = agg.get(key) ?? { cc: r.answer.code, region: r.answer.region, plays: 0, lost: 0 }
+        row.plays += 1
+        row.lost += 5000 - r.score
+        agg.set(key, row)
+      }
+      return [...agg.values()]
+    }
     if (sql.includes('COUNT(*) AS n')) return { n: rounds.length }
     if (sql.includes("json_extract(json, '$.metaName')"))
       return rounds.map((r) => ({
@@ -417,6 +431,28 @@ function history(names) {
 
 /** The live card table those rounds would have left behind: well-learned, so
  * the hero count is above zero and the end of the line has somewhere to land. */
+/** A duelling record: Brazil bleeding in one region often enough to name it,
+ * Colombia's two rounds there staying an anecdote. */
+function duelHistory() {
+  const duel = (i, code, name, region, score) => ({
+    id: 'duel' + i,
+    ts: new Date(Date.now() - (i + 1) * 3600000).toISOString(),
+    mode: 'duel',
+    score,
+    answer: { lat: 0, lng: 0, code, name, region },
+    guess: { lat: 1, lng: 1, name: 'Elsewhere' },
+    correct: false,
+    correctScope: false,
+    metaName: null,
+    distanceKm: 900,
+  })
+  const out = []
+  for (let i = 0; i < 5; i += 1) out.push(duel(i, 'BR', 'Brazil', 'Minas Gerais', 3200))
+  out.push(duel(5, 'CO', 'Colombia', 'Antioquia', 4600))
+  out.push(duel(6, 'CO', 'Colombia', 'Antioquia', 4600))
+  return out
+}
+
 function playedState(names) {
   const deckCards = {}
   const metas = {}
@@ -642,6 +678,23 @@ const out = {
   ),
   dashFresh: await call('/api/dashboard', { headers: auth }),
   dashHistory: await call('/api/dashboard', { headers: auth, state: playedState(dueNames.slice(0, 4)), rounds: history(dueNames.slice(0, 4)) }),
+  // Duels have cost this account most in Russia, then Brazil, then Colombia —
+  // the dashboard must say so and the day's new clues must follow the money.
+  dashDuels: await call('/api/dashboard', {
+    headers: auth,
+    state: {
+      deckCards: {},
+      metas: {},
+      confusions: {},
+      lastDeck: null,
+      countries: {
+        RU: { seen: 8, correctCountry: 3, duelSeen: 6, duelLost: 21000 },
+        BR: { seen: 7, correctCountry: 4, duelSeen: 5, duelLost: 9000 },
+        CO: { seen: 2, correctCountry: 1, duelSeen: 2, duelLost: 800 },
+      },
+    },
+    rounds: duelHistory(),
+  }),
   dashNoToken: await call('/api/dashboard'),
   // The same finished day /status is asked about above, asked of the console
   // instead: nothing owed, the allowance of two already spent an hour ago.
@@ -1246,6 +1299,29 @@ describe('GET /api/dashboard', () => {
     for (let i = 1; i < series.length; i += 1)
       expect(new Date(series[i].t).getTime()).toBeGreaterThan(new Date(series[i - 1].t).getTime())
     for (const point of series) expect(point.held).toBeLessThanOrEqual(R.dashHistory.body.progress.total)
+  })
+
+  it('carries duel cost per country, and names a region only past the sample gate', () => {
+    const rows = Object.fromEntries(R.dashDuels.body.countries.map((c) => [c.code, c]))
+    expect(rows.RU).toMatchObject({ duels: 6, duelLost: 21000, worstRegion: null })
+    expect(rows.BR.duelLost).toBe(9000)
+    expect(rows.BR.worstRegion).toEqual({ name: 'Minas Gerais', n: 5, lost: 9000 })
+    // Two rounds in Antioquia is an anecdote, not an insight.
+    expect(rows.CO.worstRegion).toBe(null)
+  })
+
+  it('deals new clues from the countries duels bleed points in', () => {
+    const next = R.dashDuels.body.day.upNext.map((m) => m.name)
+    // Russia outweighs Brazil outweighs Colombia; two clues per country per
+    // day, then the ladder's own order resumes for everyone unweighted.
+    expect(next.slice(0, 6).map((n) => n.split(':')[0])).toEqual([
+      'Russia',
+      'Russia',
+      'Brazil',
+      'Brazil',
+      'Colombia',
+      'Colombia',
+    ])
   })
 
   it('reports the day beside the deck, not only the deck', () => {

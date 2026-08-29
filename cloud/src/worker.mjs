@@ -47,7 +47,28 @@ import CATALOG_BEGINNER from '../../coach/catalog/66c0d3feff4dbe492e06174e.json'
 import CATALOG_INTERMEDIATE from '../../coach/catalog/67695a0a9c0874b92709eedb.json'
 import CATALOG_WORLD from '../../coach/catalog/66fda2e27e08dc03b5bb3d6e.json'
 
+// Which ISO country each catalog country-name means, worked out once offline
+// by geocoding the catalog's own locations (coach/meta-countries.json). It is
+// what lets a duel loss recorded against a code weight the metas named after
+// the country.
+import META_COUNTRY_CODES from '../../coach/meta-countries.json'
+
 const CATALOGS = [CATALOG_BASICS, CATALOG_BEGINNER, CATALOG_INTERMEDIATE, CATALOG_WORLD]
+
+/**
+ * What each catalog country has cost this player in ranked duels, keyed the
+ * way the scheduler needs it — by the country-name prefix a meta carries.
+ * Points lost is frequency times weakness in one number: a country that comes
+ * up often and goes badly climbs, a country never duelled stays at zero and
+ * keeps its ladder position. Handed to both the deck build and the up-next
+ * preview, always, so the two can never order the queue differently.
+ */
+const duelWeightsOf = (state) => {
+  const weights = {}
+  for (const [name, cc] of Object.entries(META_COUNTRY_CODES))
+    weights[name] = state.countries?.[cc]?.duelLost ?? 0
+  return weights
+}
 
 
 /** Metas whose physical design is shared across countries: any country in the
@@ -914,7 +935,9 @@ async function buildDashboard(env, user) {
   // console can show the clue rather than only name it. The URL is the
   // client's to build (see site/api.ts) — the Worker has no business minting
   // image links it never fetches.
-  const upNext = nextNewMetas(state.deckCards, ladder, day.newAllowance).map(upNextEntry)
+  const upNext = nextNewMetas(state.deckCards, ladder, day.newAllowance, {
+    newWeights: duelWeightsOf(state),
+  }, now).map(upNextEntry)
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
     metaName,
@@ -928,7 +951,7 @@ async function buildDashboard(env, user) {
     .sort((a, b) => pct(a.correct, a.seen) - pct(b.correct, b.seen) || b.seen - a.seen)
     .slice(0, 12)
 
-  const [countRow, roundRows, weakestImages, series] = await Promise.all([
+  const [countRow, roundRows, weakestImages, series, regionRows] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ?').bind(user.id).first(),
     env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT 300')
       .bind(user.id)
@@ -937,7 +960,37 @@ async function buildDashboard(env, user) {
     // carries the picture from its LM card.
     Promise.all(weakest.map((m) => metaImage(env, m.metaName))),
     buildProgress(env, user, state.deckCards, now),
+    // Duel losses by admin-1 region, for the one insight the country tally
+    // cannot give: WHERE inside the country the points go. Aggregated in SQL
+    // because the region only lives in the round JSON, not in state.
+    env.DB.prepare(
+      `SELECT json_extract(json, '$.answer.code') AS cc,
+              json_extract(json, '$.answer.region') AS region,
+              COUNT(*) AS plays,
+              SUM(5000 - json_extract(json, '$.score')) AS lost
+         FROM rounds
+        WHERE user_id = ?
+          AND json_extract(json, '$.mode') = 'duel'
+          AND json_extract(json, '$.score') IS NOT NULL
+          AND json_extract(json, '$.answer.region') IS NOT NULL
+        GROUP BY cc, region`,
+    )
+      .bind(user.id)
+      .all(),
   ])
+
+  // A region is only worth naming once it has been seen enough to mean
+  // something: at one or two rounds "you lose in Minas Gerais" is an anecdote
+  // about a single game, and an insight that flips every session teaches
+  // nothing. Five is the floor; below it the country row simply says nothing.
+  const MIN_REGION_SAMPLE = 5
+  const worstRegionByCode = new Map()
+  for (const row of regionRows?.results ?? []) {
+    if (!row.cc || !row.region || (row.plays ?? 0) < MIN_REGION_SAMPLE) continue
+    const cur = worstRegionByCode.get(row.cc)
+    if (!cur || (row.lost ?? 0) > cur.lost)
+      worstRegionByCode.set(row.cc, { name: row.region, n: row.plays ?? 0, lost: row.lost ?? 0 })
+  }
   const weakestWithImages = weakest.map((m, i) => ({ ...m, image: weakestImages[i] }))
 
   const nameByCode = new Map()
@@ -969,6 +1022,9 @@ async function buildDashboard(env, user) {
         name: countryName(code, nameByCode),
         rounds: c.seen ?? 0,
         correct: c.correctCountry ?? 0,
+        duels: c.duelSeen ?? 0,
+        duelLost: c.duelLost ?? 0,
+        worstRegion: worstRegionByCode.get(code) ?? null,
       }
     })
     .sort((a, b) => b.rounds - a.rounds)
@@ -1102,6 +1158,13 @@ async function handleRound(env, user, payload, ctx) {
   const row = (state.countries[cc] ??= { seen: 0, correctCountry: 0 })
   row.seen += 1
   if (correctCountry) row.correctCountry += 1
+  // Duel rounds carry a score, and 5000 minus it is the points this country
+  // took off the player — the number that decides which countries' clues the
+  // deck introduces first.
+  if (round.mode === 'duel' && Number.isFinite(round.score)) {
+    row.duelSeen = (row.duelSeen ?? 0) + 1
+    row.duelLost = (row.duelLost ?? 0) + (5000 - round.score)
+  }
   if (guessed && !correctCountry) {
     const pair = `${cc}>${guessed.code}`
     state.confusions[pair] = (state.confusions[pair] ?? 0) + 1
@@ -1480,6 +1543,10 @@ async function handleRegeocode(env, user, { dryRun = false } = {}) {
     const tally = (countries[cc] ??= { seen: 0, correctCountry: 0 })
     tally.seen += 1
     if (round.correctCountry) tally.correctCountry += 1
+    if (round.mode === 'duel' && Number.isFinite(round.score)) {
+      tally.duelSeen = (tally.duelSeen ?? 0) + 1
+      tally.duelLost = (tally.duelLost ?? 0) + (5000 - round.score)
+    }
     if (round.guess && !round.correctCountry) {
       const pair = `${cc}>${round.guess.code}`
       confusions[pair] = (confusions[pair] ?? 0) + 1
@@ -1681,7 +1748,7 @@ export default {
           ladderOnce(),
           size,
           now,
-          { dailyNew: dailyNewOf(user.config) },
+          { dailyNew: dailyNewOf(user.config), newWeights: duelWeightsOf(state) },
         )
 
         // Not-yet-due metas are this deck's padding: they only appear when the

@@ -159,6 +159,15 @@ export interface CountryStat {
   name: string
   rounds: number
   correct: number
+  /** Ranked duels this country has appeared in, and the points it took. The
+   * Worker only started tallying these in late August 2026, so both are
+   * optional: an older payload simply has no duel story to tell. */
+  duels?: number
+  duelLost?: number
+  /** The one region inside the country the losses pool in — named only once
+   * the Worker has seen it five times or more, because below that a "worst
+   * region" flips with every game. */
+  worstRegion?: { name: string; n: number; lost: number } | null
 }
 export interface RoundStat {
   id: string
