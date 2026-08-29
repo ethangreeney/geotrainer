@@ -104,6 +104,14 @@ export function gradeRound(cards, round, now) {
   const success = rating !== Rating.Again
   const { card: graded } = scheduler.next(prev ? fromStored(prev) : createEmptyCard(now), now, rating)
 
+  // FSRS's sub-day learning steps (1m, 10m) space cards within an Anki
+  // sitting, where a review is ten seconds. Here a review is a whole round of
+  // GeoGuessr, so that spacing already exists physically — and a card parked
+  // in a ten-minute step reads as not-due and falls off the published map.
+  // Anything scheduled to return today returns now instead; day-scale
+  // intervals pass through untouched.
+  if (graded.due.getTime() - now.getTime() < ROLLING_DAY_MS) graded.due = now
+
   // The moment this meta entered the collection, written once and never
   // rewritten: it is what the daily new-card allowance is counted off, so a
   // re-grade must not look like a fresh introduction. Cards graded before the

@@ -104,6 +104,31 @@ describe('gradeRound', () => {
     expect(after.seen).toBe(4)
   })
 
+  it('brings a sub-day step back due immediately', () => {
+    // FSRS's minute-scale learning steps space cards within an Anki sitting.
+    // Here a review is a whole round, minutes long by itself, so a card
+    // waiting out a ten-minute step is only a card missing from the map. A
+    // miss must be replayable in the very next game.
+    const missed = drill({}, T1[0], false, T0)[T1[0]]
+    expect(new Date(missed.due).getTime()).toBeLessThanOrEqual(T0.getTime())
+
+    // A correct first sighting graduates straight to a days-scale interval —
+    // only the miss was ever parked on a timer.
+    const introduced = drill({}, T1[0], true, T0)[T1[0]]
+    expect(new Date(introduced.due).getTime()).toBeGreaterThan(T0.getTime())
+  })
+
+  it('still lets a graduated card leave for days', () => {
+    // The clamp only flattens today: an interval FSRS wrote in days survives.
+    let cards = {}
+    let at = T0
+    for (let i = 0; i < 3; i++) {
+      cards = drill(cards, T1[0], true, at)
+      at = plus(at, 1)
+    }
+    expect(new Date(cards[T1[0]].due).getTime()).toBeGreaterThan(at.getTime())
+  })
+
   it('serialises to plain JSON so state.json round-trips', () => {
     const cards = drill({}, T1[0], true, T0)
     expect(JSON.parse(JSON.stringify(cards))).toEqual(cards)
