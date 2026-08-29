@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.23.0
+// @version      2.24.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -117,14 +117,22 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.23.0'
+  const BODY_VERSION = '2.24.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
    * posts there is no game-state backstop, so a transient LAN blip would lose
    * the rating for good — retry silently before giving up. */
-  function postRate(id, rating) {
+  function postRate(id, rating, onSaved) {
     const body = JSON.stringify({ id, rating })
+    const saved = (text) => {
+      if (!onSaved) return
+      try {
+        onSaved(JSON.parse(text))
+      } catch {
+        onSaved(null)
+      }
+    }
     const attempt = (retriesLeft) => {
       const failed = (message) => {
         if (retriesLeft > 0) setTimeout(() => attempt(retriesLeft - 1), 1500)
@@ -139,6 +147,7 @@
           timeout: 15000,
           onload: (res) => {
             if (res.status !== 200) toast('Rating not saved (' + res.status + ')', false)
+            else saved(res.responseText)
           },
           onerror: () => failed('Rating not saved — server unreachable'),
           ontimeout: () => failed('Rating not saved — timed out'),
@@ -147,6 +156,7 @@
         fetch(RATE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS }, body })
           .then((res) => {
             if (!res.ok) toast('Rating not saved (' + res.status + ')', false)
+            else res.text().then(saved)
           })
           .catch(() => failed('Rating not saved — server unreachable'))
       }
@@ -164,6 +174,58 @@
     document.body.appendChild(el)
     setTimeout(() => (el.style.opacity = '0'), 2600)
     setTimeout(() => el.remove(), 3100)
+  }
+
+  /** The finish line, made visible: a confetti burst and a short banner.
+   * Callers guard the once-per-crossing rule with doneAnnounced; this only
+   * draws. pointer-events:none throughout — a celebration must never cost a
+   * click — and under reduced motion it falls back to the quiet toast. */
+  // Once per crossing, whichever path notices first: the finishing card, a
+  // manual re-grade, or the post-game rebuild. Resets when work reappears.
+  let doneAnnounced = false
+
+  function celebrateDone() {
+    let reduced = false
+    try {
+      reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
+    } catch {}
+    if (reduced) return toast('GeoCoach: ✓ done for today', true)
+    if (!document.getElementById('gc-fete-anim')) {
+      const st = document.createElement('style')
+      st.id = 'gc-fete-anim'
+      st.textContent =
+        '@keyframes gc-fete-fall{0%{transform:translateY(-5vh) rotate(0)}100%{transform:translateY(105vh) rotate(660deg)}}' +
+        '@keyframes gc-fete-sway{0%,100%{margin-left:0}50%{margin-left:30px}}' +
+        '@keyframes gc-fete-in{0%{opacity:0;transform:translate(-50%,-50%) scale(.72)}55%{opacity:1;transform:translate(-50%,-50%) scale(1.05)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}' +
+        '@keyframes gc-fete-out{to{opacity:0;transform:translate(-50%,-58%) scale(.95)}}'
+      document.head.appendChild(st)
+    }
+    const wrap = document.createElement('div')
+    wrap.style.cssText = 'position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:2147483646'
+    const COLORS = ['#c9f75d', '#97e851', '#7dc4ff', '#4f9ae0', '#ffc76e', '#ff8d7d', '#e8e4f6']
+    for (let i = 0; i < 90; i++) {
+      const p = document.createElement('span')
+      const w = 5 + Math.random() * 5
+      p.style.cssText =
+        `position:absolute;top:0;left:${Math.random() * 100}%;width:${w}px;height:${w * (0.5 + Math.random() * 0.8)}px;` +
+        `background:${COLORS[i % COLORS.length]};border-radius:${Math.random() < 0.3 ? '50%' : '1.5px'};` +
+        `opacity:${0.65 + Math.random() * 0.35};` +
+        `animation:gc-fete-fall ${2.3 + Math.random() * 1.9}s ${Math.random() * 0.8}s cubic-bezier(.25,.4,.45,1) forwards,` +
+        `gc-fete-sway ${0.9 + Math.random() * 0.9}s ease-in-out infinite`
+      wrap.appendChild(p)
+    }
+    const note = document.createElement('div')
+    note.style.cssText =
+      'position:fixed;left:50%;top:42%;transform:translate(-50%,-50%);text-align:center;' +
+      'padding:20px 34px 22px;border-radius:16px;background:rgba(12,5,38,.94);' +
+      'box-shadow:0 12px 40px rgba(5,0,25,.55),inset 0 1px 0 rgba(255,255,255,.09);' +
+      'font-family:system-ui;animation:gc-fete-in .5s cubic-bezier(.34,1.56,.64,1),gc-fete-out .45s ease 3.2s forwards'
+    note.innerHTML =
+      '<div style="font-size:21px;font-weight:800;color:#c9f75d">✓ Done for today</div>' +
+      '<div style="margin-top:7px;font-size:13px;color:#a99fce">Every review cleared. Anything more is free play.</div>'
+    wrap.appendChild(note)
+    document.body.appendChild(wrap)
+    setTimeout(() => wrap.remove(), 5200)
   }
 
   // One send per (game, round), whichever path notices it first.
@@ -1701,7 +1763,32 @@
       const link = foot.querySelector('a')
       if (link) foot.insertBefore(strip.el, link)
       else foot.appendChild(strip.el)
+      // The finishing round crosses the line right here, on its own card.
+      // Celebrate after the bar has had a beat to land on full.
+      const remembered = recallDay()
+      const wasDone = !!(remembered && Date.now() - remembered.ts < DAY_MEMORY_MS && remembered.day && remembered.day.doneForToday)
+      if (day.doneForToday && !wasDone && !doneAnnounced) {
+        doneAnnounced = true
+        setTimeout(celebrateDone, 700)
+      }
       rememberDay(day)
+    }
+    // A manual re-grade changes what today owes; the /rate response carries
+    // the fresh day so the strip can move now, not on the next round.
+    const refreshDay = (res) => {
+      const fresh = res && res.day
+      if (!fresh || typeof fresh.doneForToday !== 'boolean' || !foot.isConnected) return
+      const old = foot.querySelector('.gc-day')
+      if (old) {
+        const next = buildDayStrip(fresh, dayBefore(fresh, recallDay(), Date.now()), reducedMotion)
+        old.replaceWith(next.el)
+        next.play()
+      }
+      if (fresh.doneForToday && !doneAnnounced) {
+        doneAnnounced = true
+        setTimeout(celebrateDone, 700)
+      }
+      rememberDay(fresh)
     }
     el.appendChild(foot)
     // FSRS rating row: the server pre-selects the inferred grade; tapping a
@@ -1751,7 +1838,7 @@
         // A quick overshoot-and-settle on the chosen button — enough motion
         // to confirm the tap without turning the card into a toy.
         b.style.animation = 'gc-pop .3s cubic-bezier(.34,1.56,.64,1)'
-        postRate(card.roundId, b.dataset.rate)
+        postRate(card.roundId, b.dataset.rate, refreshDay)
       })
     }
     // Set by both gestures (move-drag and resize) so the click that fires on
@@ -2702,14 +2789,16 @@
   // game do not keep reading a finished day back. A host that has not landed
   // the allowance yet answers with neither field, and then there is nothing
   // new to say and the old silence is still right.
-  let doneAnnounced = false
   function announceDeck(reason, summary) {
     if (reason === 'game starting') return
     if (!summary || typeof summary.doneForToday !== 'boolean') return
     if (summary.doneForToday) {
       if (doneAnnounced) return
       doneAnnounced = true
-      toast('GeoCoach: ✓ done for today', true)
+      // Arriving already done is old news — a quiet toast. Crossing the line
+      // mid-session is the moment that earned more than a toast.
+      if (reason === 'arrival') toast('GeoCoach: ✓ done for today', true)
+      else celebrateDone()
       return
     }
     doneAnnounced = false

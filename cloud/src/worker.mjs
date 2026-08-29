@@ -1329,7 +1329,12 @@ async function handleRate(env, user, { id, rating }) {
     .bind(JSON.stringify(round), user.id, id)
     .run()
   await saveUserState(env, user.id, state)
-  return { status: 200, body: { ok: true, metaName: snap.metaName, rating } }
+  // The re-grade moves today's numbers; hand the fresh day back so the strip
+  // on screen can move with them instead of waiting for the next round.
+  const now = new Date()
+  const summary = deckSummary(state.deckCards, ladderOnce(), now)
+  const day = dayState(state, user.config, summary, now)
+  return { status: 200, body: { ok: true, metaName: snap.metaName, rating, day } }
 }
 
 // ---------- userscript debug log ----------
