@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.24.0
+// @version      2.25.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -117,7 +117,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.24.0'
+  const BODY_VERSION = '2.25.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
@@ -2244,6 +2244,14 @@
       .catch(() => tlogOnce('myid-err', 'profiles/me unreachable'))
   }
 
+  // GeoGuessr masks a live round's location as 37.82666,-122.42289 (Alcatraz)
+  // until the round is scored. Five rounds of one ranked game were captured
+  // with it before this guard existed.
+  function isRealLocation(pano) {
+    if (typeof pano.lat !== 'number' || typeof pano.lng !== 'number') return false
+    return Math.abs(pano.lat - 37.82666) > 1e-4 || Math.abs(pano.lng + 122.42289) > 1e-4
+  }
+
   function handleDuelState(d) {
     if (!d) return // a failed fetch, already logged where it happened
     if (!d.gameId || !Array.isArray(d.rounds) || !Array.isArray(d.teams)) {
@@ -2264,6 +2272,15 @@
         for (const guess of pl.guesses || []) {
           const round = d.rounds.find((r) => r.roundNumber === guess.roundNumber)
           if (!round || !round.panorama) continue
+          // Until a round ends, the state hides its true location behind a
+          // fixed placeholder (Alcatraz) — the panoId is real but the coords
+          // are not. Posting that frame would grade the round against San
+          // Francisco, so wait: a later frame carries the real coordinates,
+          // and post()'s dedupe hasn't claimed the key yet.
+          if (!isRealLocation(round.panorama)) {
+            tlogOnce('duel-placeholder:' + d.gameId + ':' + guess.roundNumber, 'round ' + guess.roundNumber + ' still masked by the location placeholder — deferring capture')
+            continue
+          }
           const pid = round.panorama.panoId
           post(`${d.gameId}:${guess.roundNumber}:duel`, {
             token: `${d.gameId}:duel`,

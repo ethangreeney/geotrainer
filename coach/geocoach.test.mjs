@@ -1936,6 +1936,26 @@ describe('live duels are captured from the socket', () => {
     expect(d.posted).toHaveLength(0)
   })
 
+  it('defers a round whose location is still the Alcatraz placeholder', async () => {
+    // GeoGuessr masks a live round's true location as 37.82666,-122.42289
+    // until it is scored. Five rounds of one ranked game were graded against
+    // San Francisco because the first frame after a guess won post()'s dedupe.
+    const masked = duelState(GAME, 2)
+    masked.rounds[1].panorama.lat = 37.82666
+    masked.rounds[1].panorama.lng = -122.42289
+    const d = makeDuels({ states: { [GAME]: masked } })
+    d.onSocket({ url: `wss://x/${GAME}`, socket: d.socket })
+    d.pollDuel()
+    await flush()
+    expect(d.posted.map((p) => p.key)).toEqual([`${GAME}:1:duel`]) // round 2 held back
+    masked.rounds[1].panorama.lat = 48.2
+    masked.rounds[1].panorama.lng = 16.4
+    d.pollDuel()
+    await flush()
+    expect(d.posted.map((p) => p.key)).toEqual([`${GAME}:1:duel`, `${GAME}:1:duel`, `${GAME}:2:duel`])
+    expect(d.posted.at(-1).payload.location.lat).toBe(48.2)
+  })
+
   it('retries a wrong id three times, then never again', async () => {
     // Three, not one: the duels endpoint 404s mid-round even for the real
     // game, so a single failed probe must not strike a candidate off for good.
