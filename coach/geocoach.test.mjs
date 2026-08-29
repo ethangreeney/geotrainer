@@ -1911,16 +1911,39 @@ describe('live duels are captured from the socket', () => {
     ])
   })
 
-  it('tries a wrong id once and never again', async () => {
+  it('captures from a state frame on the socket, with no HTTP at all', async () => {
+    // The fix for mid-match capture: the duels endpoint 404s while a round is
+    // in play, but the round results ride the socket as JSON frames — often
+    // with the state nested as JSON-in-a-string. Reading those is what makes
+    // capture live rather than post-mortem.
+    const d = makeDuels({ states: {} })
+    d.onSocket({ url: 'wss://gs2.geoguessr.com/ws', socket: d.socket })
+    d.frame(JSON.stringify({ topic: 'game', payload: JSON.stringify(duelState(GAME, 1)) }))
+    await flush()
+    expect(d.posted.map((p) => p.key)).toEqual([`${GAME}:1:duel`])
+    expect(d.fetched).toHaveLength(0)
+    d.frame(JSON.stringify({ topic: 'game', payload: JSON.stringify(duelState(GAME, 2)) }))
+    await flush()
+    expect(d.posted.map((p) => p.key)).toEqual([`${GAME}:1:duel`, `${GAME}:1:duel`, `${GAME}:2:duel`])
+  })
+
+  it('ignores frames that merely mention gameId without carrying a state', async () => {
+    const d = makeDuels({ states: {} })
+    d.onSocket({ url: 'wss://gs2.geoguessr.com/ws', socket: d.socket })
+    d.frame(JSON.stringify({ chat: 'my gameId is cool', gameId: GAME }))
+    d.frame('not json at all gameId')
+    await flush()
+    expect(d.posted).toHaveLength(0)
+  })
+
+  it('retries a wrong id three times, then never again', async () => {
+    // Three, not one: the duels endpoint 404s mid-round even for the real
+    // game, so a single failed probe must not strike a candidate off for good.
     const junk = '0123456789abcdef01234567'
     const d = makeDuels({ states: {} })
     d.onSocket({ url: `wss://x/${junk}`, socket: d.socket })
-    d.pollDuel()
-    await flush()
-    d.pollDuel()
-    d.pollDuel()
-    await flush()
-    expect(d.fetched.filter((u) => u.includes(junk))).toHaveLength(1)
+    for (let i = 0; i < 5; i++) { d.pollDuel(); await flush() }
+    expect(d.fetched.filter((u) => u.includes(junk))).toHaveLength(3)
   })
 
   it('spends at most one request a tick however many ids go past', async () => {

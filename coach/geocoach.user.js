@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.20.0
+// @version      2.21.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -117,7 +117,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.20.0'
+  const BODY_VERSION = '2.21.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
@@ -1762,7 +1762,11 @@
   // changes shape. So none of them are trusted — each is simply tried once
   // against the duels endpoint, and the one that answers with a state we
   // appear in is the game. Wrong guesses cost a single 404 and are struck off.
-  const duelCandidates = new Map() // id -> 'new' | 'done'
+  const duelCandidates = new Map() // id -> attempts so far, or 'done' once proven
+  // Three tries, not one: the duels endpoint has been seen answering at game
+  // start and at game end but 404ing mid-round, so a single 404 can strike
+  // off the real game if the probe lands while a round is being played.
+  const CANDIDATE_TRIES = 3
   const DUEL_ID = /[0-9a-f]{24}/gi
   const CANDIDATE_CAP = 40 // a page spraying more ids than this is not a duel
 
@@ -1776,7 +1780,7 @@
       // the poll alive; without this the 30min window would expire mid-match.
       if (lastDuelId && id === String(lastDuelId).toLowerCase()) { lastDuelSeen = Date.now(); continue }
       if (duelCandidates.has(id) || duelCandidates.size >= CANDIDATE_CAP) continue
-      duelCandidates.set(id, 'new')
+      duelCandidates.set(id, 0)
       tlogOnce('duel-cand:' + id, 'candidate duel id ' + id + ' overheard on socket')
     }
   }
@@ -1790,10 +1794,46 @@
     noteDuelId(rec.url)
     try {
       rec.socket.addEventListener('message', (ev) => {
-        if (typeof ev.data !== 'string' || ev.data.length > 65536) return
-        noteDuelId(ev.data)
+        if (typeof ev.data !== 'string') return
+        if (ev.data.length <= 65536) noteDuelId(ev.data)
+        if (ev.data.length <= 524288) tryDuelFrame(ev.data)
       })
     } catch {}
+  }
+
+  /** The state itself rides the same socket the ids were overheard on: round
+   *  results arrive as JSON frames, usually with the full game state nested a
+   *  level or two down (sometimes as JSON-in-a-string). Reading it here is
+   *  what makes capture live — the duels endpoint 404s mid-round, so HTTP can
+   *  only ever tell the story after it has ended. handleDuelState and post()
+   *  both dedupe, so feeding every frame through costs nothing. */
+  function findDuelState(node, depth) {
+    if (!node || depth > 6) return null
+    if (typeof node === 'string') {
+      const t = node.trim()
+      if (t.length < 40 || (t[0] !== '{' && t[0] !== '[') || t.indexOf('gameId') === -1) return null
+      try { return findDuelState(JSON.parse(t), depth + 1) } catch { return null }
+    }
+    if (typeof node !== 'object') return null
+    if (node.gameId && Array.isArray(node.rounds) && Array.isArray(node.teams)) return node
+    for (const k in node) {
+      const hit = findDuelState(node[k], depth + 1)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  function tryDuelFrame(text) {
+    if (text.indexOf('gameId') === -1) return // cheap gate — state frames all name it
+    let msg
+    try { msg = JSON.parse(text) } catch { return }
+    const d = findDuelState(msg, 0)
+    if (!d) return
+    if (!myId) resolveMyId() // frames can beat the first poll tick to it
+    lastDuelId = d.gameId
+    lastDuelSeen = Date.now()
+    tlogOnce('duel-frame:' + d.gameId, 'duel ' + d.gameId + ' state read off the socket — capturing live')
+    handleDuelState(d)
   }
   function resolveMyId() {
     // The account id ships in every page's Next.js payload — synchronous, no
@@ -1831,7 +1871,7 @@
       for (const pl of team.players || []) {
         ids.push(pl.playerId)
         if (pl.playerId !== myId) continue
-        tlogOnce('duel-hit:' + d.gameId, 'duel ' + d.gameId + ': me found, ' + (pl.guesses || []).length + ' guess(es)')
+        tlogOnce('duel-hit:' + d.gameId + ':' + (pl.guesses || []).length, 'duel ' + d.gameId + ': me found, ' + (pl.guesses || []).length + ' guess(es)')
         for (const guess of pl.guesses || []) {
           const round = d.rounds.find((r) => r.roundNumber === guess.roundNumber)
           if (!round || !round.panorama) continue
@@ -1879,11 +1919,12 @@
    *  its 30min tail, and the new game overtakes it as soon as it names itself. */
   function proveCandidate() {
     let pick = null
-    for (const [id, state] of duelCandidates) if (state === 'new') { pick = id; break }
+    for (const [id, state] of duelCandidates) if (typeof state === 'number' && state < CANDIDATE_TRIES) { pick = id; break }
     if (!pick) return
-    duelCandidates.set(pick, 'done') // tried once, either way
+    duelCandidates.set(pick, duelCandidates.get(pick) + 1)
     fetchDuel(pick).then((d) => {
       if (!d || !d.gameId || !Array.isArray(d.teams)) return
+      duelCandidates.set(pick, 'done')
       lastDuelId = d.gameId
       lastDuelSeen = Date.now()
       tlog('live duel ' + d.gameId + ' found on the socket — capturing as it plays')
