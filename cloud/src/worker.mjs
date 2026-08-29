@@ -33,14 +33,6 @@ import { loadPack, locate } from '../../coach/geo/locate.mjs'
 // implementations were kept in step by hand.
 import { loadMergedPack, norm, scopeOutline } from '../../coach/geo/outline.mjs'
 import { LODS, clipGeometry, countVertices, simplifyAt } from '../../coach/geo/shape.mjs'
-// Boundary packs, built by coach/geo/pack.mjs from the same geoBoundaries
-// slices the result-map overlay draws.
-import COUNTRY_PACK from '../../coach/geo/pack/admin0.bin'
-import REGION_PACK from '../../coach/geo/pack/admin1.bin'
-// The dissolved multi-region scopes, so "Paraná + Santa Catarina + Rio Grande
-// do Sul" draws as one outline instead of three with their shared borders
-// stroked down the middle.
-import MERGED_PACK from '../../coach/geo/pack/merged.bin'
 // The userscript source, bundled as text (see the "rules" entry in
 // wrangler.jsonc) so GET /geocoach.user.js can stamp a user's credentials in.
 // The loader is what Tampermonkey installs; it fetches the body fresh on every
@@ -133,9 +125,33 @@ function inMetaScope(metaName, guessRegions) {
 // third-party lookup. It used to — BigDataCloud's free endpoint is browser-only
 // and answers a Worker with 402, which is why every round captured here
 // recorded itself as "??". Catalogs are bundled too (CATALOGS above).
+// The packs themselves are data, not code. They used to be imported into the
+// script, but the finer 2026-08 build is ~9 MB gzipped against the free plan's
+// 3 MiB script cap — so they live in the assets store beside the site
+// (build:site copies them to dist-site/geo/) and are fetched once per isolate.
+// The test runner has no assets store and hands them over on globalThis
+// instead (see cloud/worker.test.mjs).
+let bins = null
+let binsLoading = null
+async function ensureBins(env) {
+  bins ??= globalThis.GEO_BINS ?? null
+  if (bins) return
+  binsLoading ??= Promise.all(
+    ['admin0', 'admin1', 'merged'].map(async (name) => {
+      const res = await env.ASSETS.fetch('https://assets.local/geo/' + name + '.bin')
+      if (!res.ok) throw new Error('boundary pack missing from assets: ' + name + '.bin')
+      return res.arrayBuffer()
+    }),
+  ).then(([admin0, admin1, merged]) => {
+    bins = { admin0, admin1, merged }
+  })
+  await binsLoading
+}
+
 let packs = null
 const boundaries = () => {
-  packs ??= { country: loadPack(COUNTRY_PACK), region: loadPack(REGION_PACK) }
+  if (!bins) throw new Error('boundary packs not loaded — await ensureBins first')
+  packs ??= { country: loadPack(bins.admin0), region: loadPack(bins.admin1) }
   return packs
 }
 
@@ -339,7 +355,7 @@ async function metaImage(env, metaName) {
 let mergedPack = null
 function outlinePacks() {
   const { country, region } = boundaries()
-  mergedPack ??= loadMergedPack(MERGED_PACK)
+  mergedPack ??= loadMergedPack(bins.merged)
   return { country, region, merged: mergedPack }
 }
 
@@ -1005,6 +1021,7 @@ const pendingWrites = new Set()
 
 async function handleRound(env, user, payload, ctx) {
   const t0 = Date.now()
+  await ensureBins(env) // grading reverse-geocodes both ends of the guess
   const since = (from) => Date.now() - from
   const { location, mapId, roundNumber, score, source } = payload
   const dupKey = payload.token
@@ -1426,6 +1443,7 @@ async function overRoundLimit(env, userId) {
  * again.
  */
 async function handleRegeocode(env, user, { dryRun = false } = {}) {
+  await ensureBins(env)
   const rows = await env.DB.prepare('SELECT id, json FROM rounds WHERE user_id = ? ORDER BY ts')
     .bind(user.id)
     .all()
@@ -1558,6 +1576,7 @@ export default {
       //   /api/scope-geo?country=ES[&regions=Cataluña|Aragón][&lod=0][&box=w,s,e,n]
       // Parameters and response are coach/server.mjs's, field for field.
       if (request.method === 'GET' && path === '/api/scope-geo') {
+        await ensureBins(env)
         const country = (url.searchParams.get('country') ?? '').trim()
         if (!/^[A-Za-z]{2}$/.test(country))
           return cachedJson({ ok: false, error: 'country must be an ISO 3166-1 alpha-2 code' }, 400)
@@ -1584,6 +1603,7 @@ export default {
       // before the card needs it.
       //   /api/scope-for-pano?pano=<panoId>
       if (request.method === 'GET' && path === '/api/scope-for-pano') {
+        await ensureBins(env)
         const scope = scopeForPano((url.searchParams.get('pano') ?? '').trim())
         // A hit is a fact about a bundled catalog and cannot change until the
         // next deploy, so it caches; a miss might be a catalog not yet

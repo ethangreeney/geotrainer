@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "build:site": "vite build --config site/vite.config.ts",
+    "build:site": "vite build --config site/vite.config.ts && mkdir -p dist-site/geo && cp coach/geo/pack/*.bin dist-site/geo/",
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run"

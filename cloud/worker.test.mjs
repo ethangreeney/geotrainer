@@ -120,6 +120,16 @@ import { readFileSync } from 'node:fs'
 import worker from ${JSON.stringify(join(ROOT, 'cloud/src/worker.mjs'))}
 
 const ROOT = ${JSON.stringify(ROOT)}
+
+// The Worker no longer bundles the boundary packs (they outgrew the free
+// plan's script cap and moved to the assets store); outside workerd there is
+// no assets store, so the runner hands the bins over directly.
+const abin = (name) => {
+  const b = readFileSync(ROOT + 'coach/geo/pack/' + name + '.bin')
+  return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
+}
+globalThis.GEO_BINS = { admin0: abin('admin0'), admin1: abin('admin1'), merged: abin('merged') }
+
 const TOKEN = ${JSON.stringify(TOKEN)}
 const TOKENS = ${JSON.stringify(TOKENS)}
 
