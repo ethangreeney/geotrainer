@@ -15,7 +15,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { loadPack, locate } from './locate.mjs'
+import { loadPack, locate, locateAll } from './locate.mjs'
 import {
   DROP_TOLS,
   LODS,
@@ -874,6 +874,24 @@ describe('offline reverse geocoding', () => {
       .filter(([, named]) => Array.isArray(named) && !named.some((n) => known.has(normRegion(n))))
       .map(([meta]) => meta)
     expect(ungradeable, 'metas whose scope no shape answers to').toEqual([])
+  })
+
+  /**
+   * A pack can hold the same ground twice — the UK carries Scotland and the
+   * council areas that tile it. `locate` keeps the smallest shape, so a
+   * Scottish pin answered "Highland" and a scope written "Scotland" could
+   * never match anywhere: the card graded Again on a pin dropped on the exact
+   * answer. Grading reads `locateAll` now, which owns up to every shape under
+   * the point, coarse levels included.
+   */
+  it.runIf(built && !!regions)('answers to the coarse name as well as the fine one', () => {
+    const under = locateAll(regions, 57.4303, -5.5948).flatMap((f) => f.names)
+    expect(under).toContain('Highland')
+    expect(under).toContain('Scotland')
+    // Smallest first, so a display name stays the specific one.
+    expect(locateAll(regions, 57.4303, -5.5948)[0].names).toContain('Highland')
+    // Where nothing nests, it is locate() in a list.
+    expect(locateAll(regions, -33.8688, 151.2093).map((f) => f.name)).toEqual(['New South Wales'])
   })
 
   it.runIf(built && !!regions)('knows the province under the name its scope uses', () => {

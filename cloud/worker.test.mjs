@@ -55,6 +55,7 @@ const TOKENS = {
   roundLast: 'test-token-round-last-0001',
   roundDuel: 'test-token-round-duel-0001',
   roundRepeat: 'test-token-round-repeat-01',
+  roundScotland: 'test-token-round-scotland-1',
 }
 
 describe('worker source', () => {
@@ -766,6 +767,22 @@ const out = {
     state: learningStepReturned(),
     payload: roundPayload({ token: 'game-repeat', roundNumber: 1 }),
   }),
+  // A region-scoped card, called to the right country but the wrong council
+  // area. The scope says "Scotland"; the pack names the ground "Highland" and
+  // "Perthshire and Kinross". Both are Scotland, and the grade must say so —
+  // for months it did not, and the card marked Again on pins dropped on the
+  // exact answer.
+  roundScotland: await call('/round', {
+    method: 'POST',
+    headers: authFor(TOKENS.roundScotland),
+    token: TOKENS.roundScotland,
+    payload: roundPayload({
+      token: 'game-scotland',
+      roundNumber: 1,
+      location: { lat: 58.543945, lng: -3.5495791, panoId: '3xJA8oSTv51p0MAzac3LMw' },
+      guess: { lat: 56.76122, lng: -3.945404 },
+    }),
+  }),
   // A duel: no clue card at all, and the day must still come back.
   roundDuel: await call('/round', {
     method: 'POST',
@@ -1214,6 +1231,14 @@ describe('POST /round reports the day', () => {
     expect(day.dailyNew).toBe(2)
     expect(day.newAllowance).toBe(0)
     expect(day.doneForToday).toBe(true)
+  })
+
+  it('grades a Scottish guess inside a Scotland scope', () => {
+    // The pin and the answer sit in different council areas, but both are
+    // Scotland, which is all the scope asks. correct here is correctScope.
+    const card = R.roundScotland.body.card
+    expect(card.metaName).toBe('United Kingdom: Scottish passing place signs')
+    expect(card.correct).toBe(true)
   })
 
   it('reports the day on a round that gets no card', () => {

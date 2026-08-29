@@ -144,6 +144,27 @@ const toBoundary = (f, x, y, kx, limit) => {
 const OFFSHORE = 0.35
 
 /**
+ * Every feature containing `lat,lng`, smallest first — or, when nothing
+ * contains it, whatever `locate` falls back to, alone.
+ *
+ * A pack can hold the same ground at two granularities: the UK carries both
+ * Scotland and the council areas that tile it. `locate` keeps only the
+ * smallest shape, which is right for "where is this?" but wrong for "is this
+ * in Scotland?" — a scope written at the coarser level would never match
+ * anywhere. Grading reads this instead, so a pin answers to every name the
+ * ground under it goes by.
+ */
+export function locateAll(pack, lat, lng) {
+  if (!pack || !Number.isFinite(lat) || !Number.isFinite(lng)) return []
+  const x = Math.round(lng * pack.scale)
+  const y = Math.round(lat * pack.scale)
+  const hits = pack.features.filter((f) => covers(f, x, y))
+  if (hits.length) return hits.sort((a, b) => a.extent - b.extent)
+  const near = locate(pack, lat, lng)
+  return near ? [near] : []
+}
+
+/**
  * The feature containing `lat,lng`, or the nearest coastline within OFFSHORE.
  *
  * Containment is strict and is tried first, so a point genuinely inside a

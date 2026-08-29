@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { saveRoundTiles } from './pano.mjs'
 import { countryCode, countryShape, geoReady, lodFor, regionShapes } from './geo/resolve.mjs'
-import { loadPack, locate } from './geo/locate.mjs'
+import { loadPack, locate, locateAll } from './geo/locate.mjs'
 import { COUNTRY_PACK, REGION_PACK } from './geo/pack.mjs'
 import { clipGeometry } from './geo/shape.mjs'
 import { buildRankedDeck, deckSizeFor, metaKeyOf } from './deck.mjs'
@@ -258,15 +258,15 @@ function countryOf(lat, lng) {
   const { country, region } = boundaries()
   const hit = country && locate(country, lat, lng)
   if (!hit) return { code: '??', name: 'unknown', region: '', regionNames: [], locality: '' }
-  const sub = region && locate(region, lat, lng)
+  const subs = region ? locateAll(region, lat, lng) : []
   return {
     code: hit.code,
     name: hit.name,
-    region: sub?.name || '',
-    // Every spelling the boundary knows. A scope is written in one of them and
-    // the round records only the first, so the grade reads this and the stored
-    // round drops it.
-    regionNames: sub?.names ?? [],
+    region: subs[0]?.name || '',
+    // Every spelling of every shape under the pin, coarse levels included —
+    // "Highland" is also "Scotland", and a scope may be written at either
+    // level. The grade reads this and the stored round drops it.
+    regionNames: subs.flatMap((f) => f.names),
     locality: '',
   }
 }

@@ -27,7 +27,7 @@ import {
 } from '../../coach/scheduler.mjs'
 import { buildRankedDeck, deckSizeFor, metaKeyOf } from '../../coach/deck.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
-import { loadPack, locate } from '../../coach/geo/locate.mjs'
+import { loadPack, locate, locateAll } from '../../coach/geo/locate.mjs'
 // The result-map overlay's geometry. Both modules are pure — no `node:`
 // anything, no fs, no network — which is the whole reason they are modules
 // rather than inlined halves of coach/server.mjs: the laptop and the Worker
@@ -187,15 +187,16 @@ function countryOf(lat, lng) {
   const { country, region } = boundaries()
   const hit = locate(country, lat, lng)
   if (!hit) return { code: '??', name: 'unknown', region: '', regionNames: [], locality: '' }
-  const sub = locate(region, lat, lng)
+  const subs = locateAll(region, lat, lng)
   return {
     code: hit.code,
     name: hit.name,
-    region: sub?.name ?? '',
-    // Every spelling the boundary knows, because a scope is written in one of
-    // them and the round only records the first. Stripped before the round is
-    // stored: it is scaffolding for the grade, not part of the history.
-    regionNames: sub?.names ?? [],
+    region: subs[0]?.name ?? '',
+    // Every spelling of every shape under the pin, coarse levels included —
+    // "Highland" is also "Scotland", and a scope may be written at either
+    // level. Stripped before the round is stored: it is scaffolding for the
+    // grade, not part of the history.
+    regionNames: subs.flatMap((f) => f.names),
     locality: '',
   }
 }
