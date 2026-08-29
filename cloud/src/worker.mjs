@@ -795,6 +795,24 @@ function parseDailyNew(raw) {
 const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_NEW
 
 /**
+ * The player's timezone, as minutes east of UTC, so "today" can start at 4am
+ * on their clock rather than the Worker's (which is UTC and nobody's).
+ *
+ * Nothing to configure: the userscript reports its browser's offset with
+ * every round it posts, and handleRound stores it when it changes — DST and
+ * travel included. The range covers the real world's offsets (UTC-12 to
+ * UTC+14). The fallback for a config that predates the field is the founding
+ * player's home (NZST); it is corrected by the first round posted.
+ */
+const DEFAULT_TZ_OFFSET = 720
+function parseTzOffset(raw) {
+  if (typeof raw !== 'number') return null
+  const n = Math.trunc(raw)
+  return Number.isFinite(n) && n >= -720 && n <= 840 ? n : null
+}
+const tzOffsetOf = (config) => parseTzOffset(config?.tzOffset) ?? DEFAULT_TZ_OFFSET
+
+/**
  * The session, as a number of things done against a number of things to do.
  *
  * One function because there is one day. /status, the console and the card at
@@ -803,9 +821,10 @@ const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_
  * console afterwards — so a second copy of this arithmetic would not be a
  * duplicate, it would be a contradiction the player watches happen.
  *
- * Both halves are counted off the scheduler's own rolling window and its own
- * distinction between a review and an introduction (see reviewsCompletedToday),
- * so nothing here decides what "today" means; it only reports it.
+ * Both halves are counted off the scheduler's own day boundary — 4am in the
+ * player's timezone — and its own distinction between a review and an
+ * introduction (see reviewsCompletedToday), so nothing here decides what
+ * "today" means; it only reports it.
  *
  * `reviewsDone + reviewsDue` is the day's review load and `newIntroduced +
  * newAllowance` is its new-material load, which is what makes each pair a bar
@@ -815,10 +834,11 @@ const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_
 function dayState(state, config, summary, now) {
   const cards = state.deckCards
   const dailyNew = dailyNewOf(config)
-  const newIntroduced = newIntroducedToday(cards, now)
+  const tz = tzOffsetOf(config)
+  const newIntroduced = newIntroducedToday(cards, now, tz)
   const newAllowance = Math.max(0, dailyNew - newIntroduced)
   return {
-    reviewsDone: reviewsCompletedToday(cards, now) + repeatReviewsToday(state.reviewLog, now),
+    reviewsDone: reviewsCompletedToday(cards, now, tz) + repeatReviewsToday(state.reviewLog, now, tz),
     reviewsDue: summary.due,
     newIntroduced,
     dailyNew,
@@ -941,6 +961,7 @@ async function buildDashboard(env, user) {
   // image links it never fetches.
   const upNext = nextNewMetas(state.deckCards, ladder, day.newAllowance, {
     newWeights: duelWeightsOf(state),
+    tzOffset: tzOffsetOf(user.config),
   }, now).map(upNextEntry)
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
@@ -1081,6 +1102,15 @@ const pendingWrites = new Set()
 
 async function handleRound(env, user, payload, ctx) {
   const t0 = Date.now()
+  // The userscript stamps every round with its browser's UTC offset; when it
+  // moves (DST, travel, a new player's first round) the config follows, and
+  // with it where this user's 4am day boundary falls. Off the response path —
+  // this round's day readout is already computed with the fresh value.
+  const tzReported = parseTzOffset(payload?.tz)
+  if (tzReported !== null && tzReported !== parseTzOffset(user.config.tzOffset)) {
+    user.config = { ...user.config, tzOffset: tzReported }
+    ctx.waitUntil(setConfig(env, user, { tzOffset: tzReported }))
+  }
   await ensureBins(env) // grading reverse-geocodes both ends of the guess
   const since = (from) => Date.now() - from
   const { location, mapId, roundNumber, score, source } = payload
@@ -1221,7 +1251,7 @@ async function handleRound(env, user, payload, ctx) {
     if (!(isPadding && correctScope)) {
       // Before the stamp moves: a second answer today on this card is work the
       // distinct-card count can't see, so it is logged here or nowhere.
-      state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[metaName], now)
+      state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[metaName], now, tzOffsetOf(user.config))
       state.deckCards = gradeRound(state.deckCards, { metaName, correct: credited }, now)
     }
   }
@@ -1760,7 +1790,7 @@ export default {
           ladderOnce(),
           size,
           now,
-          { dailyNew: dailyNewOf(user.config), newWeights: duelWeightsOf(state) },
+          { dailyNew: dailyNewOf(user.config), newWeights: duelWeightsOf(state), tzOffset: tzOffsetOf(user.config) },
         )
 
         // Not-yet-due metas are this deck's padding: they only appear when the

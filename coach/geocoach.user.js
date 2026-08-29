@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoCoach bridge
 // @description  Spaced repetition for GeoGuessr: captures every round, shows the meta you missed, and rebuilds your trainer map from what's due.
-// @version      2.25.0
+// @version      2.26.0
 // @author       Ethan + Claude
 // @match        https://www.geoguessr.com/*
 // @run-at       document-start
@@ -117,7 +117,7 @@
   // Kept equal to @version above by a test — the log line is how a machine we
   // are not sitting at says which body it is actually running, and a stale
   // literal here sends the reader looking for a bug that was fixed hours ago.
-  const BODY_VERSION = '2.25.0'
+  const BODY_VERSION = '2.26.0'
   tlog('body ' + BODY_VERSION + ' up — GM=' + typeof GM_xmlhttpRequest + ' cloud=' + !!CLOUD)
 
   /** Fire-and-forget rating override; only failures surface. Unlike round
@@ -1959,7 +1959,9 @@
     sent.add(key)
     const tPost = Date.now()
     tlog('post ' + key + ' → ' + COACH_URL)
-    const body = JSON.stringify(payload)
+    // The browser's UTC offset rides along so the server knows where this
+    // player's day rolls over (4am local); the cloud stores it per user.
+    const body = JSON.stringify({ ...payload, tz: -new Date().getTimezoneOffset() })
     // Success is silent — the card (or its absence) is the signal. Only
     // failures toast, since those need acting on.
     const accepted = (j) => {

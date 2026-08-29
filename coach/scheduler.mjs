@@ -268,33 +268,46 @@ export function buildDeck(cards, catalog, opts = {}, now) {
  */
 export const DEFAULT_DAILY_NEW = 10
 
-/**
- * The width of "today", and the reason it is a rolling window rather than a date.
- *
- * A calendar day needs a timezone and there is no honest one to choose here:
- * the Worker runs in UTC while the player is in New Zealand, so a UTC midnight
- * lands mid-afternoon for them and would cut a single sitting in half, handing
- * out a second full allowance in the middle of it. Twenty-four hours ending at
- * `now` needs no timezone at all, and unlike a fixed boundary it cannot be
- * gamed by front-loading — spending the day's new metas at five to midnight
- * does not buy another ten at five past.
- */
 const ROLLING_DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Where "today" begins: the most recent 4am in the player's own timezone.
+ *
+ * This replaced a rolling 24-hour window. The window needed no timezone and
+ * could not be double-dipped at midnight, but it made the allowance replenish
+ * at whatever times yesterday was played — ten metas learned at 9pm locked
+ * new material out of the next morning entirely, so play time only ever
+ * ratcheted later. A fixed boundary gives the habit a rhythm instead: every
+ * morning, the full allowance.
+ *
+ * Four, not midnight, for Anki's reason — a session running past 12am is one
+ * sitting, and a midnight boundary would hand it a second full allowance in
+ * the middle. Nobody starts a fresh day at 3am.
+ *
+ * `tzOffsetMin` is minutes east of UTC (NZ winters are +720). It defaults to
+ * the host's own clock, which on the laptop IS the player's timezone; the
+ * Worker runs in UTC and must pass the offset the userscript reported.
+ */
+export const DAY_ROLLOVER_HOUR = 4
+
+export function dayStartMs(now, tzOffsetMin = -now.getTimezoneOffset()) {
+  const shift = (tzOffsetMin - DAY_ROLLOVER_HOUR * 60) * 60 * 1000
+  return Math.floor((now.getTime() + shift) / ROLLING_DAY_MS) * ROLLING_DAY_MS - shift
+}
 
 /**
  * How much of today's allowance has already been spent.
  *
- * Counts the cards whose `firstSeen` stamp falls inside the rolling day ending
- * at `now`. Cards with no stamp — everything introduced before that field
- * existed — count as not-today, which is both the truthful reading (they were
- * introduced at some unknown past date, almost certainly not in the last
- * twenty-four hours) and the only safe one: treating an unstamped table as
- * today's work would zero the allowance on the day this shipped and stop new
- * material dead.
+ * Counts the cards whose `firstSeen` stamp falls after the day boundary.
+ * Cards with no stamp — everything introduced before that field existed —
+ * count as not-today, which is both the truthful reading (they were
+ * introduced at some unknown past date, almost certainly not this morning)
+ * and the only safe one: treating an unstamped table as today's work would
+ * zero the allowance on the day this shipped and stop new material dead.
  */
-export function newIntroducedToday(cards, now) {
+export function newIntroducedToday(cards, now, tzOffsetMin) {
   const moment = now.getTime()
-  const since = moment - ROLLING_DAY_MS
+  const since = dayStartMs(now, tzOffsetMin)
   let count = 0
   for (const card of Object.values(cards ?? {})) {
     const stamped = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
@@ -304,8 +317,8 @@ export function newIntroducedToday(cards, now) {
 }
 
 /**
- * Whether this card has been reviewed — not merely introduced — in the rolling
- * day ending at `now`.
+ * Whether this card has been reviewed — not merely introduced — since the
+ * day began.
  *
  * It reads `last_review`, which is FSRS's own stamp and is only written by
  * gradeRound. A card whose only grade is its introduction is not a review —
@@ -314,9 +327,9 @@ export function newIntroducedToday(cards, now) {
  * introduction writes both stamps from one clock and every later grade moves
  * only the first.
  */
-export function reviewedToday(card, now) {
+export function reviewedToday(card, now, tzOffsetMin) {
   const moment = now.getTime()
-  const since = moment - ROLLING_DAY_MS
+  const since = dayStartMs(now, tzOffsetMin)
   const at = card?.last_review ? new Date(card.last_review).getTime() : NaN
   if (!Number.isFinite(at) || at <= since || at > moment) return false
   const born = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
@@ -326,7 +339,7 @@ export function reviewedToday(card, now) {
 /**
  * The other half of the day: how much review has already been cleared.
  *
- * Same rolling window as the allowance above, deliberately — a readout that
+ * Same day boundary as the allowance above, deliberately — a readout that
  * counted reviews against one definition of "today" and new metas against
  * another would be two numbers that never add up to one session.
  *
@@ -342,9 +355,9 @@ export function reviewedToday(card, now) {
  * — and reviewsDone is this count plus repeatReviewsToday over that log, so
  * every answer moves the bar by exactly one.
  */
-export function reviewsCompletedToday(cards, now) {
+export function reviewsCompletedToday(cards, now, tzOffsetMin) {
   let count = 0
-  for (const card of Object.values(cards ?? {})) if (reviewedToday(card, now)) count += 1
+  for (const card of Object.values(cards ?? {})) if (reviewedToday(card, now, tzOffsetMin)) count += 1
   return count
 }
 
@@ -355,27 +368,27 @@ export function reviewsCompletedToday(cards, now) {
  * count above can never see, so its moment is recorded. Any other answer —
  * first review of the day, an introduction, a card with no stamp — is the
  * distinct-card count's to report, and the log passes through untouched
- * except for pruning: entries older than the rolling day are dead weight and
+ * except for pruning: entries from before the day began are dead weight and
  * are dropped on every write, which keeps the log the size of one day's play.
  */
-export function logRepeatReview(log, card, now) {
-  const since = now.getTime() - ROLLING_DAY_MS
+export function logRepeatReview(log, card, now, tzOffsetMin) {
+  const since = dayStartMs(now, tzOffsetMin)
   const kept = (log ?? []).filter((t) => {
     const at = new Date(t).getTime()
     return Number.isFinite(at) && at > since
   })
-  if (reviewedToday(card, now)) kept.push(now.toISOString())
+  if (reviewedToday(card, now, tzOffsetMin)) kept.push(now.toISOString())
   return kept
 }
 
-/** The repeat half of the day's review count: answers in the rolling day on
+/** The repeat half of the day's review count: answers since the day began on
  * cards that had already been reviewed that day. Together with
  * reviewsCompletedToday this makes reviewsDone count answers, not cards — the
  * only definition under which clearing a due card always moves "done" and
  * `done + due` holds still while it happens. */
-export function repeatReviewsToday(log, now) {
+export function repeatReviewsToday(log, now, tzOffsetMin) {
   const moment = now.getTime()
-  const since = moment - ROLLING_DAY_MS
+  const since = dayStartMs(now, tzOffsetMin)
   let count = 0
   for (const t of log ?? []) {
     const at = new Date(t).getTime()
@@ -385,7 +398,7 @@ export function repeatReviewsToday(log, now) {
 }
 
 /**
- * How many new clues from one country a rolling day may introduce, when a
+ * How many new clues from one country a day may introduce, when a
  * weighted order is in effect. The weights sort whole countries, so the worst
  * country would otherwise fill the entire allowance by itself — ten Brazilian
  * clues in one sitting is a cram session wearing the deck's clothes. Two per
@@ -416,7 +429,7 @@ const metaCountry = (name) => {
  * with no duel history gets exactly the unweighted scheduler.
  *
  * Then the interleave: a country already dealt NEW_PER_COUNTRY new clues in
- * the rolling day — counting clues introduced earlier today, read off
+ * the day — counting clues introduced earlier today, read off
  * `firstSeen` the same way the allowance reads it — defers the rest of its
  * queue until every other country has had its turn. Deferred, not dropped:
  * the surplus re-queues behind the countries still under the cap, so a day
@@ -425,7 +438,7 @@ const metaCountry = (name) => {
  * No `weights` means no opinion: the entries come back untouched, in the
  * ladder order every caller relied on before weights existed.
  */
-function orderUnseen(entries, cards, weights, now) {
+function orderUnseen(entries, cards, weights, now, tzOffsetMin) {
   if (!weights) return entries
   const ranked = entries
     .map((entry, i) => ({ entry, i, w: weights[metaCountry(entry.name)] ?? 0 }))
@@ -433,7 +446,7 @@ function orderUnseen(entries, cards, weights, now) {
     .map(({ entry }) => entry)
 
   const moment = now.getTime()
-  const since = moment - ROLLING_DAY_MS
+  const since = dayStartMs(now, tzOffsetMin)
   const dealt = {}
   for (const [name, card] of Object.entries(cards ?? {})) {
     const stamped = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
@@ -476,7 +489,7 @@ export function nextNewMetas(cards, catalog, limit, opts = {}, now = new Date())
   const room = Math.max(0, limit ?? 0)
   if (!room) return []
   const unseen = unlockedMetas(catalog ?? [], catalog?.length ?? 0).filter((e) => !table[e.name])
-  return orderUnseen(unseen, table, opts?.newWeights, now)
+  return orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset)
     .slice(0, room)
     .map(({ name }) => name)
 }
@@ -549,8 +562,8 @@ const DEFAULT_LIMIT = 25
  * metas, up to the allowance.
  *
  * That allowance is a day's, not a deck's: `opts.dailyNew` (default
- * DEFAULT_DAILY_NEW) minus what has already been introduced in the rolling
- * twenty-four hours, so playing four decks in an evening does not introduce
+ * DEFAULT_DAILY_NEW) minus what has already been introduced since the day
+ * began, so playing four decks in an evening does not introduce
  * four decks' worth of new material. `opts.newLimit` overrides the arithmetic
  * outright, for tests and debugging — `0` for pure review, `Infinity` to
  * front-load the entire unseen backlog.
@@ -580,7 +593,10 @@ const DEFAULT_LIMIT = 25
 export function rankDeck(cards, catalog, opts = {}, now) {
   const limit = Math.max(0, opts?.limit ?? DEFAULT_LIMIT)
   // What the day has left to give, unless the caller has taken the wheel.
-  const allowance = Math.max(0, (opts?.dailyNew ?? DEFAULT_DAILY_NEW) - newIntroducedToday(cards, now))
+  const allowance = Math.max(
+    0,
+    (opts?.dailyNew ?? DEFAULT_DAILY_NEW) - newIntroducedToday(cards, now, opts?.tzOffset),
+  )
   const newLimit = Math.max(0, opts?.newLimit ?? allowance)
   const table = cards ?? {}
   const entries = unlockedMetas(catalog ?? [], catalog?.length ?? 0)
@@ -606,7 +622,7 @@ export function rankDeck(cards, catalog, opts = {}, now) {
   due.sort(byPriority)
   future.sort(byPriority)
 
-  const metas = [...due, ...orderUnseen(unseen, table, opts?.newWeights, now).slice(0, newLimit), ...future]
+  const metas = [...due, ...orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset).slice(0, newLimit), ...future]
     .slice(0, limit)
     .map(({ name, mapId, priority, kind }) => ({ name, mapId, priority, kind }))
 

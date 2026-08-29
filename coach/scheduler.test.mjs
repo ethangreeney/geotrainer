@@ -240,29 +240,29 @@ describe('newIntroducedToday', () => {
     expect(newIntroducedToday({ [T1[0]]: card({ due: T0.toISOString() }) }, T0)).toBe(0)
   })
 
-  it('counts the metas introduced inside the rolling day', () => {
+  it('counts the metas introduced since the day began', () => {
     const cards = {
-      [T1[0]]: introducedAt(plus(T0, -0.2)),
-      [T1[1]]: introducedAt(plus(T0, -0.9)),
-      [T1[2]]: introducedAt(plus(T0, -3)), // last week's introduction, not today's
+      [T1[0]]: introducedAt(at('2026-03-01T05:00:00Z')), // after 4am: today's
+      [T1[1]]: introducedAt(at('2026-03-01T10:00:00Z')),
+      [T1[2]]: introducedAt(at('2026-02-28T12:00:00Z')), // yesterday's
     }
-    expect(newIntroducedToday(cards, T0)).toBe(2)
+    expect(newIntroducedToday(cards, at('2026-03-01T12:00:00Z'), 0)).toBe(2)
   })
 
-  it('ages an introduction out exactly twenty-four hours later', () => {
-    const cards = { [T1[0]]: introducedAt(T0) }
-    expect(newIntroducedToday(cards, plus(T0, 0.99))).toBe(1)
-    expect(newIntroducedToday(cards, plus(T0, 1))).toBe(0)
+  it('releases the allowance at the next 4am, not 24 hours later', () => {
+    // Introduced at 9pm: still spent at 3:59am (one sitting), fresh at 4am.
+    const cards = { [T1[0]]: introducedAt(at('2026-03-01T21:00:00Z')) }
+    expect(newIntroducedToday(cards, at('2026-03-02T03:59:00Z'), 0)).toBe(1)
+    expect(newIntroducedToday(cards, at('2026-03-02T04:01:00Z'), 0)).toBe(0)
   })
 
-  it('rolls with the clock rather than snapping to a date boundary', () => {
-    // Introduced at 23:00 UTC: still today's at 22:00 the next day, gone by
-    // midnight-plus-an-hour. A calendar day would have released the allowance
-    // an hour after it was spent.
-    const cards = { [T1[0]]: introducedAt(at('2026-03-01T23:00:00Z')) }
-    expect(newIntroducedToday(cards, at('2026-03-02T00:30:00Z'))).toBe(1)
-    expect(newIntroducedToday(cards, at('2026-03-02T22:00:00Z'))).toBe(1)
-    expect(newIntroducedToday(cards, at('2026-03-03T00:00:00Z'))).toBe(0)
+  it("draws the boundary on the player's clock, not the server's", () => {
+    // Introduced 9pm NZ time (09:00 UTC). By 8am NZ the next morning the NZ
+    // day has rolled over even though in UTC it is still the same date.
+    const cards = { [T1[0]]: introducedAt(at('2026-03-01T09:00:00Z')) }
+    expect(newIntroducedToday(cards, at('2026-03-01T10:00:00Z'), 720)).toBe(1) // 10pm NZ, same evening
+    expect(newIntroducedToday(cards, at('2026-03-01T20:00:00Z'), 720)).toBe(0) // 8am NZ, fresh day
+    expect(newIntroducedToday(cards, at('2026-03-01T20:00:00Z'), 0)).toBe(1) // in UTC, still the same day
   })
 })
 
@@ -279,14 +279,14 @@ describe('reviewsCompletedToday', () => {
     expect(reviewsCompletedToday({ [T1[0]]: { seen: 1, firstSeen: T0.toISOString() } }, T0)).toBe(0)
   })
 
-  it('counts the cards graded inside the same rolling day the allowance uses', () => {
+  it('counts the cards graded since the same day boundary the allowance uses', () => {
     const cards = {
-      [T1[0]]: answeredAt(plus(T0, -0.1)),
-      [T1[1]]: answeredAt(plus(T0, -0.9)),
-      [T1[2]]: answeredAt(plus(T0, -2)), // answered the day before yesterday
+      [T1[0]]: answeredAt(at('2026-03-01T11:00:00Z')),
+      [T1[1]]: answeredAt(at('2026-03-01T05:00:00Z')),
+      [T1[2]]: answeredAt(at('2026-02-28T12:00:00Z')), // yesterday's clears
     }
-    expect(reviewsCompletedToday(cards, T0)).toBe(2)
-    expect(reviewsCompletedToday(cards, plus(T0, 1))).toBe(0)
+    expect(reviewsCompletedToday(cards, at('2026-03-01T12:00:00Z'), 0)).toBe(2)
+    expect(reviewsCompletedToday(cards, at('2026-03-02T12:00:00Z'), 0)).toBe(0)
   })
 
   it('leaves today\'s introductions to the allowance rather than counting them twice', () => {
