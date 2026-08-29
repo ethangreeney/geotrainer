@@ -19,7 +19,7 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      '^/(api/|signup$|me$|health$|geocoach\\.(user|body)\\.js$)': {
+      '^/(api/|signup$|me$|config$|health$|geocoach\\.(user|body)\\.js$)': {
         target: 'https://geofsrs.pages.dev',
         changeOrigin: true,
       },

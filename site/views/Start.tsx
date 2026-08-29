@@ -68,6 +68,21 @@ function deadTokenNote(cause: DeadTokenCause | null): string | null {
   return null
 }
 
+/* The MCP server is not published under a name anyone can fetch — it is run
+   from a clone of the repo — so the setup lines are a clone, an install and an
+   absolute path to server.mjs. Written out here rather than inline so the two
+   client recipes cannot drift apart. */
+const CLONE = 'git clone https://github.com/ethangreeney/geotrainer.git && cd geotrainer/mcp && npm install'
+const DESKTOP = `{
+  "mcpServers": {
+    "geocoach": {
+      "command": "node",
+      "args": ["/Users/you/geotrainer/mcp/server.mjs"],
+      "env": { "GEOCOACH_TOKEN": "__TOKEN__" }
+    }
+  }
+}`
+
 type StepState = 'done' | 'current' | 'upcoming'
 
 /* Named .ck, not .tick — theme.css spends .tick on SVG chart tick labels. */
@@ -123,7 +138,7 @@ export default function Start() {
   const [account, setAccount] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [copied, setCopied] = useState<'account' | 'install' | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
   const [captured, setCaptured] = useState(false)
   const [checking, setChecking] = useState(() => !!getToken())
   /* Why step 1 is offering a fresh account to somebody who had one. Silence
@@ -201,6 +216,18 @@ export default function Start() {
 
   useEffect(() => () => clearTimeout(copyTimer.current), [])
 
+  /* /start#mcp is where the landing page's second button lands. The router
+     scrolls every navigation back to the top on purpose, and the section does
+     not exist until React has rendered, so the jump has to be made from here
+     rather than left to the browser's own anchor handling. */
+  useEffect(() => {
+    if (location.hash !== '#mcp') return
+    const to = document.getElementById('mcp')
+    if (!to) return
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches
+    to.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' })
+  }, [])
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     const trimmed = name.trim()
@@ -261,8 +288,12 @@ export default function Start() {
 
   const link = token ? installUrl(token) : null
   const signin = token ? accountUrl(token) : null
+  /* A copied command should work as pasted. Without an account there is no
+     token to put in it, and a placeholder is honest about that. */
+  const tok = token ?? 'your-token'
+  const addCmd = `claude mcp add geocoach -e GEOCOACH_TOKEN=${tok} -- node ~/geotrainer/mcp/server.mjs`
 
-  const copy = async (which: 'account' | 'install', text: string | null) => {
+  const copy = async (which: string, text: string | null) => {
     if (!text) return
     try {
       await navigator.clipboard.writeText(text)
@@ -521,6 +552,77 @@ export default function Start() {
               )}
             </Step>
           </ol>
+
+          {/* The landing page sells two actions — the script and the coach —
+              and this is the second one's destination. It is not a fifth step:
+              the four above are the whole of the trainer, and this is optional
+              on top of them, which is why it sits outside the list and outside
+              the progress count. Content follows mcp/README.md; the one thing
+              that must not drift is the install, which is a local server run
+              out of the repo, not a package you can pull down by name. */}
+          <section className="mcp" id="mcp">
+            <span className="mcpTag">Optional</span>
+            <h2>Connect the coach</h2>
+            <p className="lede">
+              The four steps above are the trainer: they capture your rounds and decide what you practise next. This is
+              the other half — a small server that hands Claude the round you just missed, with the imagery: the
+              panorama as photographs, the true location against where you clicked, your record on both countries, and
+              the clues that separate the two.
+            </p>
+            <p className="hint" style={{ marginTop: 10 }}>
+              It makes no model calls of its own and needs no API key. The intelligence is whichever model you have
+              connected; its only credential is your GeoCoach token.
+            </p>
+
+            <ol className="mcpSteps">
+              <li>
+                <h3>Get the server</h3>
+                <p>It runs out of the GeoCoach repo. Clone it and install once — Node 20 or newer, nothing else.</p>
+                <div className="linkbox">
+                  <code>{CLONE}</code>
+                  <button onClick={() => copy('clone', CLONE)}>{copied === 'clone' ? 'Copied' : 'Copy'}</button>
+                </div>
+              </li>
+
+              <li>
+                <h3>Register it with your client</h3>
+                <p>In Claude Code, one command. Point it at the file you just cloned.</p>
+                <div className="linkbox">
+                  <code>{addCmd}</code>
+                  <button onClick={() => copy('mcp', addCmd)}>{copied === 'mcp' ? 'Copied' : 'Copy'}</button>
+                </div>
+                <p className="hint">
+                  Swap <code>~/geotrainer</code> for wherever you cloned it.{' '}
+                  {token
+                    ? 'Your own token is already in the line above, so it is as private as your account link.'
+                    : 'Create your account above and your token drops into that line.'}
+                </p>
+                <details className="others mcpFold">
+                  <summary>Claude Desktop instead?</summary>
+                  <div>
+                    <p className="hint">
+                      Add this to <code>claude_desktop_config.json</code> — on macOS in{' '}
+                      <code>~/Library/Application Support/Claude/</code>, on Windows in <code>%APPDATA%\Claude\</code>{' '}
+                      — then restart Claude.
+                    </p>
+                    <pre className="mcpJson">{DESKTOP.replace('__TOKEN__', tok)}</pre>
+                    <p className="hint">
+                      If Claude Desktop says the server failed to start, it is almost always that a GUI app cannot see
+                      your shell's PATH. Run <code>which node</code> and use that absolute path as the command.
+                    </p>
+                  </div>
+                </details>
+              </li>
+
+              <li>
+                <h3>Ask for a round</h3>
+                <p>
+                  Say <i>coach my last round</i>. It answers with the photographs first, then what separated the
+                  country you picked from the one you were standing in.
+                </p>
+              </li>
+            </ol>
+          </section>
         </div>
       </div>
 

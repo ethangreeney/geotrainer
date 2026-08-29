@@ -10,6 +10,8 @@
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
+    /* the landing globe imports its dot mask straight from globe-dots.json */
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "moduleDetection": "force",

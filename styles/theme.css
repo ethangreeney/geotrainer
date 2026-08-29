@@ -177,11 +177,10 @@ input {
 .dim { color: var(--ink-3); }
 .faint { color: var(--ink-4); }
 
-/* the small mono all-caps label that names a part */
+/* the small label that names a part — quiet, in the sans, and left as words:
+   set in spaced-out monospaced capitals it read as decoration, not language */
 .tag {
-  font: 500 10px/1 var(--mono);
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+  font: 600 11px/1 var(--sans);
   color: var(--ink-4);
 }
 .tag.on { color: var(--lime); }
@@ -312,9 +311,7 @@ svg text { font-family: var(--mono); }
 }
 .tip.on { opacity: 1; }
 .tip .h {
-  font: 700 10px/1 var(--mono);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font: 700 11px/1 var(--sans);
   color: var(--lime);
   margin-bottom: 6px;
 }
