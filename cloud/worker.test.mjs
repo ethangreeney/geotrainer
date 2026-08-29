@@ -54,6 +54,7 @@ const TOKENS = {
   roundNew: 'test-token-round-new-00001',
   roundLast: 'test-token-round-last-0001',
   roundDuel: 'test-token-round-duel-0001',
+  roundRepeat: 'test-token-round-repeat-01',
 }
 
 describe('worker source', () => {
@@ -580,6 +581,19 @@ function lastOwedOfTheDay() {
   return { countries: {}, confusions: {}, metas: {}, deckCards, lastDeck: null }
 }
 
+/**
+ * The shrinking-bar afternoon: the sample card was reviewed two hours ago and
+ * its learning step has already brought it back due, alongside one card
+ * cleared for good this morning. Answering the sample again used to move the
+ * due count and nothing else.
+ */
+function learningStepReturned() {
+  const deckCards = {}
+  deckCards[sampleName] = dayCard(ago(30 * DAY), ago(2 * HOUR), ago(5 * 60 * 1000))
+  deckCards[otherNames[0]] = dayCard(ago(20 * DAY), ago(3 * HOUR), ahead(30 * DAY))
+  return { countries: {}, confusions: {}, metas: {}, deckCards, lastDeck: null }
+}
+
 /** A played round, pinned on the sample location and guessed exactly right, so
  * the grade is never what a case is really about. */
 const roundPayload = (over) => ({
@@ -743,6 +757,14 @@ const out = {
     config: '{"dailyNew":2}',
     state: lastOwedOfTheDay(),
     payload: roundPayload({ token: 'game-last', roundNumber: 3 }),
+  }),
+  // A second answer today on the same card: a learning step that returned.
+  roundRepeat: await call('/round', {
+    method: 'POST',
+    headers: authFor(TOKENS.roundRepeat),
+    token: TOKENS.roundRepeat,
+    state: learningStepReturned(),
+    payload: roundPayload({ token: 'game-repeat', roundNumber: 1 }),
   }),
   // A duel: no clue card at all, and the day must still come back.
   roundDuel: await call('/round', {
@@ -1170,6 +1192,17 @@ describe('POST /round reports the day', () => {
     expect(day.newAllowance).toBe(9)
     expect(day.reviewsDone).toBe(0)
     expect(day.doneForToday).toBe(false)
+  })
+
+  it('credits a repeat answer instead of shrinking the bar', () => {
+    // Both cards were reviewed today, so done was 2 and the returned learning
+    // step made due 1. Answering it again is a third answer of the day: done
+    // must rise to 3 as due falls to 0 — the live bug held done at 2 and let
+    // the total walk down in front of the player.
+    const day = R.roundRepeat.body.day
+    expect(day.reviewsDone).toBe(3)
+    expect(day.reviewsDue).toBe(0)
+    expect(day.newIntroduced).toBe(0)
   })
 
   it('names the moment the day is finished', () => {

@@ -22,6 +22,8 @@ import {
   ratingNameFor,
   retrievabilityOf,
   reviewsCompletedToday,
+  logRepeatReview,
+  repeatReviewsToday,
 } from '../../coach/scheduler.mjs'
 import { buildRankedDeck, deckSizeFor, metaKeyOf } from '../../coach/deck.mjs'
 import SCOPE_REGIONS from '../../coach/scope-regions.json'
@@ -809,12 +811,13 @@ const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_
  * that fills rather than a pair of unrelated tallies. `summary` is passed in
  * rather than computed because every caller has already built it.
  */
-function dayState(cards, config, summary, now) {
+function dayState(state, config, summary, now) {
+  const cards = state.deckCards
   const dailyNew = dailyNewOf(config)
   const newIntroduced = newIntroducedToday(cards, now)
   const newAllowance = Math.max(0, dailyNew - newIntroduced)
   return {
-    reviewsDone: reviewsCompletedToday(cards, now),
+    reviewsDone: reviewsCompletedToday(cards, now) + repeatReviewsToday(state.reviewLog, now),
     reviewsDue: summary.due,
     newIntroduced,
     dailyNew,
@@ -926,7 +929,7 @@ async function buildDashboard(env, user) {
   // reports and worked out the same way off the same `now`, because a dashboard
   // that said the day was over while the map still served due cards would be
   // the more convincing of the two and the wrong one.
-  const day = dayState(state.deckCards, user.config, summary, now)
+  const day = dayState(state, user.config, summary, now)
   // And which clues that allowance is about to spend itself on. The console
   // asks the scheduler rather than reading the catalog itself, so the list is
   // the deck's own next introductions and not a second guess at them; a spent
@@ -1215,6 +1218,9 @@ async function handleRound(env, user, payload, ctx) {
     // Correct padding rounds are free practice, ungraded (see the local bridge
     // for the FSRS rationale); a wrong padding answer is real forgetting.
     if (!(isPadding && correctScope)) {
+      // Before the stamp moves: a second answer today on this card is work the
+      // distinct-card count can't see, so it is logged here or nowhere.
+      state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[metaName], now)
       state.deckCards = gradeRound(state.deckCards, { metaName, correct: credited }, now)
     }
   }
@@ -1254,7 +1260,7 @@ async function handleRound(env, user, payload, ctx) {
   // vanished with the card would stall on the screen for the rounds that moved
   // it most.
   const day = dayState(
-    state.deckCards,
+    state,
     user.config,
     deckSummary(state.deckCards, ladderOnce(), now),
     now,
@@ -1825,7 +1831,7 @@ export default {
         // deck to find that out would be a write.
         return json({
           ...summary,
-          ...dayState(state.deckCards, user.config, summary, now),
+          ...dayState(state, user.config, summary, now),
           trainerMapId: user.config.trainerMapId ?? null,
         })
       }

@@ -31,6 +31,8 @@ import {
   MASTERY_DAYS,
   newIntroducedToday,
   reviewsCompletedToday,
+  logRepeatReview,
+  repeatReviewsToday,
   ratingNameFor,
   retrievabilityOf,
 } from './scheduler.mjs'
@@ -201,11 +203,12 @@ function toLadder(catalogs) {
  * scheduler's rolling window and its own line between a review and an
  * introduction.
  */
-function dayState(cards, summary, now) {
+function dayState(state, summary, now) {
+  const cards = state.deckCards
   const newIntroduced = newIntroducedToday(cards, now)
   const newAllowance = Math.max(0, DAILY_NEW - newIntroduced)
   return {
-    reviewsDone: reviewsCompletedToday(cards, now),
+    reviewsDone: reviewsCompletedToday(cards, now) + repeatReviewsToday(state.reviewLog, now),
     reviewsDue: summary.due,
     newIntroduced,
     dailyNew: DAILY_NEW,
@@ -816,6 +819,9 @@ async function handleRound(payload) {
     // difficulty — so correct padding rounds are free practice, ungraded.
     // A WRONG padding answer is real forgetting and always counts.
     if (!(isPadding && correctScope)) {
+      // Before the stamp moves: a second answer today on this card is work the
+      // distinct-card count can't see, so it is logged here or nowhere.
+      state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[round.metaName], now)
       state.deckCards = gradeRound(
         state.deckCards,
         { metaName: round.metaName, correct: credited },
@@ -874,7 +880,7 @@ async function handleRound(payload) {
   // catalogs are already in memory by here (metaFromCatalogs loaded them), so
   // this costs one walk of the ladder and no disk at all.
   const day = dayState(
-    state.deckCards,
+    state,
     deckSummary(state.deckCards, toLadder(await loadCatalogs()), now),
     now,
   )
@@ -1269,7 +1275,7 @@ const server = createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         ...summary,
-        ...dayState(state.deckCards, summary, now),
+        ...dayState(state, summary, now),
         trainerMapId: CONFIG.trainerMapId,
       }),
     )

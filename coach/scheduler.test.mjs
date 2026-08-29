@@ -10,6 +10,8 @@ import {
   nextNewMetas,
   rankDeck,
   reviewsCompletedToday,
+  logRepeatReview,
+  repeatReviewsToday,
   ratingNameFor,
   unlockedTiers,
 } from './scheduler.mjs'
@@ -298,6 +300,50 @@ describe('reviewsCompletedToday', () => {
     const reviewedAgain = gradeRound(introducedOnly, { metaName: T1[0], correct: true }, plus(T0, 0.2))
     expect(reviewsCompletedToday(reviewedAgain, plus(T0, 0.25))).toBe(1)
     expect(newIntroducedToday(reviewedAgain, plus(T0, 0.25))).toBe(1)
+  })
+
+  it('hands repeat answers to the log, so done counts answers overall', () => {
+    // The live shrinking bar, second act: 100 cards reviewed by lunch, and the
+    // afternoon spent re-clearing their learning steps moved nothing, because
+    // a card already counted cannot be counted again. The log is where those
+    // answers go, and done = distinct cards + logged repeats moves by exactly
+    // one per answer.
+    let cards = gradeRound({}, { metaName: T1[0], correct: true }, plus(T0, -3))
+    let log = []
+    const done = (when) => reviewsCompletedToday(cards, when) + repeatReviewsToday(log, when)
+
+    // First answer of the day: not a repeat — the distinct-card count takes it.
+    log = logRepeatReview(log, cards[T1[0]], plus(T0, 0.01))
+    cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, 0.01))
+    expect(log).toEqual([])
+    expect(done(plus(T0, 0.02))).toBe(1)
+
+    // Second and third answers: repeats, one log entry each.
+    for (const dt of [0.1, 0.2]) {
+      log = logRepeatReview(log, cards[T1[0]], plus(T0, dt))
+      cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, dt))
+    }
+    expect(done(plus(T0, 0.25))).toBe(3)
+
+    // A day later the whole session has aged out, log included.
+    expect(done(plus(T0, 1.5))).toBe(0)
+    expect(logRepeatReview(log, cards[T1[0]], plus(T0, 3)).length).toBe(0)
+  })
+
+  it('never logs an introduction or its first re-answer as a repeat', () => {
+    // The introduction is the allowance's; the first re-answer is the
+    // distinct-card count's (the shrinking-bar fix). Only from the third
+    // answer on is there work no other counter can see.
+    let cards = {}
+    let log = []
+    for (const dt of [0, 0.1, 0.2]) {
+      log = logRepeatReview(log, cards[T1[0]], plus(T0, dt))
+      cards = gradeRound(cards, { metaName: T1[0], correct: true }, plus(T0, dt))
+    }
+    expect(log.length).toBe(1)
+    const done = reviewsCompletedToday(cards, plus(T0, 0.25)) + repeatReviewsToday(log, plus(T0, 0.25))
+    expect(done).toBe(2) // three answers, one of them the introduction
+    expect(newIntroducedToday(cards, plus(T0, 0.25))).toBe(1)
   })
 
   it('sees the grade gradeRound actually wrote', () => {

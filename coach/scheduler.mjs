@@ -296,43 +296,82 @@ export function newIntroducedToday(cards, now) {
 }
 
 /**
+ * Whether this card has been reviewed — not merely introduced — in the rolling
+ * day ending at `now`.
+ *
+ * It reads `last_review`, which is FSRS's own stamp and is only written by
+ * gradeRound. A card whose only grade is its introduction is not a review —
+ * that grade is what newIntroducedToday is already reporting — and
+ * `last_review` after `firstSeen` is the test for it, because the
+ * introduction writes both stamps from one clock and every later grade moves
+ * only the first.
+ */
+export function reviewedToday(card, now) {
+  const moment = now.getTime()
+  const since = moment - ROLLING_DAY_MS
+  const at = card?.last_review ? new Date(card.last_review).getTime() : NaN
+  if (!Number.isFinite(at) || at <= since || at > moment) return false
+  const born = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
+  return !(Number.isFinite(born) && at <= born)
+}
+
+/**
  * The other half of the day: how much review has already been cleared.
  *
  * Same rolling window as the allowance above, deliberately — a readout that
  * counted reviews against one definition of "today" and new metas against
  * another would be two numbers that never add up to one session.
  *
- * It reads `last_review`, which is FSRS's own stamp and is only written by
- * gradeRound, so the count is exactly "cards this day actually graded".
  * Padding rounds are ungraded and correctly invisible here: free practice is
  * not work owed.
  *
- * A card whose only grade is its introduction is not a review — that grade is
- * what newIntroducedToday is already reporting, and the whole point of the
- * two numbers is that they are the two different kinds of work a session is
- * made of. But only the introduction itself is exempt: a card dealt this
- * morning that climbs back into the due queue and gets answered again this
- * afternoon was reviewed, full stop. Excluding everything introduced today —
- * the old rule — made those answers vanish: the due count fell as the player
- * cleared them while "done" stood still, and the bar's total shrank in front
- * of the one person watching it fill. `last_review` after `firstSeen` is the
- * test, because the introduction writes both stamps from one clock and every
- * later grade moves only the first.
- *
- * This counts cards, not answers: a card answered twice today is one card of
- * the day's work, which is what makes `done + still-due` a stable total for a
- * progress bar to fill rather than a denominator that grows as it is filled.
+ * This is the DISTINCT-CARD half of the day's review count. It cannot see a
+ * second answer on a card it already counted — a learning-step card graded
+ * this morning and again this afternoon moves `last_review` and nothing else
+ * this function reads. Left alone that made the progress bar shrink live: the
+ * afternoon answer took one off the due count while "done" stood still. The
+ * repeat answers live in the host's review log instead — see logRepeatReview
+ * — and reviewsDone is this count plus repeatReviewsToday over that log, so
+ * every answer moves the bar by exactly one.
  */
 export function reviewsCompletedToday(cards, now) {
+  let count = 0
+  for (const card of Object.values(cards ?? {})) if (reviewedToday(card, now)) count += 1
+  return count
+}
+
+/**
+ * Folds one about-to-be-graded answer into the host's repeat-review log.
+ * Called with the card AS IT STANDS before gradeRound moves its stamp: if the
+ * card was already reviewed today, this answer is a repeat the distinct-card
+ * count above can never see, so its moment is recorded. Any other answer —
+ * first review of the day, an introduction, a card with no stamp — is the
+ * distinct-card count's to report, and the log passes through untouched
+ * except for pruning: entries older than the rolling day are dead weight and
+ * are dropped on every write, which keeps the log the size of one day's play.
+ */
+export function logRepeatReview(log, card, now) {
+  const since = now.getTime() - ROLLING_DAY_MS
+  const kept = (log ?? []).filter((t) => {
+    const at = new Date(t).getTime()
+    return Number.isFinite(at) && at > since
+  })
+  if (reviewedToday(card, now)) kept.push(now.toISOString())
+  return kept
+}
+
+/** The repeat half of the day's review count: answers in the rolling day on
+ * cards that had already been reviewed that day. Together with
+ * reviewsCompletedToday this makes reviewsDone count answers, not cards — the
+ * only definition under which clearing a due card always moves "done" and
+ * `done + due` holds still while it happens. */
+export function repeatReviewsToday(log, now) {
   const moment = now.getTime()
   const since = moment - ROLLING_DAY_MS
   let count = 0
-  for (const card of Object.values(cards ?? {})) {
-    const at = card?.last_review ? new Date(card.last_review).getTime() : NaN
-    if (!Number.isFinite(at) || at <= since || at > moment) continue
-    const born = card?.firstSeen ? new Date(card.firstSeen).getTime() : NaN
-    if (Number.isFinite(born) && at <= born) continue
-    count += 1
+  for (const t of log ?? []) {
+    const at = new Date(t).getTime()
+    if (Number.isFinite(at) && at > since && at <= moment) count += 1
   }
   return count
 }
