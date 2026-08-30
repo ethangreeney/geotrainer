@@ -47,14 +47,23 @@ const MORE_NEXT: UpNextMeta[] = [
   { name: 'Vietnam: Bollards', panoId: '14rstvSmhZsbIVeGAgfdJA', heading: 215.87, pitch: 0, lat: 10.131148, lng: 105.16753 },
 ]
 
-const WEAKEST = [
-  { metaName: 'Cambodia: House on stilts', seen: 9, correct: 2, lapses: 5, pano: '01fvRiPIz8Nzw3Fb2rpYtw', head: 81.35 },
-  { metaName: 'Russia: Black sock sign post', seen: 7, correct: 2, lapses: 4, pano: '04kN4e3qQ7GcYghiv8u00w', head: 359.04 },
-  { metaName: 'Peru: Concrete blocks', seen: 11, correct: 4, lapses: 4, pano: '90sh3R19FExlu78PIgxhGA', head: 157.37 },
-  { metaName: 'Nigeria: Police follow car', seen: 6, correct: 2, lapses: 3, pano: 'c91CYyzSzpP3BN-yC5_DIw', head: 329.21 },
-  { metaName: 'Indonesia: Nusa pole', seen: 12, correct: 6, lapses: 3, pano: '4y0Oz8N1P-8ERGVCZfzvVQ', head: 301.79 },
-  { metaName: 'Mongolia: Unique car', seen: 8, correct: 4, lapses: 2, pano: '3jY81kSZFnX2ZatFBPuqgQ', head: 329.2 },
-].map(({ pano, head, ...m }) => ({ ...m, image: shot(pano, head) }))
+/* The head of the review queue, in the queue's own order: everything owed now,
+   least likely still known first, then whatever falls due next. The recall
+   figures just have to look like a deck mid-decay — overdue cards low, cards
+   still ahead of their date high. */
+const QUEUE = [
+  { metaName: 'Cambodia: House on stilts', recall: 0.42, dueMs: NOW - 2 * DAY, pano: '01fvRiPIz8Nzw3Fb2rpYtw', head: 81.35 },
+  { metaName: 'Russia: Black sock sign post', recall: 0.61, dueMs: NOW - 26 * 3_600_000, pano: '04kN4e3qQ7GcYghiv8u00w', head: 359.04 },
+  { metaName: 'Peru: Concrete blocks', recall: 0.78, dueMs: NOW - 3 * 3_600_000, pano: '90sh3R19FExlu78PIgxhGA', head: 157.37 },
+  { metaName: 'Nigeria: Police follow car', recall: 0.87, dueMs: NOW - 3_600_000, pano: 'c91CYyzSzpP3BN-yC5_DIw', head: 329.21 },
+  { metaName: 'Indonesia: Nusa pole', recall: 0.93, dueMs: NOW + 5 * 3_600_000, pano: '4y0Oz8N1P-8ERGVCZfzvVQ', head: 301.79 },
+  { metaName: 'Mongolia: Unique car', recall: 0.96, dueMs: NOW + 2 * DAY, pano: '3jY81kSZFnX2ZatFBPuqgQ', head: 329.2 },
+].map(({ pano, head, dueMs, ...m }) => ({
+  ...m,
+  due: new Date(dueMs).toISOString(),
+  dueNow: dueMs <= NOW,
+  image: shot(pano, head),
+}))
 
 /* Duel losses are heaviest where play is frequent AND accuracy is poor —
    Russia's 38 rounds at 55% cost more than Cambodia's 12 at 25% — and only
@@ -137,7 +146,7 @@ const PLAYED: DashboardData = {
     nextDue: new Date(NOW + 3.2 * 3_600_000).toISOString(),
   },
   day: { dailyNew: 10, newAllowance: 4, doneForToday: false, upNext: UP_NEXT },
-  metas: { solid: 71, holding: 31, shaky: 18, total: 120, weakest: WEAKEST },
+  metas: { solid: 71, holding: 31, shaky: 18, total: 120, queue: QUEUE },
   countries: COUNTRIES,
   totals: { rounds: 605, correctPct: 58.6 },
   rounds: ROUNDS,
@@ -172,7 +181,7 @@ export function demoData(): DashboardData | null {
       progress: { held: 0, total: 370, series: [] },
       deck: { due: 0, learning: 0, unseen: 370, introduced: 0, total: 370, ladderTotal: 370, nextDue: null },
       day: { dailyNew: 10, newAllowance: 10, doneForToday: false, upNext: [...UP_NEXT, ...MORE_NEXT] },
-      metas: { solid: 0, holding: 0, shaky: 0, total: 0, weakest: [] },
+      metas: { solid: 0, holding: 0, shaky: 0, total: 0, queue: [] },
       countries: [],
       totals: { rounds: 0, correctPct: null },
       rounds: [],

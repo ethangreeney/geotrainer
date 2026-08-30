@@ -1076,18 +1076,35 @@ async function buildDashboard(env, user) {
   }))
   const solid = metaRows.filter((m) => m.seen >= 3 && pct(m.correct, m.seen) >= 0.8)
   const shaky = metaRows.filter((m) => pct(m.correct, m.seen) < 0.5)
-  const weakest = [...metaRows]
-    .sort((a, b) => pct(a.correct, a.seen) - pct(b.correct, b.seen) || b.seen - a.seen)
+  // The head of the review queue, in the queue's own order: cards owed now,
+  // least likely still remembered first — exactly how buildDeck ranks them —
+  // then whatever wakes up soonest. Each carries the model's current recall
+  // odds, because that number, not a lifetime average, is what the scheduler
+  // is actually acting on.
+  const nowMs = now.getTime()
+  const cardRows = Object.entries(state.deckCards).map(([metaName, card]) => ({
+    metaName,
+    recall: retrievabilityOf(card, now),
+    due: card.due,
+    dueMs: Date.parse(card.due),
+  }))
+  const queue = [
+    ...cardRows
+      .filter((c) => c.dueMs <= nowMs)
+      .sort((a, b) => a.recall - b.recall || a.dueMs - b.dueMs),
+    ...cardRows.filter((c) => c.dueMs > nowMs).sort((a, b) => a.dueMs - b.dueMs),
+  ]
     .slice(0, 12)
+    .map(({ metaName, recall, due, dueMs }) => ({ metaName, recall, due, dueNow: dueMs <= nowMs }))
 
-  const [countRow, roundRows, weakestImages, series, regionRows] = await Promise.all([
+  const [countRow, roundRows, queueImages, series, regionRows] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ?').bind(user.id).first(),
     env.DB.prepare('SELECT json FROM rounds WHERE user_id = ? ORDER BY ts DESC LIMIT 300')
       .bind(user.id)
       .all(),
     // A slipping clue is worth looking at, not just reading — so each one
     // carries the picture from its LM card.
-    Promise.all(weakest.map((m) => metaImage(env, m.metaName))),
+    Promise.all(queue.map((m) => metaImage(env, m.metaName))),
     buildProgress(env, user, state.deckCards, now),
     // Duel losses by admin-1 region, for the one insight the country tally
     // cannot give: WHERE inside the country the points go. Aggregated in SQL
@@ -1120,7 +1137,7 @@ async function buildDashboard(env, user) {
     if (!cur || (row.lost ?? 0) > cur.lost)
       worstRegionByCode.set(row.cc, { name: row.region, n: row.plays ?? 0, lost: row.lost ?? 0 })
   }
-  const weakestWithImages = weakest.map((m, i) => ({ ...m, image: weakestImages[i] }))
+  const queueWithImages = queue.map((m, i) => ({ ...m, image: queueImages[i] }))
 
   const nameByCode = new Map()
   const rounds = (roundRows?.results ?? []).map((row) => {
@@ -1190,7 +1207,7 @@ async function buildDashboard(env, user) {
       holding: metaRows.length - solid.length - shaky.length,
       shaky: shaky.length,
       total: metaRows.length,
-      weakest: weakestWithImages,
+      queue: queueWithImages,
     },
     countries,
     totals: { rounds: countRow?.n ?? 0, correctPct: Math.round(100 * pct(correctAll, seenAll)) },
@@ -1700,7 +1717,15 @@ async function handleRegeocode(env, user, { dryRun = false } = {}) {
     if (round.metaName) {
       const m = (metas[round.metaName] ??= { seen: 0, correct: 0, streak: 0 })
       m.seen += 1
-      if (round.correctScope) {
+      // What actually happened, in order of authority: a rating the player
+      // tapped on the post-round card outranks the pin, and rounds stored
+      // before correctScope existed fall back to the country call — counting
+      // their blank as a miss is how a rebuild once zeroed metas the player
+      // had never got wrong.
+      const credited = round.rating
+        ? round.rating !== 'again'
+        : (round.correctScope ?? round.correctCountry)
+      if (credited) {
         m.correct += 1
         m.streak += 1
       } else {

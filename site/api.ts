@@ -146,11 +146,13 @@ export interface Me {
   createdAt: string
   trainerMapId: string | null
 }
-export interface WeakMeta {
+export interface QueueMeta {
   metaName: string
-  seen: number
-  correct: number
-  lapses: number
+  /** The scheduler's current odds you would call this right, 0..1. */
+  recall: number
+  /** When the card comes back. */
+  due: string
+  dueNow: boolean
   /** The clue's picture from its Learnable Meta card, when one exists. */
   image: string | null
 }
@@ -248,7 +250,7 @@ export interface DashboardData {
      scheduler has not chosen would be an invention. Empty when the allowance
      is spent or the ladder has nothing left unseen. */
   day?: { dailyNew: number; newAllowance: number; doneForToday: boolean; upNext?: UpNextMeta[] }
-  metas: { solid: number; holding: number; shaky: number; total: number; weakest: WeakMeta[] }
+  metas: { solid: number; holding: number; shaky: number; total: number; queue: QueueMeta[] }
   countries: CountryStat[]
   totals: { rounds: number; correctPct: number | null }
   rounds: RoundStat[]

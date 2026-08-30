@@ -11,7 +11,7 @@ import {
   type HeldPoint,
   type RoundStat,
   type UpNextMeta,
-  type WeakMeta,
+  type QueueMeta,
 } from '../api'
 import { demoData } from '../demo'
 import { useWidth } from '../measure'
@@ -91,9 +91,6 @@ function thumb(panoId: string, heading: number | null, w: number, h: number) {
 
 /** Accuracy buckets, cold (wrong) to warm (right), around the 50% midpoint. */
 const DV = ['var(--d1)', 'var(--d2)', 'var(--d3)', 'var(--d4)', 'var(--d5)', 'var(--d6)', 'var(--d7)']
-const bucket = (acc: number) =>
-  acc < 0.2 ? 0 : acc < 0.35 ? 1 : acc < 0.45 ? 2 : acc < 0.55 ? 3 : acc < 0.7 ? 4 : acc < 0.85 ? 5 : 6
-
 /**
  * Ticks a person would actually draw: 0, then round steps up to the cap.
  *
@@ -282,53 +279,6 @@ function Climb({ series, total }: { series: HeldPoint[]; total: number }) {
   )
 }
 
-function Countries({ rows }: { rows: CountryStat[] }) {
-  const [box, W] = useWidth()
-  const top = rows.slice(0, 12)
-  const max = Math.max(...top.map((c) => c.rounds), 1)
-  const rowH = 29
-  const x0 = 112
-  const w = Math.max(60, W - x0 - 76) // the right gutter holds "41 · 90%"
-  const h = top.length * rowH + 10
-  return (
-    <>
-      <div className="fig" ref={box}>
-        {W > 0 && (
-      <svg className="chart" width={W} height={h} viewBox={`0 0 ${W} ${h}`} role="img"
-        aria-label="Rounds played per country, shaded by how often you called the country right">
-        <line className="axis" x1={x0} x2={x0} y1={2} y2={h - 8} />
-        {top.map((c, i) => {
-          const y = i * rowH + 2
-          const acc = c.rounds ? c.correct / c.rounds : 0
-          const bw = Math.max(2, (c.rounds / max) * w)
-          return (
-            <g key={c.code}>
-              <text className="lbl" x={x0 - 10} y={y + 18} textAnchor="end">
-                {clean(c.name).length > 15 ? clean(c.name).slice(0, 14) + '…' : clean(c.name)}
-              </text>
-              <rect x={x0} y={y + 5} width={bw} height={17} rx={2.5} fill={DV[bucket(acc)]} />
-              <text className="tick" x={x0 + bw + 8} y={y + 18} >
-                {c.rounds} · {Math.round(acc * 100)}%
-              </text>
-            </g>
-          )
-        })}
-      </svg>
-        )}
-      </div>
-      <div className="ramp">
-        <span className="tag">Called it wrong</span>
-        <span className="sw" aria-hidden>
-          {DV.map((c) => (
-            <i key={c} style={{ background: c }} />
-          ))}
-        </span>
-        <span className="tag">Called it right</span>
-      </div>
-    </>
-  )
-}
-
 /* Where ranked duels actually bleed points, country by country. The deck's
    new-clue order is built from exactly these numbers, so this list is the
    dealing order's explanation: the top row is why tomorrow's clues come from
@@ -346,7 +296,7 @@ function Duels({ rows }: { rows: CountryStat[] }) {
      wide enough for "38.9k pts · mostly Krasnoyarsk Krai" beside a near-max
      bar without the name sailing past the panel edge. */
   const rowH = (c: CountryStat) => (c.worstRegion ? 45 : 29)
-  const ys = rows.reduce<number[]>((a, c, i) => (a.push(i ? a[i - 1] + rowH(rows[i - 1])! : 2), a), [])
+  const ys = rows.reduce<number[]>((a, _c, i) => (a.push(i ? a[i - 1] + rowH(rows[i - 1])! : 2), a), [])
   const h = ys[rows.length - 1]! + rowH(rows[rows.length - 1]!) + 8
   return (
     <div className="fig" ref={box}>
@@ -456,10 +406,12 @@ function Scores({ rounds }: { rounds: RoundStat[] }) {
   )
 }
 
-/** One clue worth another look: thumbnail, name, hit rate so far. */
-function Work({ m }: { m: WeakMeta }) {
+/** One card from the head of the queue: thumbnail, name, and the scheduler's
+ * current odds you would still call it right — the number the queue is
+ * actually ordered by. */
+function Work({ m }: { m: QueueMeta }) {
   const { country, clue } = splitMeta(m.metaName)
-  const pct = m.seen > 0 ? Math.round((m.correct / m.seen) * 100) : 0
+  const pct = Math.round(m.recall * 100)
   const inner = (
     <>
       {/* A clue with no stored photo gets a quiet empty slot, not the words
@@ -473,12 +425,10 @@ function Work({ m }: { m: WeakMeta }) {
       </span>
       <span className="rt">
         <span className="pc mono">{pct}%</span>
-        <span className="meter warm">
+        <span className={'meter' + (m.dueNow ? ' warm' : '')}>
           <i style={{ width: `${pct}%` }} />
         </span>
-        <span className="seen">
-          {m.correct} of {m.seen} called right
-        </span>
+        <span className="seen">{m.dueNow ? 'owed now' : `back ${whenNext(m.due)}`}</span>
       </span>
     </>
   )
@@ -798,10 +748,6 @@ export default function Dashboard() {
     () => [...(data?.rounds ?? [])].sort((a, b) => +new Date(b.ts) - +new Date(a.ts)),
     [data],
   )
-  const byRounds = useMemo(
-    () => [...(data?.countries ?? [])].sort((a, b) => b.rounds - a.rounds),
-    [data],
-  )
   const byDuelLoss = useMemo(
     () =>
       [...(data?.countries ?? [])]
@@ -908,7 +854,6 @@ export default function Dashboard() {
      catalogs change. An older Worker sends no ladderTotal and gets the old one. */
   const ladder = deck.ladderTotal ?? deck.total
   const trackedShare = ladder > 0 ? Math.min(100, (deck.introduced / ladder) * 100) : 0
-  const seenShare = deck.total > 0 ? (deck.introduced / deck.total) * 100 : 0
 
   /* What today still asks for, which the deck on its own cannot say: "nothing
      due" is equally true of a day with ten unmet clues still allowed and of a
@@ -1144,17 +1089,18 @@ export default function Dashboard() {
 
             <div className="grid">
               <div className="col c7">
-                {/* A clue the deck has not got into you yet is a thing to
-                    practise, not a scoreline — so it leads the working-out. */}
-                {metas.weakest.length > 0 && (
+                {/* The head of the review queue, in the queue's own order:
+                    what the trainer map will deal next, and the model's odds
+                    you still hold each one. */}
+                {metas.queue.length > 0 && (
                   <div className="panel">
                     <header>
-                      <h2>Worth another look</h2>
-                      <span className="note">the clues coming back first</span>
+                      <h2>Coming back first</h2>
+                      <span className="note">the queue's own order — least likely still known on top</span>
                     </header>
                     <div className="body flush">
                       <div className="wks">
-                        {metas.weakest.slice(0, 6).map((m) => (
+                        {metas.queue.slice(0, 6).map((m) => (
                           <Work key={m.metaName} m={m} />
                         ))}
                       </div>
@@ -1176,75 +1122,35 @@ export default function Dashboard() {
               </div>
 
               <div className="col c5">
-              <div className="panel">
-                <header>
-                  <h2>Deck</h2>
-                  <span className="note">
-                    <b>{n(deck.introduced)}</b> of {n(ladder)} introduced
-                  </span>
-                </header>
-                <div className="body">
-                  <div className="stack" aria-hidden>
-                    <i style={{ width: `${seenShare}%`, background: 'var(--o3)' }} />
-                    <i style={{ width: `${100 - seenShare}%`, background: 'var(--nodata)' }} />
-                  </div>
-                  <div className="legend">
-                    <span>
-                      <i style={{ background: 'var(--o3)' }} /> Introduced
-                    </span>
-                    <span>
-                      <i style={{ background: 'var(--nodata)' }} /> Not yet seen
-                    </span>
-                  </div>
-                  <div className="tbl dk">
-                    {[
-                      /* The same buckets the ladder legend names, so the two
-                         panels can never disagree about what "bedding in"
-                         counts. deck.learning is a scheduler internal the
-                         reader has no other name for; it stays off the page. */
-                      { k: 'Due now', v: deck.due, of: deck.introduced, warm: true },
-                      { k: 'Shaky', v: metas.shaky, of: deck.introduced, warm: true },
-                      { k: 'Bedding in', v: metas.holding, of: deck.introduced, warm: false },
-                      { k: 'Holding solid', v: metas.solid, of: deck.introduced, warm: false },
-                      { k: 'Not yet seen', v: deck.unseen, of: deck.total, warm: false },
-                    ].map((r) => (
-                      <div className="r" key={r.k}>
-                        <span className="nm">{r.k}</span>
-                        <span className={'meter' + (r.warm ? ' warm' : '')}>
-                          <i style={{ width: `${r.of > 0 ? Math.min(100, (r.v / r.of) * 100) : 0}%` }} />
-                        </span>
-                        <span className="num rt">{n(r.v)}</span>
-                      </div>
-                    ))}
-                  </div>
-                  {/* The rate the last row of that table empties at, and the
-                      only number on this page you set rather than earn. An
-                      older Worker sends no `day`, and with no stored value to
-                      show the honest thing is no control at all. */}
-                  {dayInfo && <NewPerDay initial={dayInfo.dailyNew} />}
-                </div>
-              </div>
-
-              <div className="panel">
-                <header>
-                  <h2>Where you play</h2>
-                  <span className="note">
-                    <b>{n(byRounds.length)}</b> countries · shaded by hit rate
-                  </span>
-                </header>
-                <div className="body">
-                  {byRounds.length === 0 ? <p className="empty">No countries yet.</p> : <Countries rows={byRounds} />}
-                  {byDuelLoss.length > 0 && (
-                    <div className="duels">
-                      <div className="duelHead">
-                        <h3>Where duels cost you</h3>
-                        <span className="note">new clues are dealt from the top of this list</span>
-                      </div>
+                {/* The Deck bucket table used to live here; the ladder at the
+                    top already says all of it, so the column keeps only what
+                    the waffle cannot: where the points actually go. */}
+                {byDuelLoss.length > 0 && (
+                  <div className="panel">
+                    <header>
+                      <h2>Where duels cost you</h2>
+                      <span className="note">new clues are dealt from the top of this list</span>
+                    </header>
+                    <div className="body">
                       <Duels rows={byDuelLoss} />
                     </div>
-                  )}
-                </div>
-              </div>
+                  </div>
+                )}
+
+                {/* The only number on this page you set rather than earn. An
+                    older Worker sends no `day`, and with no stored value to
+                    show the honest thing is no control at all. */}
+                {dayInfo && (
+                  <div className="panel">
+                    <header>
+                      <h2>Pace</h2>
+                      <span className="note">how fast new material arrives</span>
+                    </header>
+                    <div className="body">
+                      <NewPerDay initial={dayInfo.dailyNew} />
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
