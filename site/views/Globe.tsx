@@ -807,7 +807,7 @@ export default function Globe({ still }: { still: boolean }) {
         role="img"
         aria-label="A globe of dots. It turns to each pair of countries this player has confused and draws a line from the guess to the true location."
       />
-      <p className={'lpCap mono' + (lit || still ? ' on' : '')} aria-live="off">
+      <p className={'lpCap' + (lit || still ? ' on' : '')} aria-live="off">
         {PAIRS[beat].say}
       </p>
     </div>

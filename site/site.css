@@ -1367,13 +1367,22 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .lpGlobe:active { cursor: grabbing; }
 
 /* The caption is the other half of the arc — it says what the line means, and
-   it comes and goes with it. */
+   it comes and goes with it. It sits on a small raised card, the same panel
+   the app deals its review cards on, so the words read as a card the deck
+   turned over rather than a string floating on the void. */
 .lpCap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 9px;
   margin-top: var(--s3);
   max-width: 42ch;
-  font: 400 var(--fs-2)/1.45 var(--mono);
+  padding: 10px 14px;
+  font: 400 var(--fs-3)/1.45 var(--sans);
   color: var(--ink-2);
-  text-shadow: 0 1px 10px var(--plane);
+  background: var(--panel);
+  border: 1px solid var(--edge-soft);
+  border-radius: var(--r-md);
+  box-shadow: var(--lift-sm);
   pointer-events: none;
   opacity: 0;
   transform: translateY(5px);
@@ -1382,13 +1391,12 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .lpCap.on { opacity: 1; transform: none; }
 .lpCap::before {
   content: '';
-  display: inline-block;
+  flex: none;
+  align-self: center;
   width: 6px;
   height: 6px;
-  margin-right: 9px;
   border-radius: 999px;
   background: var(--lime);
-  vertical-align: middle;
 }
 
 /* --------------------------------------------------- one screen, no scroll */
