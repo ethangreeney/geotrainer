@@ -1014,6 +1014,58 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .wk .pc { font: 500 var(--fs-3)/var(--lh-flat) var(--mono); font-variant-numeric: tabular-nums; color: var(--amber-2); }
 .wk .seen { font: 400 var(--fs-1)/var(--lh-flat) var(--sans); color: var(--ink-4); white-space: nowrap; }
 
+/* the whole queue, behind a fold under the head: names and dates, no posters */
+.qfold > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s4);
+  padding: var(--s4) 18px;
+  border-top: 1px solid var(--rule-soft);
+  font: 600 var(--fs-3)/var(--lh-flat) var(--sans);
+  color: var(--ink-2);
+  transition: color 0.15s var(--ease);
+}
+.qfold > summary::-webkit-details-marker { display: none; }
+.qfold > summary::after {
+  content: '+';
+  margin-left: auto;
+  font: 400 var(--fs-4)/1 var(--sans);
+  color: var(--ink-4);
+}
+.qfold[open] > summary::after { content: '–'; }
+.qfold > summary:hover { color: var(--ink); }
+.qfold > summary:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
+.q {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px auto;
+  align-items: baseline;
+  gap: var(--s3);
+  padding: 7px 18px;
+  border-top: 1px solid var(--rule-soft);
+}
+.q .nm {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 var(--fs-3)/var(--lh-flat) var(--sans);
+  color: var(--ink-2);
+}
+.q .nm .where { color: var(--ink-4); }
+.q .pc {
+  text-align: right;
+  font: 500 var(--fs-2)/var(--lh-flat) var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--amber-2);
+}
+.q .when {
+  text-align: right;
+  font: 400 var(--fs-2)/var(--lh-flat) var(--sans);
+  color: var(--ink-4);
+  white-space: nowrap;
+}
+
 /* the round log, behind its own fold: it is a receipt, not a finding */
 .more { margin-top: var(--rhythm); border-top: 1px solid var(--rule); }
 .more > summary {

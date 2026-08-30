@@ -65,6 +65,23 @@ const QUEUE = [
   image: shot(pano, head),
 }))
 
+/* The tail the fold opens onto: the Worker sends every tracked card, names
+   and dates only (no image past the head), so the demo does too — recall
+   climbing and due dates stretching out the way a healthy deck's do. */
+const QUEUE_TAIL = [
+  ['Chile: All yellow lines', 0.97, 3], ['Norway: Long outer lines', 0.97, 4],
+  ['Kenya: Follow car', 0.98, 5], ['Ecuador: Bollard', 0.98, 7],
+  ['Bolivia: Curvy poles', 0.99, 9], ['Ghana: Unique car', 0.99, 12],
+  ['Vietnam: Bollards', 0.99, 15], ['Iceland: Bollards', 1, 19],
+  ['Turkey: Stop signs', 1, 24], ['Japan: Low cam', 1, 31],
+].map(([metaName, recall, days]) => ({
+  metaName: metaName as string,
+  recall: recall as number,
+  due: new Date(NOW + (days as number) * DAY).toISOString(),
+  dueNow: false,
+  image: null,
+}))
+
 /* Duel losses are heaviest where play is frequent AND accuracy is poor —
    Russia's 38 rounds at 55% cost more than Cambodia's 12 at 25% — and only
    Brazil and Russia have pooled enough rounds in one region to name it. */
@@ -146,7 +163,7 @@ const PLAYED: DashboardData = {
     nextDue: new Date(NOW + 3.2 * 3_600_000).toISOString(),
   },
   day: { dailyNew: 10, newAllowance: 4, doneForToday: false, upNext: UP_NEXT },
-  metas: { solid: 71, holding: 31, shaky: 18, total: 120, queue: QUEUE },
+  metas: { solid: 71, holding: 31, shaky: 18, total: 120, queue: [...QUEUE, ...QUEUE_TAIL] },
   countries: COUNTRIES,
   totals: { rounds: 605, correctPct: 58.6 },
   rounds: ROUNDS,

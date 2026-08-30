@@ -442,6 +442,47 @@ function Work({ m }: { m: QueueMeta }) {
 }
 
 /**
+ * The rest of the queue, behind a fold: every tracked clue, the one most
+ * likely to have been forgotten on top, each with the day it comes back.
+ *
+ * Deliberately not the deal order the head above uses — the head answers
+ * "what will the map hand me next", which follows due dates, and a card
+ * learned this morning is due back tonight at 99.7% while an older one sags
+ * at 92% until tomorrow. Read as a single long list that ordering looks
+ * wrong. This one answers the other question — "how well am I holding all of
+ * it" — so it sorts by the model's odds and lets the dates fall where they
+ * fall.
+ */
+function WholeQueue({ queue }: { queue: QueueMeta[] }) {
+  const rows = [...queue].sort(
+    (a, b) => a.recall - b.recall || +new Date(a.due) - +new Date(b.due),
+  )
+  return (
+    <details className="qfold">
+      <summary>
+        Every clue in the deck
+        <span className="moreNote">{rows.length} tracked — least likely still known on top</span>
+      </summary>
+      <div className="qall">
+        {rows.map((m) => {
+          const { country, clue } = splitMeta(m.metaName)
+          return (
+            <div className="q" key={m.metaName}>
+              <span className="nm">
+                {clue}
+                {country && <span className="where"> · {country}</span>}
+              </span>
+              <span className="pc mono">{Math.round(m.recall * 100)}%</span>
+              <span className="when">{m.dueNow ? 'owed now' : `back ${whenNext(m.due)}`}</span>
+            </div>
+          )
+        })}
+      </div>
+    </details>
+  )
+}
+
+/**
  * The one setting there is: how many never-seen clues a day may introduce.
  *
  * It sits under the deck table rather than anywhere near the hero because it
@@ -1104,6 +1145,7 @@ export default function Dashboard() {
                           <Work key={m.metaName} m={m} />
                         ))}
                       </div>
+                      {metas.queue.length > 6 && <WholeQueue queue={metas.queue} />}
                     </div>
                   </div>
                 )}

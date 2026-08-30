@@ -1093,9 +1093,10 @@ async function buildDashboard(env, user) {
       .filter((c) => c.dueMs <= nowMs)
       .sort((a, b) => a.recall - b.recall || a.dueMs - b.dueMs),
     ...cardRows.filter((c) => c.dueMs > nowMs).sort((a, b) => a.dueMs - b.dueMs),
-  ]
-    .slice(0, 12)
-    .map(({ metaName, recall, due, dueMs }) => ({ metaName, recall, due, dueNow: dueMs <= nowMs }))
+  ].map(({ metaName, recall, due, dueMs }) => ({ metaName, recall, due, dueNow: dueMs <= nowMs }))
+  // Only the head of the queue is shown as photographs; the rest of the list
+  // is names and dates, so only the head is worth an image fetch each.
+  const QUEUE_SHOTS = 12
 
   const [countRow, roundRows, queueImages, series, regionRows] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM rounds WHERE user_id = ?').bind(user.id).first(),
@@ -1104,7 +1105,7 @@ async function buildDashboard(env, user) {
       .all(),
     // A slipping clue is worth looking at, not just reading — so each one
     // carries the picture from its LM card.
-    Promise.all(queue.map((m) => metaImage(env, m.metaName))),
+    Promise.all(queue.slice(0, QUEUE_SHOTS).map((m) => metaImage(env, m.metaName))),
     buildProgress(env, user, state.deckCards, now),
     // Duel losses by admin-1 region, for the one insight the country tally
     // cannot give: WHERE inside the country the points go. Aggregated in SQL
@@ -1137,7 +1138,7 @@ async function buildDashboard(env, user) {
     if (!cur || (row.lost ?? 0) > cur.lost)
       worstRegionByCode.set(row.cc, { name: row.region, n: row.plays ?? 0, lost: row.lost ?? 0 })
   }
-  const queueWithImages = queue.map((m, i) => ({ ...m, image: queueImages[i] }))
+  const queueWithImages = queue.map((m, i) => ({ ...m, image: queueImages[i] ?? null }))
 
   const nameByCode = new Map()
   const rounds = (roundRows?.results ?? []).map((row) => {
