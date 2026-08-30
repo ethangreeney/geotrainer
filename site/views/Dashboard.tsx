@@ -761,6 +761,69 @@ function Ladder({ solid, holding, shaky, total }: { solid: number; holding: numb
 }
 
 /**
+ * Google retires panoramas when it re-drives a road, and the thumbnail
+ * endpoint answers a retired id with a solid black frame and a clean 200 —
+ * no error ever fires, and the card just sits dark. The endpoint allows
+ * cross-origin reads, which is what makes the darkness detectable: sample
+ * the loaded frame on a tiny canvas, and "every pixel the same" means "no
+ * imagery here any more".
+ */
+function isFlat(img: HTMLImageElement): boolean {
+  try {
+    const c = document.createElement('canvas')
+    c.width = c.height = 8
+    const g = c.getContext('2d')
+    if (!g) return false
+    g.drawImage(img, 0, 0, 8, 8)
+    const d = g.getImageData(0, 0, 8, 8).data
+    let min = 255
+    let max = 0
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (d[i] + d[i + 1] + d[i + 2]) / 3
+      if (v < min) min = v
+      if (v > max) max = v
+    }
+    return max - min < 6
+  } catch {
+    // A tainted or refused canvas proves nothing either way.
+    return false
+  }
+}
+
+/**
+ * Whatever camera stands at these coordinates today, by the same keyless
+ * lookup the maps viewer itself uses (see coach/pano.mjs, which has made this
+ * exact call from the laptop for months). One ask per retired pano, shared —
+ * the grid and the card sheet both reach for the same rescue.
+ */
+const livePano = new Map<string, Promise<string | null>>()
+function findLivePano(lat: number, lng: number, key: string): Promise<string | null> {
+  const held = livePano.get(key)
+  if (held) return held
+  const ask = fetch(
+    'https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/SingleImageSearch',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json+protobuf' },
+      body: JSON.stringify([
+        ['apiv3', null, null, null, 'US', null, null, null, null, null, [[0]]],
+        [[null, null, lat, lng], 50],
+        [
+          [null, null, null, null, null, null, null, null, null, null, [null, null]],
+          null, null, null, null, null, null, null, [2], null, [[[2, true, 2]]],
+        ],
+        [[2, 6]],
+      ]),
+    },
+  )
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => j?.[1]?.[1]?.[1] ?? null)
+    .catch(() => null)
+  livePano.set(key, ask)
+  return ask
+}
+
+/**
  * A Street View thumbnail that does not give up on the first refusal.
  *
  * The dashboard fires a dozen of these in one burst and Google occasionally
@@ -771,18 +834,41 @@ function Ladder({ solid, holding, shaky, total }: { solid: number; holding: numb
  * darkness. The retried URL asks for one more pixel of height, because an
  * identical src would be answered from the browser's memory of the failure
  * instead of asked again.
+ *
+ * A load that succeeds into blackness is the other failure: the pano was
+ * retired. Those are rescued by asking for the camera that stands at the
+ * clue's coordinates now, keeping the catalogued heading — the road hasn't
+ * moved, only the camera on it.
  */
 function Shot({ m, w, h }: { m: UpNextMeta; w: number; h: number }) {
   const [tries, setTries] = useState(0)
-  useEffect(() => setTries(0), [m.panoId])
-  if (!m.panoId) return <span className="dealDark">No frame catalogued</span>
+  const [pano, setPano] = useState(m.panoId)
+  useEffect(() => {
+    setTries(0)
+    setPano(m.panoId)
+  }, [m.panoId])
+  if (!pano) return <span className="dealDark">No frame catalogued</span>
   if (tries > 2) return <span className="dealDark">Street View refused this frame</span>
   return (
     <img
-      src={thumb(m.panoId, m.heading, w, h + tries)}
+      src={thumb(pano, m.heading, w, h + tries)}
       alt=""
       loading="lazy"
       decoding="async"
+      crossOrigin="anonymous"
+      onLoad={(e) => {
+        if (pano !== m.panoId || !isFlat(e.currentTarget)) return
+        // "Refused" rather than "not catalogued" when the rescue also comes
+        // back empty: a location was catalogued, the imagery is what's gone.
+        if (m.lat == null || m.lng == null) {
+          setTries(3)
+          return
+        }
+        findLivePano(m.lat, m.lng, m.panoId!).then((live) => {
+          if (live && live !== m.panoId) setPano(live)
+          else setTries(3)
+        })
+      }}
       onError={() => setTimeout(() => setTries((t) => t + 1), 700 * (tries + 1))}
     />
   )
@@ -999,6 +1085,11 @@ function NewToday({
   const [open, setOpen] = useState<UpNextMeta | null>(null)
   const [picking, setPicking] = useState(false)
   const [trouble, setTrouble] = useState<string | null>(null)
+  // A twenty-clue allowance is a wall of cards; the section shows the first
+  // two rows and folds the rest, because "what's next" is a glance and the
+  // whole hand is a choice to look.
+  const [showAll, setShowAll] = useState(false)
+  const shown = showAll ? list : list.slice(0, 8)
 
   return (
     <section className="deal">
@@ -1022,7 +1113,7 @@ function NewToday({
       ) : (
         <>
           <ul className="dealGrid">
-            {list.map((m, i) => {
+            {shown.map((m, i) => {
               const { country, clue } = splitMeta(m.name)
               return (
                 <li key={m.name}>
@@ -1043,6 +1134,12 @@ function NewToday({
               )
             })}
           </ul>
+          {list.length > 8 && (
+            <button className="dealMore" onClick={() => setShowAll((s) => !s)}>
+              {showAll ? 'Show fewer' : `Show all ${list.length}`}{' '}
+              <span className="arr mono">{showAll ? '↑' : '↓'}</span>
+            </button>
+          )}
           {/* The honest caveat: new clues queue behind what is owed, so a heavy
               review day meets fewer of these than are laid out here. */}
           <p className="dealSay">

@@ -45,6 +45,11 @@ const MORE_NEXT: UpNextMeta[] = [
   { name: 'Bolivia: Curvy poles', panoId: '1e-XMpRmihur_hNol5bWSQ', heading: 41.91, pitch: 0, lat: -17.480824, lng: -63.123016 },
   { name: 'Ghana: Unique car', panoId: '0Xqstdgc5W5Lv7gD1-iVvQ', heading: 21.76, pitch: 0, lat: 9.457896, lng: -2.4283435 },
   { name: 'Vietnam: Bollards', panoId: '14rstvSmhZsbIVeGAgfdJA', heading: 215.87, pitch: 0, lat: 10.131148, lng: 105.16753 },
+  // A pano Google has retired: the thumbnail endpoint answers it with a flat
+  // black 200, which is exactly the wound the Shot component's canvas check
+  // and live-pano rescue exist for. Kept in the demo so that path stays
+  // walkable in a browser without waiting for a real card to die.
+  { name: 'France: Road Numbers', panoId: '1BJZyDBSq2qWGuxTn88Gtg', heading: 253.49, pitch: 0, lat: 46.980785, lng: 3.0936291 },
 ]
 
 /* The rest of the shelf behind the day's hand, for the picker: the scheduler's

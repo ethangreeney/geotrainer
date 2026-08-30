@@ -816,6 +816,22 @@ code {
 .pkOpen:hover { color: var(--ink); border-color: var(--edge); }
 .pkOpen:hover .arr { transform: translateX(3px); }
 .dealErr { margin-top: var(--s3); font-size: var(--fs-2); }
+/* The fold under the first two rows: quiet, full-width, reads as part of the
+   grid rather than as another call to action. */
+.dealMore {
+  width: 100%;
+  margin-top: var(--s4);
+  padding: 8px 12px;
+  border: 1px dashed var(--rule);
+  border-radius: var(--r-md);
+  background: none;
+  cursor: pointer;
+  font: 600 var(--fs-3)/var(--lh-flat) var(--sans);
+  color: var(--ink-3);
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.dealMore .arr { color: var(--ink-4); }
+.dealMore:hover { color: var(--ink); border-color: var(--edge); }
 
 /* Each card is a button now — the one section made of things never seen is
    the one where "let me look closer" is the whole point — so the button reset
