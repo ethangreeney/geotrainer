@@ -357,6 +357,50 @@ async function metaImage(env, metaName) {
   }
 }
 
+/** Pictures for a whole list of clues at once, cache only: chunked D1 reads
+ * (bound-parameter limit is 100 per statement), no live fetches on the request
+ * path — three hundred queue rows cannot wait on three hundred lookups. A few
+ * of the misses are warmed per visit behind the response (waitUntil), so the
+ * map fills itself in over a handful of dashboard loads instead of never. */
+async function metaImageMap(env, metaNames, ctx) {
+  const wants = metaNames
+    .map((name) => ({ name, loc: locationForMeta(name) }))
+    .filter((w) => w.loc)
+  const nameByKey = new Map(wants.map((w) => [`${w.loc.mapId}:${w.loc.panoId}`, w.name]))
+  const keys = [...nameByKey.keys()]
+  const images = new Map()
+  const CHUNK = 90
+  const stmts = []
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const slice = keys.slice(i, i + CHUNK)
+    stmts.push(
+      env.DB.prepare(
+        `SELECT cache_key, json FROM cards WHERE cache_key IN (${slice.map(() => '?').join(',')})`,
+      ).bind(...slice),
+    )
+  }
+  try {
+    for (const batch of await env.DB.batch(stmts))
+      for (const row of batch.results ?? []) {
+        try {
+          const img = JSON.parse(row.json)?.images?.[0]
+          if (img) images.set(nameByKey.get(row.cache_key), img)
+        } catch {
+          // One unreadable card costs one picture, not the map.
+        }
+      }
+  } catch {
+    // Cache table missing (pre-migration) — every image is simply absent.
+  }
+  const WARM = 25
+  const misses = wants.filter((w) => !images.has(w.name)).slice(0, WARM)
+  if (ctx && misses.length)
+    ctx.waitUntil(
+      Promise.all(misses.map((w) => lmMeta(env, w.loc.mapId, w.loc.panoId, ctx).catch(() => null))),
+    )
+  return images
+}
+
 // ---------- scope outlines ----------
 
 /**
@@ -1036,7 +1080,7 @@ ${rows}
 
 /** Everything the personal dashboard draws, in one round trip: deck health,
  * meta mastery buckets, per-country accuracy and a recent-rounds feed. */
-async function buildDashboard(env, user) {
+async function buildDashboard(env, user, ctx) {
   const now = new Date()
   const state = await loadUserState(env, user.id)
   const ladder = ladderOnce()
@@ -1094,8 +1138,9 @@ async function buildDashboard(env, user) {
       .sort((a, b) => a.recall - b.recall || a.dueMs - b.dueMs),
     ...cardRows.filter((c) => c.dueMs > nowMs).sort((a, b) => a.dueMs - b.dueMs),
   ].map(({ metaName, recall, due, dueMs }) => ({ metaName, recall, due, dueNow: dueMs <= nowMs }))
-  // Only the head of the queue is shown as photographs; the rest of the list
-  // is names and dates, so only the head is worth an image fetch each.
+  // The head of the queue is shown as photographs and must never lack one, so
+  // its misses are fetched live; the rest of the list gets whatever the cache
+  // already holds, and the hover previews grow more complete with every visit.
   const QUEUE_SHOTS = 12
 
   const [countRow, roundRows, queueImages, series, regionRows] = await Promise.all([
@@ -1105,7 +1150,16 @@ async function buildDashboard(env, user) {
       .all(),
     // A slipping clue is worth looking at, not just reading — so each one
     // carries the picture from its LM card.
-    Promise.all(queue.slice(0, QUEUE_SHOTS).map((m) => metaImage(env, m.metaName))),
+    metaImageMap(env, queue.map((m) => m.metaName), ctx).then(async (images) => {
+      await Promise.all(
+        queue.slice(0, QUEUE_SHOTS).map(async (m) => {
+          if (images.has(m.metaName)) return
+          const img = await metaImage(env, m.metaName)
+          if (img) images.set(m.metaName, img)
+        }),
+      )
+      return images
+    }),
     buildProgress(env, user, state.deckCards, now),
     // Duel losses by admin-1 region, for the one insight the country tally
     // cannot give: WHERE inside the country the points go. Aggregated in SQL
@@ -1138,7 +1192,7 @@ async function buildDashboard(env, user) {
     if (!cur || (row.lost ?? 0) > cur.lost)
       worstRegionByCode.set(row.cc, { name: row.region, n: row.plays ?? 0, lost: row.lost ?? 0 })
   }
-  const queueWithImages = queue.map((m, i) => ({ ...m, image: queueImages[i] ?? null }))
+  const queueWithImages = queue.map((m) => ({ ...m, image: queueImages.get(m.metaName) ?? null }))
 
   const nameByCode = new Map()
   const rounds = (roundRows?.results ?? []).map((row) => {
@@ -2039,7 +2093,7 @@ export default {
       }
 
       if (request.method === 'GET' && path === '/api/dashboard')
-        return json(await buildDashboard(env, user))
+        return json(await buildDashboard(env, user, ctx))
 
       // The whole instance at a glance, for the one operator: opened in a
       // browser (?token= works like everywhere else) it renders as a page,

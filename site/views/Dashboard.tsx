@@ -454,12 +454,36 @@ function Work({ m }: { m: QueueMeta }) {
  * it" — so it sorts by the model's odds and lets the dates fall where they
  * fall. The percentages go quiet at 100 so the handful of clues actually
  * sagging are the ones the eye lands on.
+ *
+ * The sort runs on the same rounded number the rows print, not the raw odds
+ * underneath: sorted raw, a 91.4% "back tomorrow" sits above a 90.6% "back in
+ * 13 hours" and the list reads as shuffled, because both print as 91. Ties on
+ * the printed number break by who returns first, so within a percent the
+ * dates run forward too and the whole list reads ordered — which it is.
+ *
+ * Hovering a row floats the clue's photograph beside the dialog, when the
+ * Worker had one cached. The <img> src is only set for the hovered row, so
+ * opening the list never downloads three hundred pictures.
  */
 function WholeQueue({ queue }: { queue: QueueMeta[] }) {
   const dlg = useRef<HTMLDialogElement>(null)
+  const [peek, setPeek] = useState<{ image: string; y: number } | null>(null)
   const rows = [...queue].sort(
-    (a, b) => a.recall - b.recall || +new Date(a.due) - +new Date(b.due),
+    (a, b) =>
+      Math.round(a.recall * 100) - Math.round(b.recall * 100) ||
+      +new Date(a.due) - +new Date(b.due),
   )
+  const peekAt = (m: QueueMeta, el: HTMLElement) => {
+    const frame = dlg.current?.getBoundingClientRect()
+    // No picture, or no room beside the dialog for one — nothing to float.
+    if (!m.image || !frame || window.innerWidth - frame.right < 260) {
+      setPeek(null)
+      return
+    }
+    const row = el.getBoundingClientRect()
+    const y = Math.min(Math.max(row.top + row.height / 2, 110), window.innerHeight - 110)
+    setPeek({ image: m.image, y })
+  }
   return (
     <>
       <button className="qopen" onClick={() => dlg.current?.showModal()}>
@@ -486,12 +510,16 @@ function WholeQueue({ queue }: { queue: QueueMeta[] }) {
             ×
           </button>
         </header>
-        <div className="qall scroll">
+        <div className="qall scroll" onMouseLeave={() => setPeek(null)}>
           {rows.map((m) => {
             const { country, clue } = splitMeta(m.metaName)
             const pct = Math.round(m.recall * 100)
             return (
-              <div className="q" key={m.metaName}>
+              <div
+                className="q"
+                key={m.metaName}
+                onMouseEnter={(e) => peekAt(m, e.currentTarget)}
+              >
                 <span className="nm">
                   {clue}
                   {country && <span className="where"> · {country}</span>}
@@ -502,6 +530,11 @@ function WholeQueue({ queue }: { queue: QueueMeta[] }) {
             )
           })}
         </div>
+        {peek && (
+          <div className="qpeek" style={{ top: peek.y }} aria-hidden>
+            <img src={peek.image} alt="" />
+          </div>
+        )}
       </dialog>
     </>
   )

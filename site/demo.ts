@@ -65,21 +65,28 @@ const QUEUE = [
   image: shot(pano, head),
 }))
 
-/* The tail the fold opens onto: the Worker sends every tracked card, names
-   and dates only (no image past the head), so the demo does too — recall
-   climbing and due dates stretching out the way a healthy deck's do. */
+/* The tail the dialog opens onto: the Worker sends every tracked card with
+   whatever picture its cache holds, so the demo's tail carries images too —
+   recall climbing and due dates stretching out the way a healthy deck's do.
+   One row is left pictureless on purpose: a cache miss must hover to nothing,
+   not to a broken frame. */
 const QUEUE_TAIL = [
-  ['Chile: All yellow lines', 0.97, 3], ['Norway: Long outer lines', 0.97, 4],
-  ['Kenya: Follow car', 0.98, 5], ['Ecuador: Bollard', 0.98, 7],
-  ['Bolivia: Curvy poles', 0.99, 9], ['Ghana: Unique car', 0.99, 12],
-  ['Vietnam: Bollards', 0.99, 15], ['Iceland: Bollards', 1, 19],
-  ['Turkey: Stop signs', 1, 24], ['Japan: Low cam', 1, 31],
-].map(([metaName, recall, days]) => ({
+  ['Chile: All yellow lines', 0.97, 3, '01fvRiPIz8Nzw3Fb2rpYtw', 120],
+  ['Norway: Long outer lines', 0.97, 4, '04kN4e3qQ7GcYghiv8u00w', 45],
+  ['Kenya: Follow car', 0.98, 5, '90sh3R19FExlu78PIgxhGA', 210],
+  ['Ecuador: Bollard', 0.98, 7, 'c91CYyzSzpP3BN-yC5_DIw', 88],
+  ['Bolivia: Curvy poles', 0.99, 9, '4y0Oz8N1P-8ERGVCZfzvVQ', 152],
+  ['Ghana: Unique car', 0.99, 12, '3jY81kSZFnX2ZatFBPuqgQ', 265],
+  ['Vietnam: Bollards', 0.99, 15, '01fvRiPIz8Nzw3Fb2rpYtw', 310],
+  ['Iceland: Bollards', 1, 19, null, 0],
+  ['Turkey: Stop signs', 1, 24, '90sh3R19FExlu78PIgxhGA', 12],
+  ['Japan: Low cam', 1, 31, '04kN4e3qQ7GcYghiv8u00w', 190],
+].map(([metaName, recall, days, pano, head]) => ({
   metaName: metaName as string,
   recall: recall as number,
   due: new Date(NOW + (days as number) * DAY).toISOString(),
   dueNow: false,
-  image: null,
+  image: pano ? shot(pano as string, head as number) : null,
 }))
 
 /* Duel losses are heaviest where play is frequent AND accuracy is poor —

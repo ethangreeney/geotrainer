@@ -1102,6 +1102,30 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 @keyframes qdlgRows {
   from { opacity: 0; transform: translateY(6px); }
 }
+/* The hovered clue's photograph, floated beside the dialog. Fixed-position,
+   but inside the <dialog> element on purpose: the dialog paints in the top
+   layer, and a sibling would render underneath the backdrop. Only ever shown
+   when the viewport leaves at least 260px beside the 560px dialog, so the
+   dialog's right edge is at 50% + 280px by construction. */
+.qpeek {
+  position: fixed;
+  left: calc(50% + 294px);
+  transform: translateY(-50%);
+  width: 236px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--well);
+  box-shadow: var(--lift);
+  pointer-events: none;
+  animation: qdlgRows 0.18s var(--ease);
+}
+.qpeek img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
 .q {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 44px auto;
