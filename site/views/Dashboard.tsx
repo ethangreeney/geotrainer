@@ -442,8 +442,9 @@ function Work({ m }: { m: QueueMeta }) {
 }
 
 /**
- * The rest of the queue, behind a fold: every tracked clue, the one most
- * likely to have been forgotten on top, each with the day it comes back.
+ * The rest of the queue, in a dialog rather than a fold: 300 rows unrolled
+ * inline made the page a corridor, so the list scrolls inside its own frame
+ * and the page stays the length it was.
  *
  * Deliberately not the deal order the head above uses — the head answers
  * "what will the map hand me next", which follows due dates, and a card
@@ -451,34 +452,58 @@ function Work({ m }: { m: QueueMeta }) {
  * at 92% until tomorrow. Read as a single long list that ordering looks
  * wrong. This one answers the other question — "how well am I holding all of
  * it" — so it sorts by the model's odds and lets the dates fall where they
- * fall.
+ * fall. The percentages go quiet at 100 so the handful of clues actually
+ * sagging are the ones the eye lands on.
  */
 function WholeQueue({ queue }: { queue: QueueMeta[] }) {
+  const dlg = useRef<HTMLDialogElement>(null)
   const rows = [...queue].sort(
     (a, b) => a.recall - b.recall || +new Date(a.due) - +new Date(b.due),
   )
   return (
-    <details className="qfold">
-      <summary>
+    <>
+      <button className="qopen" onClick={() => dlg.current?.showModal()}>
         Every clue in the deck
-        <span className="moreNote">{rows.length} tracked — least likely still known on top</span>
-      </summary>
-      <div className="qall">
-        {rows.map((m) => {
-          const { country, clue } = splitMeta(m.metaName)
-          return (
-            <div className="q" key={m.metaName}>
-              <span className="nm">
-                {clue}
-                {country && <span className="where"> · {country}</span>}
-              </span>
-              <span className="pc mono">{Math.round(m.recall * 100)}%</span>
-              <span className="when">{m.dueNow ? 'owed now' : `back ${whenNext(m.due)}`}</span>
-            </div>
-          )
-        })}
-      </div>
-    </details>
+        <span className="moreNote">{rows.length} tracked</span>
+        <span className="arr mono" aria-hidden>
+          →
+        </span>
+      </button>
+      {/* Clicking the backdrop is clicking the dialog element itself; a click
+          on anything inside it lands on a child instead. */}
+      <dialog
+        className="qdlg"
+        ref={dlg}
+        aria-label="Every clue in the deck"
+        onClick={(e) => e.target === dlg.current && dlg.current.close()}
+      >
+        <header className="qhead">
+          <div>
+            <h2>Every clue in the deck</h2>
+            <span className="note">{rows.length} tracked — least likely still known on top</span>
+          </div>
+          <button className="qx mono" onClick={() => dlg.current?.close()} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div className="qall scroll">
+          {rows.map((m) => {
+            const { country, clue } = splitMeta(m.metaName)
+            const pct = Math.round(m.recall * 100)
+            return (
+              <div className="q" key={m.metaName}>
+                <span className="nm">
+                  {clue}
+                  {country && <span className="where"> · {country}</span>}
+                </span>
+                <span className={'pc mono' + (m.dueNow || pct < 100 ? ' live' : '')}>{pct}%</span>
+                <span className="when">{m.dueNow ? 'owed now' : `back ${whenNext(m.due)}`}</span>
+              </div>
+            )
+          })}
+        </div>
+      </dialog>
+    </>
   )
 }
 
