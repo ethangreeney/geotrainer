@@ -210,6 +210,10 @@ export interface UpNextMeta {
   pitch: number | null
   lat: number | null
   lng: number | null
+  /** True when this clue is in the list because the player pinned it, not
+   * because the scheduler chose it. Optional — an older Worker sends no flag,
+   * and no flag means nothing was pinned, which is also what false means. */
+  pinned?: boolean
 }
 export interface DashboardData {
   name: string
@@ -249,7 +253,19 @@ export interface DashboardData {
      numbers but not the list is a real deploy state, and naming clues the
      scheduler has not chosen would be an invention. Empty when the allowance
      is spent or the ladder has nothing left unseen. */
-  day?: { dailyNew: number; newAllowance: number; doneForToday: boolean; upNext?: UpNextMeta[] }
+  /* `pool` is the whole shelf `upNext` was dealt from: every unseen clue the
+     unlocked ladder holds, in the exact order the scheduler would introduce
+     them — its first `newAllowance` entries ARE `upNext`. It exists so the
+     picker can offer the rest of the ladder without the site growing its own
+     copy of the ordering. Optional like its siblings: an older Worker sends
+     none, and no pool means no picker, not a broken one. */
+  day?: {
+    dailyNew: number
+    newAllowance: number
+    doneForToday: boolean
+    upNext?: UpNextMeta[]
+    pool?: UpNextMeta[]
+  }
   metas: { solid: number; holding: number; shaky: number; total: number; queue: QueueMeta[] }
   countries: CountryStat[]
   totals: { rounds: number; correctPct: number | null }
@@ -267,6 +283,15 @@ export const setDailyNew = (n: number) =>
   request<{ ok: true; config: { dailyNew: number } }>(
     '/config',
     { method: 'POST', body: JSON.stringify({ dailyNew: n }) },
+    true,
+  )
+/** The player's picked clues, replaced whole. The Worker validates every name
+ * against the ladder's actual unseen set and refuses in a sentence, so a
+ * rejection is shown rather than translated — same contract as setDailyNew. */
+export const setPins = (pins: string[]) =>
+  request<{ ok: true; pins: string[] }>(
+    '/pins',
+    { method: 'POST', body: JSON.stringify({ pins }) },
     true,
   )
 export const signup = (name: string) =>

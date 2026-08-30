@@ -772,33 +772,61 @@ code {
 /* -------------------------------------------------------------- new today */
 /* The day's allowance, dealt face up. A clue is a bollard's stripe or the
    holes in a pole — things you recognise rather than things you know the name
-   of — so the row is photographs first and words second, and it runs off the
-   right edge of the shell because a hand is still being dealt. */
-.dealRail {
+   of — so the hand is photographs first and words second. It wraps rather
+   than scrolling sideways: the old rail asked a mouse wheel for a horizontal
+   scroll it does not naturally make, and on a desktop most of the hand was
+   effectively past the edge. */
+.dealGrid {
   list-style: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
   gap: var(--s4);
   margin-top: var(--s5);
   /* a ul carries 40px of list indent by default; the hand has to start on the
      same line as the heading above it */
   padding: 0 0 var(--s4);
-  overflow-x: auto;
-  scrollbar-width: none;
-  scroll-snap-type: x proximity;
 }
-.dealRail::-webkit-scrollbar { display: none; }
-/* the edge only softens while there is another card behind it */
-.dealRail.is-more { mask-image: linear-gradient(90deg, #000 calc(100% - 96px), transparent 100%); }
 
-/* A short hand fills the width; a long one runs off the edge and scrolls.
-   One flex line does both: grow, never shrink, and stop growing before a
-   lone card turns into a billboard. */
+/* The allowance dial and the picker, in the section head of the thing they
+   both change. secHead's note slot is taken over by controls, so the words it
+   used to carry moved down to dealSay. */
+.dealCtl { margin-left: auto; display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap; }
+.pace { display: flex; align-items: center; gap: var(--s2); font: 400 var(--fs-3)/var(--lh-flat) var(--sans); color: var(--ink-3); }
+.paceIn {
+  width: 58px;
+  padding: 5px 8px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.paceIn:disabled { opacity: 0.6; }
+.pkOpen {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  background: none;
+  cursor: pointer;
+  font: 600 var(--fs-3)/var(--lh-flat) var(--sans);
+  color: var(--ink-2);
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.pkOpen .arr { color: var(--ink-4); transition: transform 0.16s var(--ease); }
+.pkOpen:hover { color: var(--ink); border-color: var(--edge); }
+.pkOpen:hover .arr { transform: translateX(3px); }
+.dealErr { margin-top: var(--s3); font-size: var(--fs-2); }
+
+/* Each card is a button now — the one section made of things never seen is
+   the one where "let me look closer" is the whole point — so the button reset
+   has to hand back everything a li used to give it. */
 .dealCard {
-  flex: 1 0 234px;
-  max-width: 320px;
+  width: 100%;
   display: flex;
   flex-direction: column;
-  scroll-snap-align: start;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
   background: var(--panel);
   border: 1px solid var(--edge);
   border-radius: var(--r-lg);
@@ -807,6 +835,7 @@ code {
   transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 .dealCard:hover { transform: translateY(-5px); box-shadow: var(--lift); }
+.dealCard:focus-visible { outline-offset: 2px; }
 
 /* dealt, rather than drawn: each card lands a beat after the one to its left.
    Rotating them instead read as a layout bug at any angle small enough to be
@@ -816,11 +845,11 @@ code {
   to { opacity: 1; transform: none; }
 }
 .dealCard { animation: dealt 0.42s var(--ease) both; }
-.dealCard:nth-child(2) { animation-delay: 0.06s; }
-.dealCard:nth-child(3) { animation-delay: 0.12s; }
-.dealCard:nth-child(4) { animation-delay: 0.18s; }
-.dealCard:nth-child(5) { animation-delay: 0.24s; }
-.dealCard:nth-child(n + 6) { animation-delay: 0.3s; }
+.dealGrid li:nth-child(2) .dealCard { animation-delay: 0.06s; }
+.dealGrid li:nth-child(3) .dealCard { animation-delay: 0.12s; }
+.dealGrid li:nth-child(4) .dealCard { animation-delay: 0.18s; }
+.dealGrid li:nth-child(5) .dealCard { animation-delay: 0.24s; }
+.dealGrid li:nth-child(n + 6) .dealCard { animation-delay: 0.3s; }
 
 .dealShot {
   position: relative;
@@ -854,6 +883,18 @@ code {
   backdrop-filter: blur(6px);
   font: 500 var(--fs-1)/1 var(--mono);
   color: var(--ink-2);
+}
+/* a clue the player chose, marked apart from the ones the scheduler dealt */
+.dealPick {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  padding: 3px 7px;
+  border-radius: var(--r-sm);
+  background: rgba(5, 0, 25, 0.6);
+  backdrop-filter: blur(6px);
+  font: 600 var(--fs-1)/1 var(--sans);
+  color: var(--lime);
 }
 
 .dealTxt { display: block; flex: 1; padding: var(--s3) 14px var(--s4); }
@@ -1159,6 +1200,87 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   white-space: nowrap;
 }
 
+/* ---------------------------------------------------- one clue, up close */
+/* The card sheet: the same dialog shell as the queue, widened for one
+   photograph instead of three hundred rows. */
+.cdlg { width: min(720px, calc(100vw - 2 * var(--pad))); max-height: min(84vh, 760px); }
+.cshot {
+  flex: none;
+  aspect-ratio: 4 / 3;
+  max-height: 58vh;
+  position: relative;
+  background: var(--well);
+}
+.cshot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cshot .dealDark { font-size: var(--fs-3); }
+.cfoot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: var(--s4) var(--s5);
+  border-top: 1px solid var(--rule);
+}
+.cnone { font: 400 var(--fs-2)/var(--lh-flat) var(--sans); color: var(--ink-4); }
+
+/* -------------------------------------------------------- the clue shelf */
+/* The picker: the whole unseen ladder in the scheduler's own order, each row
+   a photograph, a name, and one toggle. */
+.pkdlg { width: min(640px, calc(100vw - 2 * var(--pad))); max-height: min(84vh, 760px); }
+.pkFind { flex: none; padding: var(--s4) var(--s5); border-bottom: 1px solid var(--rule); }
+.pkFind .field { width: 100%; }
+.pkFind .err { margin-top: var(--s3); font-size: var(--fs-2); }
+.pk {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s3) var(--s5);
+  border-top: 1px solid var(--rule-soft);
+}
+.pk:first-child { border-top: 0; }
+.pk:hover { background: rgba(255, 255, 255, 0.04); }
+.pkShot {
+  position: relative;
+  width: 76px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--well);
+}
+.pkShot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pkShot .dealDark { font-size: 8px; padding: 0 var(--s1); }
+.pkNm { min-width: 0; }
+.pkWhat {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 var(--fs-3)/var(--lh-flat) var(--sans);
+  color: var(--ink-2);
+}
+.pkWhere {
+  display: block;
+  margin-top: 2px;
+  font: 400 var(--fs-2)/var(--lh-flat) var(--sans);
+  color: var(--ink-4);
+}
+.pkWhere b { font-weight: 500; color: var(--lime); }
+.pkPin {
+  flex: none;
+  min-width: 84px;
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  background: none;
+  cursor: pointer;
+  font: 600 var(--fs-2)/var(--lh-flat) var(--sans);
+  color: var(--ink-3);
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.pkPin:hover { color: var(--ink); border-color: var(--edge); }
+.pkPin.is-on { color: var(--lime); border-color: transparent; background: rgba(190, 242, 100, 0.12); }
+.pkNone { padding: var(--s5); font: 400 var(--fs-3)/var(--lh-dense) var(--sans); color: var(--ink-4); }
+
 /* the round log, behind its own fold: it is a receipt, not a finding */
 .more { margin-top: var(--rhythm); border-top: 1px solid var(--rule); }
 .more > summary {
@@ -1248,33 +1370,6 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 .leave p { margin-top: var(--s3); max-width: 62ch; color: var(--ink-3); font-size: var(--fs-4); }
 .leaveCta { display: flex; align-items: center; gap: var(--s5); flex-wrap: wrap; margin-top: var(--s5); }
 
-/* The one setting, under the deck table it governs. A hairline above it,
-   because it is a different kind of thing from the rows it follows: those are
-   measurements, this is an instruction. */
-.knob { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--rule-soft); }
-.knobRow { display: flex; align-items: center; gap: var(--s3); }
-.knobName { font-size: var(--fs-3); color: var(--ink-2); }
-/* Wide enough for three digits and the spinner, and no wider — a full-width
-   box would read as the main event of the panel. */
-.knobIn {
-  width: 78px;
-  margin-left: auto;
-  padding: 6px 8px;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-.knobIn:disabled { opacity: 0.6; }
-.knobState {
-  flex: none;
-  min-width: 8ch;
-  font: 400 var(--fs-2)/var(--lh-flat) var(--sans);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink-4);
-}
-.knobSay { margin-top: var(--s3); max-width: 46ch; font-size: var(--fs-2); line-height: var(--lh-dense); color: var(--ink-4); }
-.knob .err { margin-top: var(--s2); font-size: var(--fs-2); }
-
 /* The dashboard is a network read. A blank page for the length of that read is
    the slow-connection first impression, so the shape of the answer is drawn in
    grey and swapped for the real one when it lands. */
@@ -1333,7 +1428,7 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 @media (max-width: 620px) {
   .stepBody { padding-left: 0; }
   .stepBody form { flex-direction: column; }
-  .dealCard { flex-basis: 200px; }
+  .dealGrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .wk { grid-template-columns: 62px minmax(0, 1fr) 92px; gap: var(--s3); padding: 11px var(--s4); }
   .wk .shot { width: 62px; height: 46px; }
   .panel > header, .panel .body { padding-left: var(--s4); padding-right: var(--s4); }

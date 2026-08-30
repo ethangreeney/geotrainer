@@ -839,6 +839,21 @@ function parseDailyNew(raw) {
 const dailyNewOf = (config) => parseDailyNew(config?.dailyNew) ?? DEFAULT_DAILY_NEW
 
 /**
+ * How many clues a player may hold pinned at once. Well past any sane hand —
+ * the cap exists so a scripted client cannot grow the state row without bound,
+ * not to ration picking.
+ */
+const MAX_PINNED_NEW = 50
+
+/**
+ * The player's own picks, live ones only: a pin whose clue has since been
+ * introduced has done its job, and one whose card exists would confuse the
+ * scheduler's unseen filter into nothing anyway. Read-side pruning, so the
+ * list self-heals without every write path having to remember to trim it.
+ */
+const pinnedNewOf = (state) => (state.pinnedNew ?? []).filter((name) => !state.deckCards?.[name])
+
+/**
  * The player's timezone, as minutes east of UTC, so "today" can start at 4am
  * on their clock rather than the Worker's (which is UTC and nobody's).
  *
@@ -1107,10 +1122,25 @@ async function buildDashboard(env, user, ctx) {
   // console can show the clue rather than only name it. The URL is the
   // client's to build (see site/api.ts) — the Worker has no business minting
   // image links it never fetches.
-  const upNext = nextNewMetas(state.deckCards, ladder, day.newAllowance, {
+  const pinned = pinnedNewOf(state)
+  const pinnedSet = new Set(pinned)
+  const scheduleOpts = {
     newWeights: duelWeightsOf(state),
     tzOffset: tzOffsetOf(user.config),
-  }, now).map(upNextEntry)
+    pinned,
+  }
+  const upNext = nextNewMetas(state.deckCards, ladder, day.newAllowance, scheduleOpts, now).map(
+    (name) => ({ ...upNextEntry(name), pinned: pinnedSet.has(name) }),
+  )
+  // And the whole shelf those came off: every unseen clue the unlocked ladder
+  // holds, in the exact order the scheduler would introduce them, so the site
+  // can offer picking without growing its own copy of the ordering. The first
+  // `newAllowance` names here ARE upNext — one list, told twice, and it cannot
+  // disagree with itself because both readings come from the same call.
+  const pool = nextNewMetas(state.deckCards, ladder, Infinity, scheduleOpts, now).map((name) => ({
+    ...upNextEntry(name),
+    pinned: pinnedSet.has(name),
+  }))
 
   const metaRows = Object.entries(state.metas ?? {}).map(([metaName, m]) => ({
     metaName,
@@ -1256,7 +1286,7 @@ async function buildDashboard(env, user, ctx) {
       ladderTotal,
       nextDue: summary.nextDue,
     },
-    day: { ...day, upNext },
+    day: { ...day, upNext, pool },
     metas: {
       solid: solid.length,
       holding: metaRows.length - solid.length - shaky.length,
@@ -1645,6 +1675,7 @@ const AUTHED_PATHS = new Set([
   '/me',
   '/trainer-map',
   '/config',
+  '/pins',
   '/api/dashboard',
   '/api/rounds',
   '/api/tlog',
@@ -1974,7 +2005,7 @@ export default {
           ladderOnce(),
           size,
           now,
-          { dailyNew: dailyNewOf(user.config), newWeights: duelWeightsOf(state), tzOffset: tzOffsetOf(user.config) },
+          { dailyNew: dailyNewOf(user.config), newWeights: duelWeightsOf(state), tzOffset: tzOffsetOf(user.config), pinned: pinnedNewOf(state) },
         )
 
         // What was published, kept for the dashboard and for debugging. The
@@ -2090,6 +2121,29 @@ export default {
           )
         const config = await setConfig(env, user, { dailyNew })
         return json({ ok: true, config })
+      }
+
+      // The player's own hand: which unseen clues the scheduler should deal
+      // first, ahead of its weighted order. Whole-list replacement — the site
+      // always knows the full hand it wants, and one idempotent write beats a
+      // toggle protocol that can double-fire. Every name is checked against
+      // the ladder's actual unseen set, because a pin the scheduler could
+      // never act on is a promise this page would silently break.
+      if (request.method === 'POST' && path === '/pins') {
+        const body = await request.json().catch(() => null)
+        if (!Array.isArray(body?.pins) || body.pins.some((p) => typeof p !== 'string'))
+          return json({ ok: false, error: 'pins must be a list of clue names' }, 400)
+        const pins = [...new Set(body.pins)]
+        if (pins.length > MAX_PINNED_NEW)
+          return json({ ok: false, error: `at most ${MAX_PINNED_NEW} clues can be pinned` }, 400)
+        const state = await loadUserState(env, user.id)
+        const unseen = new Set(nextNewMetas(state.deckCards, ladderOnce(), Infinity, {}, new Date()))
+        const unknown = pins.find((p) => !unseen.has(p))
+        if (unknown !== undefined)
+          return json({ ok: false, error: `"${unknown}" is not an unseen clue on the ladder` }, 400)
+        state.pinnedNew = pins
+        await saveUserState(env, user.id, state)
+        return json({ ok: true, pins })
       }
 
       if (request.method === 'GET' && path === '/api/dashboard')

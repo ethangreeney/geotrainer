@@ -30,7 +30,7 @@ const NOW = Date.now()
 const DAY = 86_400_000
 
 const UP_NEXT: UpNextMeta[] = [
-  { name: 'Japan: Low cam', panoId: '5DQrgtSxBe7LK5RDgdRZgQ', heading: 309.95, pitch: 0, lat: 39.22553, lng: 140.90416 },
+  { name: 'Japan: Low cam', panoId: '5DQrgtSxBe7LK5RDgdRZgQ', heading: 309.95, pitch: 0, lat: 39.22553, lng: 140.90416, pinned: true },
   { name: 'Chile: All yellow lines', panoId: '0SEQrcp3JG3kPcPbK8s97A', heading: 208.41, pitch: 0, lat: -38.6451, lng: -71.00345 },
   { name: 'Iceland: Bollards', panoId: '4y9s2wlHJQkcYyPnRYxQHQ', heading: 270.28, pitch: 0, lat: 65.52068, lng: -23.4034 },
   { name: 'Turkey: Stop signs', panoId: 'AJMlS6vKB-aZmcjqEWpsQQ', heading: 341.85, pitch: 0, lat: 37.69314, lng: 29.19756 },
@@ -46,6 +46,34 @@ const MORE_NEXT: UpNextMeta[] = [
   { name: 'Ghana: Unique car', panoId: '0Xqstdgc5W5Lv7gD1-iVvQ', heading: 21.76, pitch: 0, lat: 9.457896, lng: -2.4283435 },
   { name: 'Vietnam: Bollards', panoId: '14rstvSmhZsbIVeGAgfdJA', heading: 215.87, pitch: 0, lat: 10.131148, lng: 105.16753 },
 ]
+
+/* The rest of the shelf behind the day's hand, for the picker: the scheduler's
+   own introduction order continues past the allowance, and the demo only needs
+   enough of it to make the dialog scroll. Panos are reused from elsewhere in
+   this file — the picker is judged on layout, not on geography — and one entry
+   goes without a location because the real shelf always has a few. */
+const POOL_TAIL: UpNextMeta[] = [
+  ['Brazil: Ghost poles', '01fvRiPIz8Nzw3Fb2rpYtw', 140],
+  ['Russia: Kilometre plates', '04kN4e3qQ7GcYghiv8u00w', 22],
+  ['Peru: Yellow taxis', '90sh3R19FExlu78PIgxhGA', 199],
+  ['South Africa: Guardrail dots', 'c91CYyzSzpP3BN-yC5_DIw', 87],
+  ['Indonesia: Kijang', '4y0Oz8N1P-8ERGVCZfzvVQ', 265],
+  ['Mongolia: Ger districts', '3jY81kSZFnX2ZatFBPuqgQ', 31],
+  ['Poland: Rural bus stops', null, 0],
+  ['Mexico: Green plates', '5DQrgtSxBe7LK5RDgdRZgQ', 120],
+  ['Turkey: Mosque density', '0SEQrcp3JG3kPcPbK8s97A', 300],
+  ['France: D-road cursive', '4y9s2wlHJQkcYyPnRYxQHQ', 45],
+].map(([name, panoId, heading]) => ({
+  name: name as string,
+  panoId: panoId as string | null,
+  heading: panoId ? (heading as number) : null,
+  pitch: panoId ? 0 : null,
+  lat: null,
+  lng: null,
+}))
+
+/* The picker's whole shelf: the hand being dealt, then everything behind it. */
+const POOL: UpNextMeta[] = [...UP_NEXT, ...MORE_NEXT, ...POOL_TAIL]
 
 /* The head of the review queue, in the queue's own order: everything owed now,
    least likely still known first, then whatever falls due next. The recall
@@ -169,7 +197,7 @@ const PLAYED: DashboardData = {
     ladderTotal: 370,
     nextDue: new Date(NOW + 3.2 * 3_600_000).toISOString(),
   },
-  day: { dailyNew: 10, newAllowance: 4, doneForToday: false, upNext: UP_NEXT },
+  day: { dailyNew: 10, newAllowance: 4, doneForToday: false, upNext: UP_NEXT, pool: POOL },
   metas: { solid: 71, holding: 31, shaky: 18, total: 120, queue: [...QUEUE, ...QUEUE_TAIL] },
   countries: COUNTRIES,
   totals: { rounds: 605, correctPct: 58.6 },
@@ -186,7 +214,7 @@ export function demoData(): DashboardData | null {
     return {
       ...PLAYED,
       deck: { ...PLAYED.deck, due: 0, nextDue: new Date(NOW + 14 * 3_600_000).toISOString() },
-      day: { dailyNew: 10, newAllowance: 0, doneForToday: true, upNext: [] },
+      day: { dailyNew: 10, newAllowance: 0, doneForToday: true, upNext: [], pool: POOL },
     }
 
   if (v === 'nopano')
@@ -204,7 +232,7 @@ export function demoData(): DashboardData | null {
       generatedAt: new Date(NOW).toISOString(),
       progress: { held: 0, total: 370, series: [] },
       deck: { due: 0, learning: 0, unseen: 370, introduced: 0, total: 370, ladderTotal: 370, nextDue: null },
-      day: { dailyNew: 10, newAllowance: 10, doneForToday: false, upNext: [...UP_NEXT, ...MORE_NEXT] },
+      day: { dailyNew: 10, newAllowance: 10, doneForToday: false, upNext: [...UP_NEXT, ...MORE_NEXT], pool: POOL },
       metas: { solid: 0, holding: 0, shaky: 0, total: 0, queue: [] },
       countries: [],
       totals: { rounds: 0, correctPct: null },

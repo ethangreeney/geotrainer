@@ -57,6 +57,10 @@ const TOKENS = {
   roundRepeat: 'test-token-round-repeat-01',
   roundScotland: 'test-token-round-scotland-1',
   notAdmin: 'test-token-not-admin-00001',
+  pins: 'test-token-pins-write-0001',
+  pinsDupe: 'test-token-pins-dupe-0001',
+  pinsReject: 'test-token-pins-reject-01',
+  pinsDash: 'test-token-pins-dash-0001',
 }
 
 describe('worker source', () => {
@@ -708,6 +712,53 @@ const out = {
       }),
     ),
   ),
+  pinsSet: await call('/pins', {
+    method: 'POST',
+    payload: { pins: [ladderHead[5], ladderHead[2]] },
+    headers: authFor(TOKENS.pins),
+    token: TOKENS.pins,
+  }),
+  // The same clue three times over is one pin, not three — a double-fired
+  // click must not grow the hand.
+  pinsDupe: await call('/pins', {
+    method: 'POST',
+    payload: { pins: [ladderHead[3], ladderHead[3], ladderHead[3]] },
+    headers: authFor(TOKENS.pinsDupe),
+    token: TOKENS.pinsDupe,
+  }),
+  pinsUnknown: await call('/pins', {
+    method: 'POST',
+    payload: { pins: ['Nowhere: Nothing'] },
+    headers: authFor(TOKENS.pinsReject),
+    token: TOKENS.pinsReject,
+  }),
+  pinsNotList: await call('/pins', {
+    method: 'POST',
+    payload: { pins: ladderHead[0] },
+    headers: authFor(TOKENS.pinsReject),
+    token: TOKENS.pinsReject,
+  }),
+  pinsOverCap: await call('/pins', {
+    method: 'POST',
+    payload: { pins: Array.from({ length: 51 }, (_, i) => 'Clue number ' + i) },
+    headers: authFor(TOKENS.pinsReject),
+    token: TOKENS.pinsReject,
+  }),
+  pinsNoToken: await call('/pins', { method: 'POST', payload: { pins: [] } }),
+  // A hand already stored, read back through the dashboard: the pinned clue
+  // must lead the deal and wear its flag, whatever the scheduler preferred.
+  dashPinned: await call('/api/dashboard', {
+    headers: authFor(TOKENS.pinsDash),
+    token: TOKENS.pinsDash,
+    state: {
+      countries: {},
+      confusions: {},
+      metas: {},
+      deckCards: {},
+      lastDeck: null,
+      pinnedNew: [ladderHead[7]],
+    },
+  }),
   dashFresh: await call('/api/dashboard', { headers: auth }),
   dashHistory: await call('/api/dashboard', { headers: auth, state: playedState(dueNames.slice(0, 4)), rounds: history(dueNames.slice(0, 4)) }),
   // Duels have cost this account most in Russia, then Brazil, then Colombia —
@@ -1349,6 +1400,49 @@ describe('POST /config', () => {
   })
 })
 
+describe('POST /pins', () => {
+  it('needs a token like every other write', () => {
+    expect(R.pinsNoToken.status).toBe(401)
+  })
+
+  it('stores the hand it was given and echoes it', () => {
+    expect(R.pinsSet.status).toBe(200)
+    expect(R.pinsSet.body.ok).toBe(true)
+    expect(R.pinsSet.body.pins).toEqual([R.ladderHead[5], R.ladderHead[2]])
+    expect(R.pinsSet.saved.pinnedNew).toEqual([R.ladderHead[5], R.ladderHead[2]])
+  })
+
+  it('folds a repeated name into one pin', () => {
+    expect(R.pinsDupe.status).toBe(200)
+    expect(R.pinsDupe.saved.pinnedNew).toEqual([R.ladderHead[3]])
+  })
+
+  it('refuses what the ladder cannot deal, naming it, writing nothing', () => {
+    // A pin the scheduler could never act on is a promise the page would
+    // silently break, so the write says no and says which name.
+    expect(R.pinsUnknown.status).toBe(400)
+    expect(R.pinsUnknown.body.error).toContain('Nowhere: Nothing')
+    expect(R.pinsUnknown.saved.pinnedNew).toBeUndefined()
+    expect(R.pinsNotList.status).toBe(400)
+    expect(R.pinsNotList.saved.pinnedNew).toBeUndefined()
+    expect(R.pinsOverCap.status).toBe(400)
+    expect(R.pinsOverCap.body.error).toContain('50')
+    expect(R.pinsOverCap.saved.pinnedNew).toBeUndefined()
+  })
+
+  it('deals a stored pin first, flagged as the choice it was', () => {
+    const day = R.dashPinned.body.day
+    expect(day.upNext[0].name).toBe(R.ladderHead[7])
+    expect(day.upNext[0].pinned).toBe(true)
+    // The rest of the deal stays the scheduler's own...
+    expect(day.upNext.slice(1).every((m) => m.pinned === false)).toBe(true)
+    // ...and the pool leads with the same entry, because the deal is the
+    // pool's own head and not a second reckoning of the same day.
+    expect(day.pool[0].name).toBe(R.ladderHead[7])
+    expect(day.pool[0].pinned).toBe(true)
+  })
+})
+
 /* -------------------------------------------------------------------------
  * The dashboard.
  * ---------------------------------------------------------------------- */
@@ -1484,6 +1578,8 @@ describe('GET /api/dashboard', () => {
         pitch: loc.pitch,
         lat: loc.lat,
         lng: loc.lng,
+        // a fresh account has pinned nothing, so every deal is the scheduler's
+        pinned: false,
       })
       expect(typeof entry.panoId, entry.name).toBe('string')
       expect(typeof entry.heading, entry.name).toBe('number')

@@ -6,6 +6,7 @@ import {
   fetchDashboard,
   getToken,
   setDailyNew,
+  setPins,
   type CountryStat,
   type DashboardData,
   type HeldPoint,
@@ -541,84 +542,88 @@ function WholeQueue({ queue }: { queue: QueueMeta[] }) {
 }
 
 /**
- * The one setting there is: how many never-seen clues a day may introduce.
- *
- * It sits under the deck table rather than anywhere near the hero because it
- * is a number a person changes about twice ever — once when ten a day turns
- * out to be more than an evening, once when it turns out to be less. So: a
- * row, not a page.
+ * The one setting there is — how many never-seen clues a day may introduce —
+ * sitting in the header of the very section it controls. It used to live in
+ * its own "Pace" panel a screenful away, which meant changing 10 to 20 changed
+ * a number over there and, apparently, nothing over here: the cards it governs
+ * did not move until the next full page load. Now the input and its
+ * consequence share a heading, and a successful save re-reads the dashboard
+ * (`onSaved`), so the hand below re-deals itself the moment the allowance
+ * changes.
  *
  * The value shown after a write is the one the Worker echoes back, not the one
  * that was typed. A refused write must not leave the box displaying a setting
  * nobody has stored — and the Worker's refusal is already a sentence written
- * for a person, so it is printed as it arrived rather than translated.
+ * for a person, so it is reported as it arrived (`onTrouble`) rather than
+ * translated. In a demo build there is no Worker to ask, so the number simply
+ * pretends to save.
  */
-function NewPerDay({ initial }: { initial: number }) {
+function Pace({
+  initial,
+  demo,
+  onSaved,
+  onTrouble,
+}: {
+  initial: number
+  demo: boolean
+  onSaved: () => Promise<unknown>
+  onTrouble: (msg: string | null) => void
+}) {
   const [value, setValue] = useState(String(initial))
   const [saved, setSaved] = useState(initial)
-  const [state, setState] = useState<'idle' | 'saving' | 'saved'>('idle')
-  const [err, setErr] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
   const commit = async () => {
     const num = Number(value.trim())
     /* A box left empty or half-typed is not a request to change anything, and
        neither is retyping the number already stored. Both put back what is
        stored rather than spending a round trip to be told so. */
-    if (state === 'saving' || value.trim() === '' || !Number.isFinite(num) || num === saved) {
+    if (saving || value.trim() === '' || !Number.isFinite(num) || num === saved) {
       setValue(String(saved))
       return
     }
-    setState('saving')
-    setErr(null)
+    if (demo) {
+      setSaved(num)
+      return
+    }
+    setSaving(true)
+    onTrouble(null)
     try {
       const { config } = await setDailyNew(num)
       setSaved(config.dailyNew)
       setValue(String(config.dailyNew))
-      setState('saved')
+      await onSaved()
     } catch (e) {
       /* Left as typed on purpose: the message says what is wrong with this
          number, and it is easier to fix a number you can still see. */
-      setErr(e instanceof Error ? e.message : 'Could not save that.')
-      setState('idle')
+      onTrouble(e instanceof Error ? e.message : 'Could not save that.')
     }
+    setSaving(false)
   }
 
   return (
-    <div className="knob">
-      <div className="knobRow">
-        <label className="knobName" htmlFor="dailyNew">
-          New clues per day
-        </label>
-        <input
-          id="dailyNew"
-          className="field knobIn"
-          type="number"
-          min={0}
-          max={100}
-          step={1}
-          inputMode="numeric"
-          value={value}
-          disabled={state === 'saving'}
-          onChange={(e) => {
-            setValue(e.target.value)
-            setState('idle')
-            setErr(null)
-          }}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur()
-          }}
-        />
-        <span className="knobState" role="status">
-          {state === 'saving' ? 'Saving…' : state === 'saved' ? `Saved · ${saved}` : ''}
-        </span>
-      </div>
-      <p className="knobSay">
-        Every new clue costs about ten reviews later on, which is why the default is 10. Set it to 0 to review what
-        you have and meet nothing new.
-      </p>
-      {err && <p className="err">{err}</p>}
-    </div>
+    <label className="pace" htmlFor="dailyNew" title="Every new clue costs about ten reviews later on. 0 meets nothing new.">
+      <input
+        id="dailyNew"
+        className="field paceIn"
+        type="number"
+        min={0}
+        max={100}
+        step={1}
+        inputMode="numeric"
+        value={value}
+        disabled={saving}
+        onChange={(e) => {
+          setValue(e.target.value)
+          onTrouble(null)
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+        }}
+      />
+      <span>new a day</span>
+    </label>
   )
 }
 
@@ -755,60 +760,310 @@ function Ladder({ solid, holding, shaky, total }: { solid: number; holding: numb
   )
 }
 
-function Deal({ list, dailyNew, duelDriven }: { list: UpNextMeta[]; dailyNew: number; duelDriven: boolean }) {
-  /* A hand of four fills the shell; ten runs off the end of it. The fade only
-     appears when there is genuinely something past the edge, so a full stop
-     never gets dressed up as a continuation. */
-  const rail = useRef<HTMLUListElement | null>(null)
-  const [more, setMore] = useState(false)
+/**
+ * A Street View thumbnail that does not give up on the first refusal.
+ *
+ * The dashboard fires a dozen of these in one burst and Google occasionally
+ * refuses one — not a bad pano, just a shrug under load, and the same frame
+ * loads fine a second later. The old <img> had no second later: one refusal
+ * was a black card for the rest of the visit. So a failed load retries twice,
+ * spaced out, before conceding — and concedes into words rather than
+ * darkness. The retried URL asks for one more pixel of height, because an
+ * identical src would be answered from the browser's memory of the failure
+ * instead of asked again.
+ */
+function Shot({ m, w, h }: { m: UpNextMeta; w: number; h: number }) {
+  const [tries, setTries] = useState(0)
+  useEffect(() => setTries(0), [m.panoId])
+  if (!m.panoId) return <span className="dealDark">No frame catalogued</span>
+  if (tries > 2) return <span className="dealDark">Street View refused this frame</span>
+  return (
+    <img
+      src={thumb(m.panoId, m.heading, w, h + tries)}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      onError={() => setTimeout(() => setTries((t) => t + 1), 700 * (tries + 1))}
+    />
+  )
+}
+
+/** The deep link into the actual panorama a clue was catalogued from — the
+ * "show me more" a thumbnail cannot be. Built the way Google documents for
+ * Street View URLs, so it opens the pano itself, facing the clue. */
+const streetView = (m: UpNextMeta) =>
+  `https://www.google.com/maps/@?api=1&map_action=pano&pano=${encodeURIComponent(m.panoId ?? '')}` +
+  `&heading=${m.heading ?? 0}&pitch=${m.pitch ?? 0}`
+
+/**
+ * One dealt card, held up close: the same frame at four times the pixels, and
+ * the door through it — the pano itself, in Street View, where the clue can be
+ * walked around instead of squinted at.
+ */
+function CardSheet({ m, onClose }: { m: UpNextMeta; onClose: () => void }) {
+  const dlg = useRef<HTMLDialogElement>(null)
+  // The close event does not bubble, so React's delegated onClose never hears
+  // it — a native listener is the only wiring that catches every way out
+  // (the ×, a backdrop click, and Escape alike).
   useEffect(() => {
-    const el = rail.current
-    if (!el) return
-    const read = () => setMore(el.scrollWidth - el.clientWidth - el.scrollLeft > 8)
-    read()
-    const ro = new ResizeObserver(read)
-    ro.observe(el)
-    el.addEventListener('scroll', read, { passive: true })
-    return () => {
-      ro.disconnect()
-      el.removeEventListener('scroll', read)
-    }
-  }, [list.length])
+    const d = dlg.current
+    d?.showModal()
+    d?.addEventListener('close', onClose)
+    return () => d?.removeEventListener('close', onClose)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const { country, clue } = splitMeta(m.name)
+  return (
+    <dialog
+      className="qdlg cdlg"
+      ref={dlg}
+      aria-label={m.name}
+      onClick={(e) => e.target === dlg.current && dlg.current.close()}
+    >
+      <header className="qhead">
+        <div>
+          <h2>{clue}</h2>
+          <span className="note">
+            {country ?? 'Unplaced'}
+            {m.pinned && ' · your pick'}
+          </span>
+        </div>
+        <button className="qx mono" onClick={() => dlg.current?.close()} aria-label="Close">
+          ×
+        </button>
+      </header>
+      <div className="cshot">
+        <Shot m={m} w={960} h={640} />
+      </div>
+      <footer className="cfoot">
+        {m.panoId ? (
+          <a className="btn" href={streetView(m)} target="_blank" rel="noreferrer">
+            Walk around it in Street View <span className="arr">→</span>
+          </a>
+        ) : (
+          <span className="cnone">No catalogued location to open.</span>
+        )}
+      </footer>
+    </dialog>
+  )
+}
+
+/**
+ * The whole unseen shelf, open for picking.
+ *
+ * The scheduler already has an opinion — the list arrives in the exact order
+ * it would introduce clues, worst duel countries first — so the recommendation
+ * is the order itself, and the first `allowance` rows are marked as today's.
+ * Picking a clue lifts it to the head of that order; the deck build reads the
+ * same pins, so a pick here IS a promise about the next deck, not a request.
+ *
+ * Writes are whole-list and serialized through one promise chain, so mashing
+ * three toggles cannot land out of order and store a stale hand. The dialog
+ * closing is what re-reads the dashboard: one refresh when the picking is
+ * done, not one per click.
+ */
+function CluePicker({
+  pool,
+  allowance,
+  demo,
+  onClose,
+}: {
+  pool: UpNextMeta[]
+  allowance: number
+  demo: boolean
+  onClose: (changed: boolean) => void
+}) {
+  const dlg = useRef<HTMLDialogElement>(null)
+  const changed = useRef(false)
+  // Native close listener for the same reason as CardSheet's: close does not
+  // bubble, and this one carries the "did anything change" verdict that
+  // decides whether the dashboard refetches.
+  useEffect(() => {
+    const d = dlg.current
+    const done = () => onClose(changed.current)
+    d?.showModal()
+    d?.addEventListener('close', done)
+    return () => d?.removeEventListener('close', done)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const [picked, setPicked] = useState<string[]>(pool.filter((m) => m.pinned).map((m) => m.name))
+  const [q, setQ] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const chain = useRef<Promise<unknown>>(Promise.resolve())
+
+  const toggle = (name: string) => {
+    const next = picked.includes(name) ? picked.filter((p) => p !== name) : [...picked, name]
+    setPicked(next)
+    setErr(null)
+    changed.current = true
+    if (demo) return
+    chain.current = chain.current.then(() =>
+      setPins(next).catch((e) => setErr(e instanceof Error ? e.message : 'Could not save that pick.')),
+    )
+  }
+
+  const needle = q.trim().toLowerCase()
+  const rows = needle ? pool.filter((m) => m.name.toLowerCase().includes(needle)) : pool
+  return (
+    <dialog
+      className="qdlg pkdlg"
+      ref={dlg}
+      aria-label="Choose new clues"
+      onClick={(e) => e.target === dlg.current && dlg.current.close()}
+    >
+      <header className="qhead">
+        <div>
+          <h2>Choose new clues</h2>
+          <span className="note">
+            {n(pool.length)} not met yet, best first — picks jump the queue and deal next
+          </span>
+        </div>
+        <button className="qx mono" onClick={() => dlg.current?.close()} aria-label="Close">
+          ×
+        </button>
+      </header>
+      <div className="pkFind">
+        <input
+          className="field"
+          type="search"
+          placeholder="Find a clue or a country…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        {err && <p className="err">{err}</p>}
+      </div>
+      <div className="qall scroll">
+        {rows.map((m) => {
+          const { country, clue } = splitMeta(m.name)
+          const on = picked.includes(m.name)
+          const rank = pool.indexOf(m)
+          return (
+            <div className={'pk' + (on ? ' is-on' : '')} key={m.name}>
+              <span className="pkShot">
+                <Shot m={m} w={160} h={120} />
+              </span>
+              <span className="pkNm">
+                <span className="pkWhat">{clue}</span>
+                <span className="pkWhere">
+                  {country ?? '—'}
+                  {rank < allowance && <b> · up next</b>}
+                </span>
+              </span>
+              <button className={'pkPin' + (on ? ' is-on' : '')} onClick={() => toggle(m.name)}>
+                {on ? 'Picked ✓' : 'Pick'}
+              </button>
+            </div>
+          )
+        })}
+        {rows.length === 0 && <p className="pkNone">Nothing on the shelf matches that.</p>}
+      </div>
+    </dialog>
+  )
+}
+
+/**
+ * The clues today is about to introduce, as the photographs they actually are.
+ *
+ * A meta is a thing you look at — a bollard's stripe, a pole's holes, the
+ * colour of an outer line — and a list of its names is a list of words for
+ * things you have not seen. So the day's allowance is dealt face-up: one card
+ * per clue, in the order the ladder will hand them over, each carrying the
+ * Street View frame the clue was catalogued from. A card opens on click —
+ * this is the one section made of things the player has never seen, so
+ * "let me look closer" is the whole point of it.
+ *
+ * A grid rather than the old sideways rail: the rail needed a horizontal
+ * scroll that a mouse wheel does not naturally make, so on a desktop with no
+ * trackpad most of the hand was effectively invisible. Cards wrap instead,
+ * and everything the day will deal is on screen at once.
+ *
+ * A clue whose catalogs hold no location keeps its slot and loses its picture,
+ * because the length of this grid is the number printed beside it and dropping
+ * a card would make the two disagree.
+ */
+function NewToday({
+  day,
+  done,
+  duelDriven,
+  demo,
+  onRefresh,
+}: {
+  day: NonNullable<DashboardData['day']>
+  done: boolean
+  duelDriven: boolean
+  demo: boolean
+  onRefresh: () => Promise<unknown>
+}) {
+  const list = done ? [] : (day.upNext ?? [])
+  const pool = day.pool ?? []
+  const [open, setOpen] = useState<UpNextMeta | null>(null)
+  const [picking, setPicking] = useState(false)
+  const [trouble, setTrouble] = useState<string | null>(null)
 
   return (
     <section className="deal">
       <div className="secHead">
         <h2>New today</h2>
-        <span className="secNote">
-          {n(list.length)} of {n(dailyNew)} a day · dealt {duelDriven ? 'where duels cost you' : 'in ladder order'}
-        </span>
+        <div className="dealCtl">
+          <Pace key={day.dailyNew} initial={day.dailyNew} demo={demo} onSaved={onRefresh} onTrouble={setTrouble} />
+          {pool.length > 0 && (
+            <button className="pkOpen" onClick={() => setPicking(true)}>
+              Choose clues <span className="arr mono">→</span>
+            </button>
+          )}
+        </div>
       </div>
-      <ul className={'dealRail' + (more ? ' is-more' : '')} ref={rail}>
-        {list.map((m, i) => {
-          const { country, clue } = splitMeta(m.name)
-          return (
-            <li className="dealCard" key={m.name}>
-              <span className="dealShot">
-                {m.panoId ? (
-                  <img src={thumb(m.panoId, m.heading, 480, 360)} alt="" loading="lazy" decoding="async" />
-                ) : (
-                  <span className="dealDark">No frame catalogued</span>
-                )}
-                <span className="dealNo mono" aria-hidden>
-                  {String(i + 1).padStart(2, '0')}
-                </span>
-              </span>
-              <span className="dealTxt">
-                <span className="dealWhat">{clue}</span>
-                {country && <span className="dealWhere">{country}</span>}
-              </span>
-            </li>
-          )
-        })}
-      </ul>
-      {/* The honest caveat: new clues queue behind what is owed, so a heavy
-          review day meets fewer of these than are laid out here. */}
-      <p className="dealSay">New clues come after the day's due reviews, as room allows.</p>
+      {trouble && <p className="err dealErr">{trouble}</p>}
+      {done ? (
+        <p className="dealDone">
+          Every clue the day had room for has been introduced. The next hand is dealt tomorrow — or raise the
+          number above and meet more today.
+        </p>
+      ) : (
+        <>
+          <ul className="dealGrid">
+            {list.map((m, i) => {
+              const { country, clue } = splitMeta(m.name)
+              return (
+                <li key={m.name}>
+                  <button className="dealCard" onClick={() => setOpen(m)}>
+                    <span className="dealShot">
+                      <Shot m={m} w={480} h={360} />
+                      <span className="dealNo mono" aria-hidden>
+                        {String(i + 1).padStart(2, '0')}
+                      </span>
+                      {m.pinned && <span className="dealPick">your pick</span>}
+                    </span>
+                    <span className="dealTxt">
+                      <span className="dealWhat">{clue}</span>
+                      {country && <span className="dealWhere">{country}</span>}
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+          {/* The honest caveat: new clues queue behind what is owed, so a heavy
+              review day meets fewer of these than are laid out here. */}
+          <p className="dealSay">
+            Dealt {duelDriven ? 'where duels cost you' : 'in ladder order'}
+            {pool.some((m) => m.pinned) ? ', your picks first' : ''} · new clues come after the day's due
+            reviews, as room allows.
+          </p>
+        </>
+      )}
+      {open && <CardSheet m={open} onClose={() => setOpen(null)} />}
+      {picking && (
+        <CluePicker
+          pool={pool}
+          allowance={day.newAllowance}
+          demo={demo}
+          onClose={(changed) => {
+            setPicking(false)
+            if (changed && !demo) onRefresh()
+          }}
+        />
+      )}
     </section>
   )
 }
@@ -818,10 +1073,15 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    /* Dev only, and compiled out of a production build: the signed-in console
-       cannot be opened without an account, so `?demo=…` stands a realistic
-       payload in front of the network read. See demo.ts. */
+  /* Dev only, and compiled out of a production build: the signed-in console
+     cannot be opened without an account, so `?demo=…` stands a realistic
+     payload in front of the network read. See demo.ts. */
+  const demo = !!demoData()
+
+  /* One read, callable again: the allowance dial and the clue picker both
+     change what the Worker would deal next, and re-reading the dashboard is
+     how the page shows the consequence instead of the stale hand. */
+  const load = async () => {
     const fake = demoData()
     if (fake) {
       setData(fake)
@@ -831,16 +1091,20 @@ export default function Dashboard() {
       navigate('/start')
       return
     }
-    fetchDashboard()
-      .then(setData)
-      .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) {
-          clearToken()
-          navigate('/start')
-          return
-        }
-        setError(e instanceof Error ? e.message : 'Could not load your dashboard.')
-      })
+    try {
+      setData(await fetchDashboard())
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        clearToken()
+        navigate('/start')
+        return
+      }
+      setError(e instanceof Error ? e.message : 'Could not load your dashboard.')
+    }
+  }
+  useEffect(() => {
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const recent = useMemo(
@@ -1119,17 +1383,8 @@ export default function Dashboard() {
         </section>
 
         {/* ----------------------------------------------- what today teaches */}
-        {newToday.length > 0 && <Deal list={newToday} dailyNew={dayInfo?.dailyNew ?? newToday.length} duelDriven={byDuelLoss.length > 0} />}
-        {done && (
-          <section className="deal">
-            <div className="secHead">
-              <h2>New today</h2>
-              <span className="secNote">nothing left to deal</span>
-            </div>
-            <p className="dealDone">
-              Every clue the day had room for has been introduced. The next hand is dealt tomorrow.
-            </p>
-          </section>
+        {dayInfo && (newToday.length > 0 || done) && (
+          <NewToday day={dayInfo} done={done} duelDriven={byDuelLoss.length > 0} demo={demo} onRefresh={load} />
         )}
 
         {empty ? (
@@ -1222,23 +1477,6 @@ export default function Dashboard() {
               </div>
 
               <div className="col c5">
-                {/* The only number on this page you set rather than earn. An
-                    older Worker sends no `day`, and with no stored value to
-                    show the honest thing is no control at all. It sits above
-                    the duel list it feeds — the note on that list points
-                    back up at this dial. */}
-                {dayInfo && (
-                  <div className="panel">
-                    <header>
-                      <h2>Pace</h2>
-                      <span className="note">how fast new material arrives</span>
-                    </header>
-                    <div className="body">
-                      <NewPerDay initial={dayInfo.dailyNew} />
-                    </div>
-                  </div>
-                )}
-
                 {/* The Deck bucket table used to live here; the ladder at the
                     top already says all of it, so the column keeps only what
                     the waffle cannot: where the points actually go. */}

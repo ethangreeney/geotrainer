@@ -143,7 +143,7 @@ export function buildRankedDeck(cards, catalogs, ladder, size, now, opts = {}) {
   const deck = rankDeck(
     cards,
     ladder,
-    { limit: Math.max(size, MIN_DECK_LOCATIONS), dailyNew: opts?.dailyNew, newWeights: opts?.newWeights, tzOffset: opts?.tzOffset },
+    { limit: Math.max(size, MIN_DECK_LOCATIONS), dailyNew: opts?.dailyNew, newWeights: opts?.newWeights, tzOffset: opts?.tzOffset, pinned: opts?.pinned },
     now,
   )
   const { customCoordinates, ranking } = pickDeckLocations(catalogs, deck.metas, size)

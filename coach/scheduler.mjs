@@ -435,12 +435,31 @@ const metaCountry = (name) => {
  * the surplus re-queues behind the countries still under the cap, so a day
  * with allowance left and only one country left still spends it.
  *
+ * `pinned` is the player's own hand: meta names they asked to meet next, lifted
+ * to the very head of the queue in the order they were picked. A pin outranks
+ * every weight and is exempt from the per-country cap — an explicit "teach me
+ * this" is not a statistic to be interleaved — but pins still count toward the
+ * cap's tally, so a country whose pins fill its quota defers its automatic
+ * entries the same as if the scheduler had dealt them. A pinned name that is
+ * not in `entries` (already introduced, or gone from the ladder) simply never
+ * surfaces; the pin list needs no separate pruning to stay honest.
+ *
  * No `weights` means no opinion: the entries come back untouched, in the
- * ladder order every caller relied on before weights existed.
+ * ladder order every caller relied on before weights existed — behind the
+ * pins, when there are any.
  */
-function orderUnseen(entries, cards, weights, now, tzOffsetMin) {
-  if (!weights) return entries
-  const ranked = entries
+function orderUnseen(entries, cards, weights, now, tzOffsetMin, pinned) {
+  const pinRank = new Map()
+  for (const name of pinned ?? []) if (!pinRank.has(name)) pinRank.set(name, pinRank.size)
+  if (!weights && !pinRank.size) return entries
+
+  const picked = []
+  const rest = []
+  for (const entry of entries) (pinRank.has(entry.name) ? picked : rest).push(entry)
+  picked.sort((a, b) => pinRank.get(a.name) - pinRank.get(b.name))
+  if (!weights) return [...picked, ...rest]
+
+  const ranked = rest
     .map((entry, i) => ({ entry, i, w: weights[metaCountry(entry.name)] ?? 0 }))
     .sort((a, b) => b.w - a.w || a.i - b.i)
     .map(({ entry }) => entry)
@@ -454,6 +473,10 @@ function orderUnseen(entries, cards, weights, now, tzOffsetMin) {
     const country = metaCountry(name)
     dealt[country] = (dealt[country] ?? 0) + 1
   }
+  for (const entry of picked) {
+    const country = metaCountry(entry.name)
+    dealt[country] = (dealt[country] ?? 0) + 1
+  }
 
   const head = []
   const overflow = []
@@ -464,7 +487,7 @@ function orderUnseen(entries, cards, weights, now, tzOffsetMin) {
       head.push(entry)
     } else overflow.push(entry)
   }
-  return [...head, ...overflow]
+  return [...picked, ...head, ...overflow]
 }
 
 /**
@@ -489,7 +512,7 @@ export function nextNewMetas(cards, catalog, limit, opts = {}, now = new Date())
   const room = Math.max(0, limit ?? 0)
   if (!room) return []
   const unseen = unlockedMetas(catalog ?? [], catalog?.length ?? 0).filter((e) => !table[e.name])
-  return orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset)
+  return orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset, opts?.pinned)
     .slice(0, room)
     .map(({ name }) => name)
 }
@@ -544,9 +567,9 @@ const DEFAULT_LIMIT = 25
  * breaking ties, then unseen metas in ladder order (tier ascending, then
  * catalog order, deduped at a meta's first and easiest appearance) but no more
  * than the day's remaining allowance of them, then not-yet-due cards
- * soonest-due-first. `opts.newWeights` reorders that middle group by country cost —
- * see orderUnseen — and only that group; what is owed and what is filler never
- * move for it. The third group is filler and behaves like it: it only appears
+ * soonest-due-first. `opts.newWeights` reorders that middle group by country cost
+ * and `opts.pinned` lifts the player's own picks to its head — see orderUnseen —
+ * and only that group; what is owed and what is filler never move for either. The third group is filler and behaves like it: it only appears
  * when the caller asks for more entries than there is real work, and it can
  * never displace the first two. `priority` is the key that ordered a meta
  * inside its own group, exposed so the Worker or a debugging view can see why
@@ -629,7 +652,7 @@ export function rankDeck(cards, catalog, opts = {}, now) {
   const byDue = (a, b) => dueAt(table[a.name]) - dueAt(table[b.name]) || a.priority - b.priority
   future.sort(byDue)
 
-  const metas = [...due, ...orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset).slice(0, newLimit), ...future]
+  const metas = [...due, ...orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset, opts?.pinned).slice(0, newLimit), ...future]
     .slice(0, limit)
     .map(({ name, mapId, priority, kind }) => ({ name, mapId, priority, kind }))
 
