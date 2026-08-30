@@ -1122,6 +1122,23 @@ export default function Dashboard() {
               </div>
 
               <div className="col c5">
+                {/* The only number on this page you set rather than earn. An
+                    older Worker sends no `day`, and with no stored value to
+                    show the honest thing is no control at all. It sits above
+                    the duel list it feeds — the note on that list points
+                    back up at this dial. */}
+                {dayInfo && (
+                  <div className="panel">
+                    <header>
+                      <h2>Pace</h2>
+                      <span className="note">how fast new material arrives</span>
+                    </header>
+                    <div className="body">
+                      <NewPerDay initial={dayInfo.dailyNew} />
+                    </div>
+                  </div>
+                )}
+
                 {/* The Deck bucket table used to live here; the ladder at the
                     top already says all of it, so the column keeps only what
                     the waffle cannot: where the points actually go. */}
@@ -1133,21 +1150,6 @@ export default function Dashboard() {
                     </header>
                     <div className="body">
                       <Duels rows={byDuelLoss} />
-                    </div>
-                  </div>
-                )}
-
-                {/* The only number on this page you set rather than earn. An
-                    older Worker sends no `day`, and with no stored value to
-                    show the honest thing is no control at all. */}
-                {dayInfo && (
-                  <div className="panel">
-                    <header>
-                      <h2>Pace</h2>
-                      <span className="note">how fast new material arrives</span>
-                    </header>
-                    <div className="body">
-                      <NewPerDay initial={dayInfo.dailyNew} />
                     </div>
                   </div>
                 )}

@@ -908,11 +908,11 @@ code {
 .grid > .c7 { grid-column: span 7; }
 .grid > .c12 { grid-column: span 12; }
 
-/* A column of panels, not a row of pairs. Panels keep their own height and the
-   last one takes whatever slack the column has, so no panel is stretched by a
-   taller neighbour into a half-empty box. */
+/* A column of panels, not a row of pairs. Every panel keeps its own height;
+   when one column runs shorter than its neighbour the slack is page, not card —
+   an early edge reads as an edge, an empty card reads as something missing. */
 .col { display: flex; flex-direction: column; gap: var(--s4); }
-.col > .panel:last-child { flex: 1 1 auto; }
+.col > .panel { flex: 0 0 auto; }
 
 .panel > header {
   display: flex;
