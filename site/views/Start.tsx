@@ -224,8 +224,7 @@ export default function Start() {
     if (location.hash !== '#mcp') return
     const to = document.getElementById('mcp')
     if (!to) return
-    const still = matchMedia('(prefers-reduced-motion: reduce)').matches
-    to.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' })
+    to.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
 
   const submit = async (e: React.FormEvent) => {

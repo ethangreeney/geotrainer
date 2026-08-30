@@ -135,12 +135,11 @@ export default function Pano({ src, yaw, pitch, onFirstDrag }: Props) {
     const uMvp = gl.getUniformLocation(prog, 'uMvp')
 
     /* ---- view state ---- */
-    const slow = matchMedia('(prefers-reduced-motion: reduce)').matches
     let y = yaw
     let p = pitch
     let vy = 0
     let vp = 0
-    let entry = slow ? 1 : 0 /* 0..1; sweeps the view in on load so it reads as live */
+    let entry = 0 /* 0..1; sweeps the view in on load so it reads as live */
     let last = 0
     let raf = 0
     let dragging = false

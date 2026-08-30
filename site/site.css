@@ -19,9 +19,9 @@
    the .lp block at the bottom. It is the only page a stranger sees, so it gets
    a single screen with no scroll on it, type a size larger than anything here,
    and one moving object: a canvas globe that replays the confusions in the
-   round log. Everything that moves lives inside that canvas, it stops when the
-   tab is hidden or the canvas leaves the viewport, and prefers-reduced-motion
-   freezes it on one frame. Nothing outside .lp animates at all.
+   round log. Everything that moves lives inside that canvas and it stops when
+   the tab is hidden or the canvas leaves the viewport. The site deliberately
+   ignores prefers-reduced-motion everywhere: it looks the same for everyone.
 
    Two scales below do the work that used to be done by judgement at each
    call site: every font-size on this site is a step of --fs-*, and every
@@ -1195,15 +1195,6 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   .tbl .r, .log .r, .log .r.head, .empty { padding-left: var(--s4); padding-right: var(--s4); }
   .dk .r { padding-left: 0; padding-right: 0; }
   .todayCta { gap: var(--s3); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .waiting i, .skel::after { animation: none; }
-  .btn, .btn .arr, .stepBlock, .rail i, .wk, .mark .chip, .dealCard { transition: none; }
-  .btn:hover { transform: none; }
-  .btn:hover .arr { transform: none; }
-  /* the fan is a still image under this setting: cards lie flat and stay put */
-  .dealCard { animation: none; }
-  .dealCard:hover { transform: none; }
 }
 
 /* ============================================================== landing === */
