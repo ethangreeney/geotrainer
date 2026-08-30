@@ -832,6 +832,26 @@ describe('rankDeck', () => {
     expect(padded.stats).toMatchObject({ due: 1, future: 3, total: 4 })
   })
 
+  it('serves review-ahead soonest-due-first, not weakest-memory-first', () => {
+    // A shaky card due next month must not outrank a solid card due tonight:
+    // review-ahead borrows from the nearest tomorrow, and grading rotates the
+    // pool as each answered card's due date moves out.
+    const cards = fullTable({
+      [T1[0]]: card({
+        due: plus(T0, 30).toISOString(),
+        stability: 3,
+        scheduledDays: 3,
+        lastReview: plus(T0, -1).toISOString(),
+      }),
+      [T1[1]]: card({ due: plus(T0, 0.5).toISOString(), stability: 60, scheduledDays: 60 }),
+    })
+    const deck = rankDeck(cards, CATALOG, { limit: 2 }, T0)
+    expect(kinds(deck)).toEqual(['future', 'future'])
+    // T1[1] is due soonest; T1[0], weakest by recall but a month away, is not
+    // second — the next card on the calendar (T1[2], due T0+3) is.
+    expect(names(deck)).toEqual([T1[1], T1[2]])
+  })
+
   it('returns future cards rather than nothing when the whole ladder is ahead', () => {
     const deck = rankDeck(fullTable(), CATALOG, { limit: 3 }, T0)
     expect(deck.metas).toHaveLength(3)
@@ -868,7 +888,8 @@ describe('rankDeck', () => {
     const deck = rankDeck(cards, CATALOG, { limit: 99 }, T0)
 
     expect(kinds(deck)).toEqual(['due', 'due', 'new', ...Array(12).fill('future')])
-    for (const kind of ['due', 'new', 'future']) {
+    // future sorts on its own key (due date — see the review-ahead test above)
+    for (const kind of ['due', 'new']) {
       const within = deck.metas.filter((m) => m.kind === kind).map((m) => m.priority)
       expect(within).toEqual([...within].sort((a, b) => a - b))
     }

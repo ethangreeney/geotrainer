@@ -777,7 +777,6 @@ async function handleRound(payload) {
   let inferredRating = null
   let firstSight = false
   if (round.metaName) {
-    const isPadding = !!state.lastDeck?.padding?.includes(round.metaName)
     // A first-sight meta answered correctly is the one grade this system used to
     // guess at. Everything else is measured: you either recalled a card that was
     // already in the deck or you didn't. But the first time a meta is served,
@@ -789,18 +788,15 @@ async function handleRound(payload) {
     //
     // So the card asks, and until it is answered the round counts as uncredited:
     // not correct, no streak, graded Again. Tapping "yes, I knew it" is what
-    // turns it into the Easy this used to assume. Padding rounds are excluded
-    // because a correct one is not graded at all, and so are duels — the card
-    // never appears there, so there is no question to leave unanswered.
-    firstSight =
-      !state.deckCards[round.metaName] && correctScope && !isPadding && !!meta && source !== 'duel'
+    // turns it into the Easy this used to assume. Duels are excluded — the
+    // card never appears there, so there is no question to leave unanswered.
+    firstSight = !state.deckCards[round.metaName] && correctScope && !!meta && source !== 'duel'
     const credited = correctScope && !firstSight
     inferredRating = ratingNameFor(credited, !state.deckCards[round.metaName])
     // Snapshot the pre-grade state so a rating-button tap can redo this grade.
     rememberSnapshot(id, {
       metaName: round.metaName,
       ts: round.ts,
-      padding: isPadding,
       prevCard: state.deckCards[round.metaName] ?? null,
       prevMeta: state.metas[round.metaName] ? { ...state.metas[round.metaName] } : null,
     })
@@ -813,21 +809,20 @@ async function handleRound(payload) {
     } else {
       m.streak = 0
     }
-    // FSRS grading feeds the deck. One exception, per the scheduler's own
-    // simulation: a CORRECT answer on a padding round (near-zero elapsed time)
-    // reads to FSRS as a memory that needs propping up and wrecks the card's
-    // difficulty — so correct padding rounds are free practice, ungraded.
-    // A WRONG padding answer is real forgetting and always counts.
-    if (!(isPadding && correctScope)) {
-      // Before the stamp moves: a second answer today on this card is work the
-      // distinct-card count can't see, so it is logged here or nowhere.
-      state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[round.metaName], now)
-      state.deckCards = gradeRound(
-        state.deckCards,
-        { metaName: round.metaName, correct: credited },
-        now,
-      )
-    }
+    // Every round is graded, review-ahead included. FSRS scores off the real
+    // elapsed time, so a correct answer on a card served ahead of its due date
+    // barely moves it — and moving it at all is the point: it is what rotates
+    // the not-yet-due pool. (Correct answers on those rounds used to be
+    // ungraded "free practice", which pinned the same handful of cards to
+    // every done-for-today deck — a right answer could never push one out.)
+    // Before the stamp moves: a second answer today on this card is work the
+    // distinct-card count can't see, so it is logged here or nowhere.
+    state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[round.metaName], now)
+    state.deckCards = gradeRound(
+      state.deckCards,
+      { metaName: round.metaName, correct: credited },
+      now,
+    )
   }
   state.rounds.push(round)
   await writeFile(STATE_PATH, JSON.stringify(state, null, 2))
@@ -1212,11 +1207,10 @@ const server = createServer(async (req, res) => {
       { dailyNew: DAILY_NEW, newWeights: duelWeightsOf(state) },
     )
 
-    // Not-yet-due metas are this deck's padding: getting one right proves
-    // nothing FSRS did not already know, and handleRound's grading rule reads
-    // this list to leave them ungraded.
-    const paddingNames = ranking.filter((r) => r.kind === 'future').map((r) => r.name)
-    state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name), padding: paddingNames }
+    // What was published, kept for debugging. The not-yet-due metas in it are
+    // review-ahead — soonest-due-first and graded like any other round.
+    const ahead = ranking.filter((r) => r.kind === 'future').length
+    state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name) }
     await writeFile(STATE_PATH, JSON.stringify(state, null, 2))
 
     // Distinct names, not rows: the map floor can publish a second pano
@@ -1249,7 +1243,7 @@ const server = createServer(async (req, res) => {
       }),
     )
     console.log(
-      `[coach] deck: ${ranking.length} metas (${due} due, ${fresh} new, ${paddingNames.length} padding), ` +
+      `[coach] deck: ${ranking.length} metas (${due} due, ${fresh} new, ${ahead} ahead), ` +
         `${customCoordinates.length} locations — ` +
         (stats.doneForToday
           ? 'all done for today'
@@ -1346,15 +1340,14 @@ const server = createServer(async (req, res) => {
           correct: prevMeta.correct + (success ? 1 : 0),
           streak: success ? prevMeta.streak + 1 : 0,
         }
-        // Same padding rule as the original grade: a successful padding round
-        // stays ungraded; a failed one is real forgetting and counts.
-        if (!(snap.padding && success)) {
-          state.deckCards = gradeRound(
-            state.deckCards,
-            { metaName: snap.metaName, rating, correct: success },
-            new Date(snap.ts),
-          )
-        }
+        // Snapshots from the free-practice era still carry a `padding` flag;
+        // it is ignored — review-ahead rounds grade like any other, replays
+        // included.
+        state.deckCards = gradeRound(
+          state.deckCards,
+          { metaName: snap.metaName, rating, correct: success },
+          new Date(snap.ts),
+        )
         const roundRow = state.rounds.find((r) => r.id === id)
         if (roundRow) roundRow.rating = rating
         await writeFile(STATE_PATH, JSON.stringify(state, null, 2))

@@ -1087,11 +1087,9 @@ describe('GET /deck', () => {
     }
   })
 
-  it('remembers what it published, with the not-yet-due metas marked as padding', () => {
+  it('remembers what it published', () => {
     const last = R.deckDefault.saved.lastDeck
     expect(last.metas).toEqual(R.deckDefault.body.ranking.map((r) => r.name))
-    const future = R.deckDefault.body.ranking.filter((r) => r.kind === 'future').map((r) => r.name)
-    expect(last.padding).toEqual(future)
   })
 
   it('gives a brand-new account a full first day of new material', () => {

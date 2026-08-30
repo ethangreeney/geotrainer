@@ -1212,7 +1212,6 @@ async function handleRound(env, user, payload, ctx) {
   let snapshot = null
   let firstSight = false
   if (metaName) {
-    const isPadding = !!state.lastDeck?.padding?.includes(metaName)
     // A first-sight meta answered correctly is the one grade this system used to
     // guess at. Everything else is measured: you either recalled a card that was
     // already in the deck or you didn't. But the first time a meta is served,
@@ -1224,16 +1223,14 @@ async function handleRound(env, user, payload, ctx) {
     //
     // So the card asks, and until it is answered the round counts as uncredited:
     // not correct, no streak, graded Again. Tapping "yes, I knew it" is what
-    // turns it into the Easy this used to assume. Padding rounds are excluded
-    // because a correct one is not graded at all, and so are duels — the card
-    // never appears there, so there is no question to leave unanswered.
-    firstSight = !state.deckCards[metaName] && correctScope && !isPadding && !!meta && source !== 'duel'
+    // turns it into the Easy this used to assume. Duels are excluded — the
+    // card never appears there, so there is no question to leave unanswered.
+    firstSight = !state.deckCards[metaName] && correctScope && !!meta && source !== 'duel'
     const credited = correctScope && !firstSight
     inferredRating = ratingNameFor(credited, !state.deckCards[metaName])
     snapshot = {
       metaName,
       ts: round.ts,
-      padding: isPadding,
       prevCard: state.deckCards[metaName] ?? null,
       prevMeta: state.metas[metaName] ? { ...state.metas[metaName] } : null,
     }
@@ -1246,14 +1243,16 @@ async function handleRound(env, user, payload, ctx) {
     } else {
       m.streak = 0
     }
-    // Correct padding rounds are free practice, ungraded (see the local bridge
-    // for the FSRS rationale); a wrong padding answer is real forgetting.
-    if (!(isPadding && correctScope)) {
-      // Before the stamp moves: a second answer today on this card is work the
-      // distinct-card count can't see, so it is logged here or nowhere.
-      state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[metaName], now, tzOffsetOf(user.config))
-      state.deckCards = gradeRound(state.deckCards, { metaName, correct: credited }, now)
-    }
+    // Every round is graded, review-ahead included. FSRS scores off the real
+    // elapsed time, so a correct answer on a card served ahead of its due date
+    // barely moves it — and moving it at all is the point: it is what rotates
+    // the not-yet-due pool. (Correct answers on those rounds used to be
+    // ungraded "free practice", which pinned the same handful of cards to
+    // every done-for-today deck — a right answer could never push one out.)
+    // Before the stamp moves: a second answer today on this card is work the
+    // distinct-card count can't see, so it is logged here or nowhere.
+    state.reviewLog = logRepeatReview(state.reviewLog, state.deckCards[metaName], now, tzOffsetOf(user.config))
+    state.deckCards = gradeRound(state.deckCards, { metaName, correct: credited }, now)
   }
 
   // One D1 round trip for both writes, atomic (batch = transaction) — and off
@@ -1346,13 +1345,13 @@ async function handleRate(env, user, { id, rating }) {
     correct: prevMeta.correct + (success ? 1 : 0),
     streak: success ? prevMeta.streak + 1 : 0,
   }
-  if (!(snap.padding && success)) {
-    state.deckCards = gradeRound(
-      state.deckCards,
-      { metaName: snap.metaName, rating, correct: success },
-      new Date(snap.ts),
-    )
-  }
+  // Snapshots from the free-practice era still carry a `padding` flag; it is
+  // ignored — review-ahead rounds grade like any other now, replays included.
+  state.deckCards = gradeRound(
+    state.deckCards,
+    { metaName: snap.metaName, rating, correct: success },
+    new Date(snap.ts),
+  )
   const round = JSON.parse(roundRow.json)
   round.rating = rating
   await env.DB.prepare('UPDATE rounds SET json = ? WHERE user_id = ? AND id = ?')
@@ -1793,12 +1792,10 @@ export default {
           { dailyNew: dailyNewOf(user.config), newWeights: duelWeightsOf(state), tzOffset: tzOffsetOf(user.config) },
         )
 
-        // Not-yet-due metas are this deck's padding: they only appear when the
-        // queue runs out of real work, and getting one right proves nothing
-        // FSRS did not already know. Same contract buildDeck's padding had, so
-        // the grading rule in handleRound needs no change.
-        const paddingNames = ranking.filter((r) => r.kind === 'future').map((r) => r.name)
-        state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name), padding: paddingNames }
+        // What was published, kept for the dashboard and for debugging. The
+        // not-yet-due metas in it are review-ahead — soonest-due-first and
+        // graded like any other round — so nothing singles them out any more.
+        state.lastDeck = { ts: now.toISOString(), metas: ranking.map((r) => r.name) }
         await saveUserState(env, user.id, state)
 
         const prewarm = ranking.filter((r) => r.panoId).map((r) => ({ mapId: r.mapId, panoId: r.panoId }))

@@ -543,8 +543,8 @@ const DEFAULT_LIMIT = 25
  * numeric coincidence: due cards weakest-memory-first with the longest-overdue
  * breaking ties, then unseen metas in ladder order (tier ascending, then
  * catalog order, deduped at a meta's first and easiest appearance) but no more
- * than the day's remaining allowance of them, then not-yet-due cards on the
- * review key. `opts.newWeights` reorders that middle group by country cost —
+ * than the day's remaining allowance of them, then not-yet-due cards
+ * soonest-due-first. `opts.newWeights` reorders that middle group by country cost —
  * see orderUnseen — and only that group; what is owed and what is filler never
  * move for it. The third group is filler and behaves like it: it only appears
  * when the caller asks for more entries than there is real work, and it can
@@ -579,8 +579,9 @@ const DEFAULT_LIMIT = 25
  * `stats.doneForToday` is the other half of that: true when nothing is owed and
  * no new meta may be introduced — either the allowance is spent or the ladder
  * has nothing unseen left. It is the "close the tab" signal, and it is why the
- * queue has an end at all. Everything still returned in that state is filler
- * the player may play for fun; none of it is work.
+ * queue has an end at all. Everything still returned in that state is
+ * review-ahead: the cards due soonest, served early and graded as early
+ * reviews, so playing on does tomorrow's work rather than none.
  *
  * The allowance applies before `limit`, so a small deck does not silently
  * enlarge it.
@@ -620,7 +621,13 @@ export function rankDeck(cards, catalog, opts = {}, now) {
   // is the one the schedule is furthest behind on.
   const byPriority = (a, b) => a.priority - b.priority || dueAt(table[a.name]) - dueAt(table[b.name])
   due.sort(byPriority)
-  future.sort(byPriority)
+  // Not-yet-due cards are review-ahead — Anki's custom-study order, soonest
+  // due first. The deck borrows from the nearest tomorrow, and because these
+  // rounds are graded, a right answer moves the card's due date out and the
+  // next deck borrows the card behind it. The old key here (weakest recall
+  // first, ungraded on success) rebuilt the same ten-card treadmill each game.
+  const byDue = (a, b) => dueAt(table[a.name]) - dueAt(table[b.name]) || a.priority - b.priority
+  future.sort(byDue)
 
   const metas = [...due, ...orderUnseen(unseen, table, opts?.newWeights, now, opts?.tzOffset).slice(0, newLimit), ...future]
     .slice(0, limit)

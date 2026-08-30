@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS rounds (
   ts TEXT NOT NULL,
   answer_code TEXT,
   json TEXT NOT NULL,
-  -- pre-grade snapshot for /rate overrides: {metaName, ts, padding, prevCard, prevMeta}
+  -- pre-grade snapshot for /rate overrides: {metaName, ts, prevCard, prevMeta}
   snapshot TEXT,
   PRIMARY KEY (user_id, id)
 );
