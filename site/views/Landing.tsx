@@ -25,7 +25,7 @@ const ACTIONS = [
     h: 'Install the userscript',
     cta: 'Get the script',
     to: '/start',
-    p: 'Captures every round and rebuilds your map — weakest first, new clues rationed daily.',
+    p: 'Captures every round you play and rebuilds your map, weakest metas first.',
   },
   {
     n: '02',
@@ -66,14 +66,13 @@ export default function Landing() {
             <p className="lpKick">Like Anki, but for Learnable Meta maps</p>
             <h1 className="lpHead">Stop practising what you already know.</h1>
             <p className="lpProb">
-              You start a Learnable Meta map and the first metas come fast. Then you know two thirds of it — and the map
-              keeps dealing the ones you already know, while the ones you keep mixing up barely show up and some never
-              come up at all.
+              You start one of the Learnable Meta maps and learn a lot of it fast. Somewhere around two thirds in, it
+              stalls. The map keeps dealing metas you already know. The ones you actually get wrong barely come up, and
+              a few never have.
             </p>
             <p className="lpSol">
-              GeoCoach rebuilds your map after every game: the metas you're still getting wrong come first, the ones you
-              know cold drop out, and new ones arrive a few a day. When you miss, a coach who saw the round tells you
-              what you should have seen.
+              GeoCoach rebuilds your map after every game, so most rounds are metas you've been getting wrong, plus a
+              few new ones a day. When you do miss, a coach who watched the round tells you what you should have seen.
             </p>
 
             <ol className="lpDo">
