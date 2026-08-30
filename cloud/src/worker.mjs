@@ -930,6 +930,110 @@ async function buildProgress(env, user, live, now) {
   return series
 }
 
+// ---------- admin ----------
+
+/** The one account allowed to see the whole instance. The first row ever
+ * inserted is the operator's own; nothing else needs a role column. */
+const ADMIN_USER_ID = 1
+
+/** Every account and how much each has actually used the thing: rounds ever,
+ * rounds this week, when the last one landed, how many metas the scheduler is
+ * tracking, and whether the userscript got far enough to link a map. Tokens
+ * are never selected here, let alone returned. */
+async function buildAdmin(env) {
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.name, u.created_at AS createdAt, u.config,
+            COUNT(r.id) AS rounds, MAX(r.ts) AS lastRound,
+            SUM(CASE WHEN r.ts > ?1 THEN 1 ELSE 0 END) AS rounds7d
+       FROM users u LEFT JOIN rounds r ON r.user_id = u.id
+      GROUP BY u.id ORDER BY u.id`,
+  )
+    .bind(weekAgo)
+    .all()
+  const states = await env.DB.prepare('SELECT user_id, json FROM states').all()
+  const metasByUser = new Map()
+  for (const s of states?.results ?? []) {
+    try {
+      metasByUser.set(s.user_id, Object.keys(JSON.parse(s.json).deckCards ?? {}).length)
+    } catch {
+      metasByUser.set(s.user_id, 0)
+    }
+  }
+  const users = (rows?.results ?? []).map((u) => {
+    let config = {}
+    try {
+      config = JSON.parse(u.config ?? '{}')
+    } catch {}
+    return {
+      id: u.id,
+      name: u.name ?? null,
+      createdAt: u.createdAt ?? null,
+      rounds: u.rounds ?? 0,
+      rounds7d: u.rounds7d ?? 0,
+      lastRound: u.lastRound ?? null,
+      metasTracked: metasByUser.get(u.id) ?? 0,
+      mapLinked: !!config.trainerMapId,
+    }
+  })
+  return {
+    users,
+    totals: {
+      accounts: users.length,
+      rounds: users.reduce((n, u) => n + u.rounds, 0),
+      active7d: users.filter((u) => u.rounds7d > 0).length,
+    },
+  }
+}
+
+const escapeHtml = (s) =>
+  String(s ?? '').replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  )
+
+/** The same numbers as a page, for a phone. Names are typed by whoever signed
+ * up, so they are escaped like the strangers' input they are. */
+function adminPage({ users, totals }) {
+  const day = (ts) => (ts ? String(ts).slice(0, 10) : '—')
+  const rows = users
+    .map(
+      (u) => `<tr>
+  <td>${u.id}</td>
+  <td>${escapeHtml(u.name) || '<i>unnamed</i>'}</td>
+  <td>${day(u.createdAt)}</td>
+  <td class="num">${u.rounds}</td>
+  <td class="num">${u.rounds7d}</td>
+  <td>${day(u.lastRound)}</td>
+  <td class="num">${u.metasTracked}</td>
+  <td>${u.mapLinked ? 'yes' : '—'}</td>
+</tr>`,
+    )
+    .join('\n')
+  return `<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>GeoCoach admin</title>
+<style>
+  body { margin: 2rem auto; max-width: 56rem; padding: 0 1rem; background: #0d1117; color: #e6edf3;
+         font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+  h1 { font-size: 1.2rem; font-weight: 600; }
+  p { color: #8b949e; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { text-align: left; padding: 0.4rem 0.75rem 0.4rem 0; border-bottom: 1px solid #21262d; }
+  th { color: #8b949e; font-weight: 500; }
+  td.num, th.num { text-align: right; padding-right: 1.25rem; }
+  i { color: #8b949e; }
+</style>
+<h1>GeoCoach admin</h1>
+<p>${totals.accounts} account${totals.accounts === 1 ? '' : 's'}, ${totals.rounds} rounds all time, ${totals.active7d} active this week.</p>
+<table>
+  <tr><th>id</th><th>name</th><th>signed up</th><th class="num">rounds</th><th class="num">last 7 days</th><th>last round</th><th class="num">metas</th><th>map</th></tr>
+${rows}
+</table>`
+}
+
 /** Everything the personal dashboard draws, in one round trip: deck health,
  * meta mastery buckets, per-country accuracy and a recent-rounds feed. */
 async function buildDashboard(env, user) {
@@ -1472,6 +1576,7 @@ const AUTHED_PATHS = new Set([
   '/api/dashboard',
   '/api/rounds',
   '/api/tlog',
+  '/api/admin',
   '/geocoach.user.js',
   '/geocoach.body.js',
 ])
@@ -1909,6 +2014,20 @@ export default {
 
       if (request.method === 'GET' && path === '/api/dashboard')
         return json(await buildDashboard(env, user))
+
+      // The whole instance at a glance, for the one operator: opened in a
+      // browser (?token= works like everywhere else) it renders as a page,
+      // otherwise it answers as JSON. Anyone else's token gets a 403 rather
+      // than a subset — there is no partial view of other people's accounts.
+      if (request.method === 'GET' && path === '/api/admin') {
+        if (user.id !== ADMIN_USER_ID) return json({ ok: false, error: 'admin only' }, 403)
+        const admin = await buildAdmin(env)
+        if ((request.headers.get('Accept') ?? '').includes('text/html'))
+          return new Response(adminPage(admin), {
+            headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+          })
+        return json({ ok: true, ...admin })
+      }
 
       // The stored dossier, verbatim. The dashboard's round list is a trimmed
       // projection for charts; coaching needs the whole thing — panoId above

@@ -56,6 +56,7 @@ const TOKENS = {
   roundDuel: 'test-token-round-duel-0001',
   roundRepeat: 'test-token-round-repeat-01',
   roundScotland: 'test-token-round-scotland-1',
+  notAdmin: 'test-token-not-admin-00001',
 }
 
 describe('worker source', () => {
@@ -180,8 +181,22 @@ function makeDB(state, rounds = [], account = { token: TOKEN, config: DEFAULT_CO
     if (sql.includes('INSERT INTO rounds')) return null
     if (sql.includes('FROM users WHERE token'))
       return args[0] === account.token
-        ? { id: 1, name: 'Test', config: rows.config, created_at: '2026-01-01T00:00:00.000Z' }
+        ? { id: account.id ?? 1, name: 'Test', config: rows.config, created_at: '2026-01-01T00:00:00.000Z' }
         : null
+    // The admin roll-call: one aggregate row per account, then every state
+    // blob. The fake instance holds exactly one of each.
+    if (sql.includes('LEFT JOIN rounds'))
+      return [{
+        id: account.id ?? 1,
+        name: account.name ?? 'Test',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        config: rows.config,
+        rounds: rounds.length,
+        rounds7d: rounds.filter((r) => r.ts > args[0]).length,
+        lastRound: rounds.map((r) => r.ts).sort().at(-1) ?? null,
+      }]
+    if (sql.includes('user_id, json FROM states'))
+      return [{ user_id: account.id ?? 1, json: rows.state }]
     // The config write, so a settings route can be asserted on what it stored
     // rather than only on what it echoed.
     if (sql.includes('UPDATE users SET config')) {
@@ -251,12 +266,14 @@ async function call(
     payload = null,
     token = TOKEN,
     config = DEFAULT_CONFIG,
+    id = 1,
+    name = 'Test',
   } = {},
 ) {
   const db = makeDB(
     state ?? { countries: {}, confusions: {}, metas: {}, deckCards: {}, lastDeck: null },
     rounds,
-    { token, config },
+    { token, config, id, name },
   )
   const res = await worker.fetch(
     new Request('https://geocoach.example' + path, {
@@ -732,6 +749,26 @@ const out = {
     token: TOKENS.partDash,
     config: '{"dailyNew":5}',
     state: spentState(dueNames.slice(0, 2)),
+  }),
+  // The operator's roll-call. The account behind TOKEN is id 1, which is what
+  // makes it the admin; TOKENS.notAdmin signs in as id 2 and gets the door.
+  adminNoToken: await call('/api/admin'),
+  adminJson: await call('/api/admin', {
+    headers: auth,
+    rounds: [
+      { ts: new Date(Date.now() - 30 * DAY).toISOString() },
+      { ts: new Date(Date.now() - HOUR).toISOString() },
+    ],
+  }),
+  adminForbidden: await call('/api/admin', {
+    headers: authFor(TOKENS.notAdmin),
+    token: TOKENS.notAdmin,
+    id: 2,
+  }),
+  adminHtml: await call('/api/admin', {
+    headers: { ...auth, Accept: 'text/html' },
+    name: '<b>Sneaky</b>',
+    keepText: true,
   }),
   // One review answered mid-session: the day should show one more cleared and
   // one fewer owed, with the new-meta half untouched.
@@ -1502,6 +1539,36 @@ describe('GET /api/dashboard', () => {
     // smaller than the ladder itself.
     expect(R.dashAllDone.body.deck.due).toBe(0)
     expect(R.dashAllDone.body.deck.unseen).toBeLessThan(R.ladderMetaTotal)
+  })
+})
+
+describe('GET /api/admin', () => {
+  it('refuses without a token', () => {
+    expect(R.adminNoToken.status).toBe(401)
+  })
+
+  it('turns every other account away whole', () => {
+    expect(R.adminForbidden.status).toBe(403)
+    expect(R.adminForbidden.body.users).toBeUndefined()
+  })
+
+  it('shows the operator every account, without ever carrying a token', () => {
+    expect(R.adminJson.status).toBe(200)
+    const u = R.adminJson.body.users[0]
+    // Two rounds seeded, one of them this week; the config row carries a
+    // trainerMapId, so the map counts as linked.
+    expect(u).toMatchObject({ id: 1, name: 'Test', rounds: 2, rounds7d: 1, metasTracked: 0, mapLinked: true })
+    expect(u.lastRound).toBeTruthy()
+    expect('token' in u).toBe(false)
+    expect(R.adminJson.body.totals).toEqual({ accounts: 1, rounds: 2, active7d: 1 })
+  })
+
+  it('renders as a page for a browser, with names escaped', () => {
+    expect(R.adminHtml.status).toBe(200)
+    expect(R.adminHtml.contentType).toContain('text/html')
+    // The name is whatever a stranger typed at signup; it must arrive as text.
+    expect(R.adminHtml.text).toContain('&lt;b&gt;Sneaky&lt;/b&gt;')
+    expect(R.adminHtml.text).not.toContain('<b>Sneaky</b>')
   })
 })
 
