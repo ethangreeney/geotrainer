@@ -92,6 +92,115 @@ function facing(pair: (typeof PAIRS)[number]) {
 const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
 
+/* --------------------------------------------------------------------------
+   Country highlights, behind ?globe=
+
+   The dots read beautifully at continent scale and not at all at the scale the
+   caption is actually arguing about: "you said Norway — it was Sweden" is two
+   halves of one dotted blob. So the borders themselves can be laid over the
+   dots for the beat that names them. Three ways to do it, chosen by the query
+   string, so they can be looked at side by side before one is kept:
+
+     ?globe=outline   the two borders stroked in the guess and truth colours
+     ?globe=fill      the two territories washed in, with a brighter edge
+     ?globe=both      fill and outline together
+     (anything else)  the shipped dot globe, untouched
+
+   Nothing here runs for the default: the atlas and the topology reader are
+   dynamically imported, so they land in their own chunk and a real visitor
+   never downloads a byte of them.
+   -------------------------------------------------------------------------- */
+const VARIANTS = ['dots', 'outline', 'fill', 'both'] as const
+type Variant = (typeof VARIANTS)[number]
+
+function variantOf(): Variant {
+  const q = new URLSearchParams(location.search).get('globe')
+  return VARIANTS.includes(q as Variant) ? (q as Variant) : 'dots'
+}
+
+/** A country as the renderer wants it: every ring's vertices already on the
+ *  unit sphere, exactly like the dot mask, with `ends` marking where each ring
+ *  stops. One flat pair of arrays beats an array of arrays of [lng,lat] when
+ *  the whole thing is rotated sixty times a second. */
+type Shape = { vx: Float32Array; vy: Float32Array; vz: Float32Array; ends: Int32Array }
+type Ring = [number, number][]
+type Feat = { geometry: { type: string; coordinates: Ring[] | Ring[][] } }
+
+/** Natural Earth hands out Polygon and MultiPolygon; only the second shape is
+ *  worth writing the rest of the code against. */
+const polysOf = (f: Feat): Ring[][] =>
+  f.geometry.type === 'Polygon' ? [f.geometry.coordinates as Ring[]] : (f.geometry.coordinates as Ring[][])
+
+function shapeOf(polys: Ring[][]): Shape {
+  let n = 0
+  for (const p of polys) for (const ring of p) n += ring.length
+  const vx = new Float32Array(n)
+  const vy = new Float32Array(n)
+  const vz = new Float32Array(n)
+  const ends: number[] = []
+  let k = 0
+  for (const p of polys) {
+    for (const ring of p) {
+      for (const [lng, lat] of ring) {
+        const c = Math.cos(lat * RAD)
+        vx[k] = c * Math.sin(lng * RAD)
+        vy[k] = Math.sin(lat * RAD)
+        vz[k] = c * Math.cos(lng * RAD)
+        k++
+      }
+      ends.push(k)
+    }
+  }
+  return { vx, vy, vz, ends: Int32Array.from(ends) }
+}
+
+/** Which country a pin is standing in. Ray casting in plain lng/lat: crossing
+ *  an odd number of a polygon's rings is inside it, which gets holes — Lesotho
+ *  out of South Africa — right for free. None of the four pairs sits near the
+ *  antimeridian, so the wrap case is left alone. */
+function holds(polys: Ring[][], lat: number, lng: number) {
+  for (const p of polys) {
+    let hits = 0
+    for (const ring of p) {
+      let inside = false
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const yi = ring[i][1]
+        const yj = ring[j][1]
+        if (yi > lat !== yj > lat && lng < ((ring[j][0] - ring[i][0]) * (lat - yi)) / (yj - yi) + ring[i][0])
+          inside = !inside
+      }
+      if (inside) hits++
+    }
+    if (hits % 2) return true
+  }
+  return false
+}
+
+/** Per pair: the shape the guess landed in and the shape the round was in.
+ *  Null when there is nothing honest to draw — Western Australia and Victoria
+ *  are both *Australia* at country resolution, and washing one country in two
+ *  colours would say the opposite of what the caption says. Admin-1 borders
+ *  would fix that pair, and cost more than the rest of the page put together. */
+type Highlight = { guess: Shape | null; truth: Shape | null }
+let ATLAS: Promise<Highlight[]> | null = null
+
+function atlas(): Promise<Highlight[]> {
+  ATLAS ??= Promise.all([import('topojson-client'), import('world-atlas/countries-110m.json')]).then(([topo, world]) => {
+    const src = (world.default ?? world) as unknown as Parameters<typeof topo.feature>[0]
+    const fc = topo.feature(src, src.objects.countries) as unknown as { features: Feat[] }
+    const cache = new Map<Feat, Shape>()
+    const at = (lat: number, lng: number) => fc.features.find((f) => holds(polysOf(f), lat, lng)) ?? null
+    const cut = (f: Feat | null) => (f ? (cache.get(f) ?? cache.set(f, shapeOf(polysOf(f))).get(f)!) : null)
+    return PAIRS.map((pair) => {
+      const g = at(pair.from[0], pair.from[1])
+      const t = at(pair.to[0], pair.to[1])
+      const same = g !== null && g === t
+      return { guess: same ? null : cut(g), truth: same ? null : cut(t) }
+    })
+  })
+  return ATLAS
+}
+
 /** A point rotated into view space: x right, y up, z towards the viewer. */
 function turn(v: Vec, lam: number, phi: number): Vec {
   const cl = Math.cos(lam)
@@ -187,6 +296,9 @@ export default function Globe({ still }: { still: boolean }) {
   const cv = useRef<HTMLCanvasElement>(null)
   const [beat, setBeat] = useState(0)
   const [lit, setLit] = useState(true)
+  /* Read once, at mount: the look is a thing being compared, not a thing being
+     toggled, and re-reading it would make the loop restart on every navigation. */
+  const [kind] = useState(variantOf)
 
   useEffect(() => {
     const canvas = cv.current
@@ -228,6 +340,14 @@ export default function Globe({ still }: { still: boolean }) {
     const sb = new Uint8Array(N)
     const BUCKETS = 6
 
+    /* Borders, once they arrive. Held in a plain let so the loop can keep
+       running while the atlas is still in flight, and scratch for one shape's
+       worth of rotated vertices so tracing allocates nothing per frame. */
+    let marks: Highlight[] | null = null
+    let rx = new Float32Array(0)
+    let ry = new Float32Array(0)
+    let rz = new Float32Array(0)
+
     /* ------------------------------------------------------------ drawing */
     const beatOf = (c: number) => ((c % PAIRS.length) + PAIRS.length) % PAIRS.length
 
@@ -256,6 +376,129 @@ export default function Globe({ still }: { still: boolean }) {
       ctx!.globalAlpha = alpha * weight
       ctx!.fill()
       ctx!.globalAlpha = 1
+    }
+
+    /** Where a segment crosses the horizon, pushed back out onto the limb. The
+     *  plain interpolation lands on a chord — a hair inside the circle — and a
+     *  whole coast of those reads as a shape that stops short of the edge. */
+    function edge(dst: number[], hid: number, vis: number, cx: number, cy: number, r: number) {
+      const t = -rz[hid] / (rz[vis] - rz[hid])
+      const x = rx[hid] + (rx[vis] - rx[hid]) * t
+      const y = ry[hid] + (ry[vis] - ry[hid]) * t
+      const d = Math.hypot(x, y) || 1
+      dst.push(cx + (x / d) * r, cy - (y / d) * r)
+    }
+
+    /* A country's rings, laid on the sphere with the dots' own rotation and cut
+       at the terminator. Far-side vertices are dropped and the segment that
+       reached them stops on the limb, so a country on the shoulder — South
+       Africa and Australia are 117° apart, and facing their midpoint leaves
+       both near an edge — ends at the horizon instead of folding back through
+       the sphere. Rings that never leave the front come back whole, and only
+       whole rings are stroked closed: closing a cut ring would draw a border
+       along a chord that no map has. */
+    type Run = { pts: number[]; whole: boolean }
+
+    function trace(sh: Shape, cx: number, cy: number, r: number): Run[] {
+      const n = sh.vx.length
+      if (rx.length < n) {
+        rx = new Float32Array(n)
+        ry = new Float32Array(n)
+        rz = new Float32Array(n)
+      }
+      const cl = Math.cos(lam)
+      const sl = Math.sin(lam)
+      const cp = Math.cos(phi)
+      const sp = Math.sin(phi)
+      for (let i = 0; i < n; i++) {
+        const x1 = sh.vx[i] * cl + sh.vz[i] * sl
+        const z1 = sh.vz[i] * cl - sh.vx[i] * sl
+        rx[i] = x1
+        ry[i] = sh.vy[i] * cp - z1 * sp
+        rz[i] = sh.vy[i] * sp + z1 * cp
+      }
+      const runs: Run[] = []
+      let s = 0
+      for (let e = 0; e < sh.ends.length; e++) {
+        const end = sh.ends[e]
+        const len = end - s
+        let first = -1
+        for (let i = s; i < end; i++)
+          if (rz[i] <= 0) {
+            first = i - s
+            break
+          }
+        if (first < 0) {
+          const pts: number[] = []
+          for (let i = s; i < end; i++) pts.push(cx + rx[i] * r, cy - ry[i] * r)
+          if (pts.length >= 6) runs.push({ pts, whole: true })
+        } else {
+          /* Walking from a hidden vertex means every run opens and closes
+             inside the walk, and nothing has to be stitched across the ring's
+             own seam afterwards. */
+          let open: number[] | null = null
+          for (let k = 1; k <= len; k++) {
+            const i = s + ((first + k) % len)
+            const j = s + ((first + k - 1) % len)
+            if (rz[i] > 0) {
+              if (!open) edge((open = []), j, i, cx, cy, r)
+              open.push(cx + rx[i] * r, cy - ry[i] * r)
+            } else if (open) {
+              edge(open, i, j, cx, cy, r)
+              if (open.length >= 6) runs.push({ pts: open, whole: false })
+              open = null
+            }
+          }
+        }
+        s = end
+      }
+      return runs
+    }
+
+    /** The two territories: guess in ink, truth in lime, over the dots and
+     *  under the arc. `on` is the beat's own opacity, so they arrive with the
+     *  caption and leave with it. */
+    function lands(cx: number, cy: number, r: number, gain: number, on: number) {
+      const m = marks?.[beatOf(cycle)]
+      if (!m) return
+      const wash = kind === 'fill' || kind === 'both'
+      const width = kind === 'fill' ? 0.9 : 1.6
+      ctx!.save()
+      ctx!.beginPath()
+      ctx!.arc(cx, cy, r, 0, Math.PI * 2)
+      ctx!.clip()
+      ctx!.lineJoin = 'round'
+      for (const [sh, colour, loud] of [
+        [m.guess, INK, 0.45],
+        [m.truth, LIME, 1],
+      ] as const) {
+        if (!sh) continue
+        const runs = trace(sh, cx, cy, r)
+        if (!runs.length) continue
+        const path = (shut: boolean) => {
+          ctx!.beginPath()
+          for (const run of runs) {
+            ctx!.moveTo(run.pts[0], run.pts[1])
+            for (let i = 2; i < run.pts.length; i += 2) ctx!.lineTo(run.pts[i], run.pts[i + 1])
+            if (shut || run.whole) ctx!.closePath()
+          }
+        }
+        if (wash) {
+          path(true)
+          ctx!.fillStyle = colour
+          // Even-odd, so a ring inside a ring is the hole it was drawn as —
+          // Lesotho stays a hole in South Africa rather than more South Africa.
+          ctx!.globalAlpha = Math.min(0.34, on * (0.09 + 0.13 * loud) * gain)
+          ctx!.fill('evenodd')
+        }
+        path(false)
+        ctx!.strokeStyle = colour
+        ctx!.lineWidth = width * Math.min(1.5, gain)
+        ctx!.globalAlpha = on * (0.3 + 0.6 * loud)
+        ctx!.stroke()
+      }
+      ctx!.globalAlpha = 1
+      ctx!.restore()
     }
 
     function render() {
@@ -320,6 +563,10 @@ export default function Globe({ still }: { still: boolean }) {
         ctx!.fill()
       }
       ctx!.globalAlpha = 1
+
+      /* the countries the caption is naming, when one of the variants asks for
+         them — over the dots, so the border reads against its own territory */
+      if (kind !== 'dots' && arc > 0.001 && alpha > 0.01) lands(cx, cy, r, gain, Math.min(1, arc / 0.5) * alpha)
 
       /* the limb */
       ctx!.beginPath()
@@ -464,6 +711,16 @@ export default function Globe({ still }: { still: boolean }) {
     ro.observe(canvas)
     size()
 
+    /* The atlas is fetched only for the variants that draw it, and the loop
+       does not wait on it: until it lands this is the shipped globe exactly. */
+    let gone = false
+    if (kind !== 'dots')
+      atlas().then((m) => {
+        if (gone) return
+        marks = m
+        if (!live) render()
+      })
+
     let onScreen = true
     const io = new IntersectionObserver(
       ([e]) => {
@@ -530,6 +787,7 @@ export default function Globe({ still }: { still: boolean }) {
     if (!still) start()
 
     return () => {
+      gone = true
       stop()
       ro.disconnect()
       io.disconnect()
@@ -539,7 +797,7 @@ export default function Globe({ still }: { still: boolean }) {
       canvas.removeEventListener('pointerup', up)
       canvas.removeEventListener('pointercancel', up)
     }
-  }, [still])
+  }, [still, kind])
 
   return (
     <div className="lpStage" ref={box}>

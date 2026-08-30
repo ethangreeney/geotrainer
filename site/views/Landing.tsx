@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { useReducedMotion } from 'motion/react'
 import { Link, Mast } from '../router'
 import { getToken } from '../api'
 import Globe from './Globe'
@@ -41,7 +40,10 @@ const ACTIONS = [
 ]
 
 export default function Landing() {
-  const still = !!useReducedMotion()
+  // The globe ignores prefers-reduced-motion on purpose: it is the landing
+  // page's entire argument, one slow object on an otherwise static screen,
+  // and frozen it reads as a broken image rather than a calmer page.
+  const still = false
   const [hasAccount] = useState(() => !!getToken())
 
   return (
@@ -61,15 +63,17 @@ export default function Landing() {
         <i className="lpWeave" aria-hidden />
         <div className="lpIn">
           <div className="lpSay">
-            <p className="lpKick">Spaced repetition + a coach for GeoGuessr</p>
+            <p className="lpKick">Like Anki, but for Learnable Meta maps</p>
             <h1 className="lpHead">Stop practising what you already know.</h1>
             <p className="lpProb">
-              GeoGuessr deals its clues at random and grades a miss in kilometres — the wrong order to learn in, with no
-              feedback when it matters.
+              You start a Learnable Meta map and the first metas come fast. Then you know two thirds of it — and the map
+              keeps dealing the ones you already know, while the ones you keep mixing up barely show up and some never
+              come up at all.
             </p>
             <p className="lpSol">
-              GeoCoach rebuilds your practice map after every game so the weakest clue always comes first, and when you
-              miss, a coach who saw the round tells you what you should have seen.
+              GeoCoach rebuilds your map after every game: the metas you're still getting wrong come first, the ones you
+              know cold drop out, and new ones arrive a few a day. When you miss, a coach who saw the round tells you
+              what you should have seen.
             </p>
 
             <ol className="lpDo">

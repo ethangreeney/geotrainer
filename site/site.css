@@ -1429,9 +1429,6 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   .lpStep .btn { grid-area: 3 / 1 / 4 / 3; justify-self: start; margin-top: var(--s3); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .lpCap { transition: none; }
-}
 
 /* =========================================================== the coach === */
 /* Optional, and after the fact. Set off from the step list by a rule rather
