@@ -297,7 +297,9 @@ export default function Globe({ still }: { still: boolean }) {
   const cv = useRef<HTMLCanvasElement>(null)
   const cap = useRef<HTMLParagraphElement>(null)
   const [beat, setBeat] = useState(0)
-  const [lit, setLit] = useState(true)
+  /* Off until the loop says otherwise: lit at mount, the card paints once at
+     the stage's origin before the first frame parks it, then fades out. */
+  const [lit, setLit] = useState(still)
   /* Read once, at mount: the look is a thing being compared, not a thing being
      toggled, and re-reading it would make the loop restart on every navigation. */
   const [kind] = useState(variantOf)

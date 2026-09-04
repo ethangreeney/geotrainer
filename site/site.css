@@ -1566,10 +1566,11 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   color: var(--lime);
   margin: 0 2px;
 }
+/* one line, on the number's baseline — a second line hangs below the figure
+   and reads as misaligned */
 .lpStatP {
-  max-width: 26ch;
   font-size: var(--fs-3);
-  line-height: 1.4;
+  line-height: 1;
   color: var(--ink-3);
 }
 

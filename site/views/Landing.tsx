@@ -78,7 +78,7 @@ export default function Landing() {
               <b className="lpStatN">
                 16% <i className="mono">→</i> 60%
               </b>
-              <span className="lpStatP">first-sight recall by the third look, over 605 rounds</span>
+              <span className="lpStatP">first-sight recall by the third look</span>
             </p>
 
             <ol className="lpDo">
