@@ -25,7 +25,7 @@ const ACTIONS = [
     h: 'Install the userscript',
     cta: 'Get the script',
     to: '/start',
-    p: 'Captures every round you play and rebuilds your map, weakest metas first.',
+    p: 'Captures every round and rebuilds your map.',
     key: true,
   },
   {
@@ -36,7 +36,7 @@ const ACTIONS = [
        script. This button has to land on the coach, not on a page about a
        browser extension, so it carries the anchor and /start scrolls to it. */
     to: '/start#mcp',
-    p: 'A local MCP server that hands Claude the round you just missed.',
+    p: 'Claude gets the round you just missed.',
     /* Optional and second, so it does not get the lit key: one lime button on
        the screen, and it is the one that starts everything. */
     key: false,
@@ -69,20 +69,16 @@ export default function Landing() {
           <div className="lpSay">
             <p className="lpKick">Like Anki, but for Learnable Meta maps</p>
             <h1 className="lpHead">Stop practising what you already know.</h1>
-            <p className="lpProb">
-              You start a Learnable Meta map and learn most of it fast. Then it stalls: the map keeps dealing metas
-              you already know, and the ones you get wrong barely come up.
-            </p>
             <p className="lpSol">
-              GeoCoach rebuilds your map after every game, so most rounds are metas you've been getting wrong, plus a
-              few new ones a day. When you miss, a coach who watched the round tells you what you should have seen.
+              Learnable Meta maps keep dealing the metas you already know. GeoCoach rebuilds your map after every game
+              around the ones you miss, and tells you what you should have seen.
             </p>
 
             <p className="lpStat">
               <b className="lpStatN">
                 16% <i className="mono">→</i> 60%
               </b>
-              <span className="lpStatP">first-sight recall by the third look, across 605 logged rounds</span>
+              <span className="lpStatP">first-sight recall by the third look, over 605 rounds</span>
             </p>
 
             <ol className="lpDo">

@@ -340,6 +340,7 @@ export default function Globe({ still }: { still: boolean }) {
     /* Where the card was put this frame, for the leader; and the leader's own
        opacity, eased to follow the card's fade rather than the arc's. */
     let hung: { x: number; y: number; w: number; h: number } | null = null
+    let hungFor = -2
     let lead = 0
 
     /* Scratch for one frame of dots: screen x, y, radius, and a depth bucket.
@@ -390,12 +391,18 @@ export default function Globe({ still }: { still: boolean }) {
     }
 
     /** The caption, hung off a pin: to its lower right by default, flipped to
-     *  whichever side keeps the whole card inside the box. Written straight to
-     *  the element, once a frame while the arc is up — going through React for
-     *  a transform at sixty a second would be a render per frame for nothing. */
+     *  whichever side keeps the whole card inside the box. Placed once a beat,
+     *  on the first frame the arc exists — the card is still invisible then —
+     *  and left alone while the hold's drift carries the pin a few pixels
+     *  away from it. Moving the words with the pin put them on a one-pixel
+     *  staircase; the leader is what follows the pin. */
     function hang(x: number, y: number) {
-      hung = null
-      if (!floats) return
+      if (!floats) {
+        hung = null
+        return
+      }
+      if (hungFor === cycle && hung) return
+      hungFor = cycle
       const cw = card!.offsetWidth
       const ch = card!.offsetHeight
       let px = x + 22
@@ -781,6 +788,7 @@ export default function Globe({ still }: { still: boolean }) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       floats = getComputedStyle(card).position === 'absolute'
       if (!floats) card.style.transform = ''
+      hungFor = -2
       /* A new box is a new aim. The running loop picks it up at the next turn;
          a still frame, and the frame before the loop has started, have no next
          turn, so they are re-seated here. */

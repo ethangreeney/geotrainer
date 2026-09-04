@@ -1530,18 +1530,10 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   max-width: 16ch;
 }
 
-/* The problem is set back and the answer is set forward: same column, two
-   sizes and two inks, so the eye lands on the second paragraph. */
-.lpProb {
-  margin-top: clamp(14px, 2.2vh, 22px);
-  max-width: 50ch;
-  font-size: var(--fs-4);
-  line-height: 1.5;
-  color: var(--ink-3);
-}
+/* One paragraph: the problem in the first sentence, the answer in the rest. */
 .lpSol {
-  margin-top: var(--s3);
-  max-width: 50ch;
+  margin-top: clamp(16px, 2.6vh, 26px);
+  max-width: 46ch;
   font-size: var(--fs-5);
   line-height: 1.5;
   color: var(--ink);
@@ -1734,8 +1726,7 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 @media (min-width: 960px) and (min-height: 680px) and (max-height: 790px) {
   .lpSay { padding: var(--s3) 0; }
   .lpHead { font-size: clamp(34px, 6.6vh, 52px); }
-  .lpProb { margin-top: 12px; line-height: 1.42; }
-  .lpSol { line-height: 1.42; }
+  .lpSol { margin-top: 14px; line-height: 1.42; }
   .lpStat { margin-top: 14px; }
   .lpStatN { font-size: 30px; }
   .lpDo { margin-top: 14px; }
