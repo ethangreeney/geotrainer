@@ -21,10 +21,10 @@ const RAD = Math.PI / 180
 /** Real confusions out of the round log: guess, truth, and the clue that told
  *  them apart. Coordinates are the middle of the region, not a city. */
 const PAIRS = [
-  { from: [-31.9, 115.9], to: [-37.7, 142.7], say: 'you said Western Australia — it was Victoria' },
-  { from: [3.1, 101.7], to: [15.9, 100.9], say: 'you said Malaysia — the yellow centre line was Thailand' },
-  { from: [-26.2, 28.0], to: [-36.5, 145.5], say: 'you said South Africa — gum trees and white lines' },
-  { from: [59.9, 10.7], to: [60.6, 15.6], say: 'you said Norway — it was Sweden' },
+  { from: [-31.9, 115.9], to: [-37.7, 142.7], guess: 'Western Australia', truth: 'Victoria', clue: 'same country, 2,700 km out' },
+  { from: [3.1, 101.7], to: [15.9, 100.9], guess: 'Malaysia', truth: 'Thailand', clue: 'the yellow centre line' },
+  { from: [-26.2, 28.0], to: [-36.5, 145.5], guess: 'South Africa', truth: 'Australia', clue: 'gum trees and white lines' },
+  { from: [59.9, 10.7], to: [60.6, 15.6], guess: 'Norway', truth: 'Sweden', clue: 'white centre line, not yellow' },
 ] as const
 
 /* The beat, in milliseconds: turn to face the pair, draw the arc, hold it,
@@ -213,17 +213,18 @@ function turn(v: Vec, lam: number, phi: number): Vec {
 }
 
 /* Two framings, picked off the shape of the box.
-   Tall box (the desktop right-hand column): off-centre and oversized, so the
-   sphere runs off the right and bottom and the page reads as a window onto
-   something bigger.
+   Tall box (the desktop right-hand column): sized to breathe top and bottom,
+   then pushed right so the sphere runs off that one edge and no other. Cut
+   on two sides it looked dropped into the corner; cut on one it reads as a
+   window onto something bigger.
    Wide box (the stacked layout): centred and sized off the height, so the disc
    fills the band it is given. Bleeding here left a third of the section as
    empty dark page below the globe, because the bottom of the hemisphere is
    usually ocean and carries no ink to mark it. */
 function frameOf(w: number, h: number) {
   const wide = w > h * 1.2
-  const r = wide ? h * 0.48 : Math.min(w, h) * 0.58
-  return { r, cx: wide ? w * 0.5 : w * 0.58, cy: wide ? h * 0.5 : h * 0.54 }
+  const r = wide ? h * 0.48 : Math.min(h * 0.45, w * 0.62)
+  return { r, cx: wide ? w * 0.5 : w * 0.66, cy: h * 0.5 }
 }
 
 /* Aiming at the visible disc, not at the sphere's centre.
@@ -294,6 +295,7 @@ function aimAt(pair: (typeof PAIRS)[number], w: number, h: number) {
 export default function Globe({ still }: { still: boolean }) {
   const box = useRef<HTMLDivElement>(null)
   const cv = useRef<HTMLCanvasElement>(null)
+  const cap = useRef<HTMLParagraphElement>(null)
   const [beat, setBeat] = useState(0)
   const [lit, setLit] = useState(true)
   /* Read once, at mount: the look is a thing being compared, not a thing being
@@ -303,7 +305,8 @@ export default function Globe({ still }: { still: boolean }) {
   useEffect(() => {
     const canvas = cv.current
     const wrap = box.current
-    if (!canvas || !wrap) return
+    const card = cap.current
+    if (!canvas || !wrap || !card) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
@@ -330,6 +333,14 @@ export default function Globe({ still }: { still: boolean }) {
     let raf = 0
     let live = false
     let shown = true
+    /* Whether the caption is ours to place. On the fixed screen the stylesheet
+       lifts it out of flow and this loop parks it by the truth pin; stacked,
+       it sits under the canvas and is left alone. */
+    let floats = false
+    /* Where the card was put this frame, for the leader; and the leader's own
+       opacity, eased to follow the card's fade rather than the arc's. */
+    let hung: { x: number; y: number; w: number; h: number } | null = null
+    let lead = 0
 
     /* Scratch for one frame of dots: screen x, y, radius, and a depth bucket.
        Filled in one pass, then drawn in six, so the fill colour is set six
@@ -368,13 +379,59 @@ export default function Globe({ still }: { still: boolean }) {
       if (p.z <= 0.02) return
       ctx!.fillStyle = colour
       ctx!.beginPath()
-      ctx!.arc(p.x, p.y, 3.2 + pulse * 4.2, 0, Math.PI * 2)
-      ctx!.globalAlpha = alpha * weight * (0.3 - pulse * 0.22)
+      ctx!.arc(p.x, p.y, 4.5 + pulse * 7, 0, Math.PI * 2)
+      ctx!.globalAlpha = alpha * weight * (0.32 - pulse * 0.24)
       ctx!.fill()
       ctx!.beginPath()
-      ctx!.arc(p.x, p.y, 1.8 + weight * 0.9, 0, Math.PI * 2)
+      ctx!.arc(p.x, p.y, 2.2 + weight * 1.4, 0, Math.PI * 2)
       ctx!.globalAlpha = alpha * weight
       ctx!.fill()
+      ctx!.globalAlpha = 1
+    }
+
+    /** The caption, hung off a pin: to its lower right by default, flipped to
+     *  whichever side keeps the whole card inside the box. Written straight to
+     *  the element, once a frame while the arc is up — going through React for
+     *  a transform at sixty a second would be a render per frame for nothing. */
+    function hang(x: number, y: number) {
+      hung = null
+      if (!floats) return
+      const cw = card!.offsetWidth
+      const ch = card!.offsetHeight
+      let px = x + 22
+      if (px + cw > w - 8) px = x - 22 - cw
+      if (px < 8) px = 8
+      let py = y + 18
+      if (py + ch > h - 8) py = y - 18 - ch
+      if (py < 8) py = 8
+      px = Math.round(px)
+      py = Math.round(py)
+      card!.style.transform = `translate(${px}px, ${py}px)`
+      hung = { x: px, y: py, w: cw, h: ch }
+    }
+
+    /** A hairline from the pin to the nearest point on the card's edge, so
+     *  the words are visibly *about* that dot and not floating near it. */
+    function leader(x: number, y: number, colour: string) {
+      if (!hung || lead < 0.01) return
+      const ex = clamp(x, hung.x, hung.x + hung.w)
+      const ey = clamp(y, hung.y, hung.y + hung.h)
+      const dx = ex - x
+      const dy = ey - y
+      const d = Math.hypot(dx, dy)
+      if (d < 14) return
+      // start outside the pin's halo, stop a hair short of the card
+      const sx0 = x + (dx / d) * 9
+      const sy0 = y + (dy / d) * 9
+      const ex1 = ex - (dx / d) * 2
+      const ey1 = ey - (dy / d) * 2
+      ctx!.beginPath()
+      ctx!.moveTo(sx0, sy0)
+      ctx!.lineTo(ex1, ey1)
+      ctx!.strokeStyle = colour
+      ctx!.lineWidth = 1
+      ctx!.globalAlpha = alpha * lead * 0.6
+      ctx!.stroke()
       ctx!.globalAlpha = 1
     }
 
@@ -511,13 +568,25 @@ export default function Globe({ still }: { still: boolean }) {
       const gain = Math.min(1.8, Math.max(1, 270 / r))
       ctx!.clearRect(0, 0, w, h)
 
-      /* the body of the sphere: barely there, lit from the upper left */
-      const wash = ctx!.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.05, cx, cy, r)
-      wash.addColorStop(0, `rgba(255,255,255,${0.055 * gain})`)
-      wash.addColorStop(0.55, `rgba(255,255,255,${0.018 * gain})`)
-      wash.addColorStop(1, 'rgba(255,255,255,0)')
+      /* the air: a violet glow that starts just inside the limb and falls off
+         outside it, so the sphere has an edge of light rather than a hairline */
+      const air = ctx!.createRadialGradient(cx, cy, r * 0.94, cx, cy, r * 1.16)
+      air.addColorStop(0, `rgba(139,104,232,${0.2 * gain})`)
+      air.addColorStop(0.3, `rgba(139,104,232,${0.09 * gain})`)
+      air.addColorStop(1, 'rgba(139,104,232,0)')
+      ctx!.fillStyle = air
+      ctx!.fillRect(cx - r * 1.2, cy - r * 1.2, r * 2.4, r * 2.4)
+
+      /* the body of the sphere: a little more than barely there, lit from the
+         upper left, sitting on a deeper plane than the page */
       ctx!.beginPath()
       ctx!.arc(cx, cy, r, 0, Math.PI * 2)
+      ctx!.fillStyle = 'rgba(8,3,26,0.5)'
+      ctx!.fill()
+      const wash = ctx!.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.05, cx, cy, r)
+      wash.addColorStop(0, `rgba(255,255,255,${0.075 * gain})`)
+      wash.addColorStop(0.55, `rgba(255,255,255,${0.024 * gain})`)
+      wash.addColorStop(1, 'rgba(255,255,255,0)')
       ctx!.fillStyle = wash
       ctx!.fill()
 
@@ -536,7 +605,7 @@ export default function Globe({ still }: { still: boolean }) {
       const sl = Math.sin(lam)
       const cp = Math.cos(phi)
       const sp = Math.sin(phi)
-      const dot = Math.max(1.05, r * 0.0052)
+      const dot = Math.max(1.1, r * 0.0056)
       let n = 0
       for (let i = 0; i < N; i++) {
         const x1 = VX[i] * cl + VZ[i] * sl
@@ -558,7 +627,7 @@ export default function Globe({ still }: { still: boolean }) {
           ctx!.moveTo(sx[i] + sr[i], sy[i])
           ctx!.arc(sx[i], sy[i], sr[i], 0, Math.PI * 2)
         }
-        ctx!.globalAlpha = Math.min(0.62, (0.1 + 0.26 * depth) * gain)
+        ctx!.globalAlpha = Math.min(0.8, (0.14 + 0.46 * depth) * gain)
         ctx!.fillStyle = INK
         ctx!.fill()
       }
@@ -571,35 +640,49 @@ export default function Globe({ still }: { still: boolean }) {
       /* the limb */
       ctx!.beginPath()
       ctx!.arc(cx, cy, r, 0, Math.PI * 2)
-      ctx!.strokeStyle = `rgba(255,255,255,${Math.min(0.3, 0.14 * gain)})`
+      ctx!.strokeStyle = `rgba(255,255,255,${Math.min(0.34, 0.18 * gain)})`
       ctx!.lineWidth = 1
       ctx!.stroke()
 
-      /* the arc, drawn from the guess towards the truth, dim ink into lime */
+      /* the arc, drawn from the guess towards the truth, dim ink into lime.
+         Two passes: a wide soft one underneath so the line carries light, and
+         the crisp one on top. It is the only line on the page and it has to
+         read from across the room. */
       if (arc > 0.001 && alpha > 0.01) {
         const pair = PAIRS[beatOf(cycle)]
         const a = vec(pair.from[0], pair.from[1])
         const b = vec(pair.to[0], pair.to[1])
         const steps = 72
-        ctx!.lineWidth = 1.6
+        const stroke = Math.min(1.6, gain)
         ctx!.lineCap = 'round'
-        let prev = project(along(a, b, 0, LIFT), cx, cy, r)
-        for (let s = 1; s <= steps; s++) {
-          const u = s / steps
-          if (u > arc) break
-          const here = project(along(a, b, u, LIFT), cx, cy, r)
-          if (prev.z > 0 && here.z > 0) {
-            ctx!.beginPath()
-            ctx!.moveTo(prev.x, prev.y)
-            ctx!.lineTo(here.x, here.y)
-            ctx!.strokeStyle = u < 0.45 ? INK : LIME
-            ctx!.globalAlpha = alpha * (0.22 + 0.62 * u)
-            ctx!.stroke()
+        for (const [width, loud] of [
+          [7 * stroke, 0.16],
+          [2.4 * stroke, 1],
+        ]) {
+          ctx!.lineWidth = width
+          let prev = project(along(a, b, 0, LIFT), cx, cy, r)
+          for (let s = 1; s <= steps; s++) {
+            const u = s / steps
+            if (u > arc) break
+            const here = project(along(a, b, u, LIFT), cx, cy, r)
+            if (prev.z > 0 && here.z > 0) {
+              ctx!.beginPath()
+              ctx!.moveTo(prev.x, prev.y)
+              ctx!.lineTo(here.x, here.y)
+              ctx!.strokeStyle = u < 0.45 ? INK : LIME
+              ctx!.globalAlpha = alpha * loud * (0.34 + 0.62 * u)
+              ctx!.stroke()
+            }
+            prev = here
           }
-          prev = here
         }
         ctx!.globalAlpha = 1
-        pin(cx, cy, r, a, INK, 0.4, 0)
+        pin(cx, cy, r, a, INK, 0.55, 0)
+        const truth = project(b, cx, cy, r)
+        if (truth.z > 0) {
+          hang(truth.x, truth.y)
+          leader(truth.x, truth.y, LIME)
+        }
         if (arc > 0.985) {
           const t = (Date.now() % 1800) / 1800
           pin(cx, cy, r, b, LIME, 1, still ? 0.4 : Math.sin(t * Math.PI * 2) * 0.5 + 0.5)
@@ -612,6 +695,8 @@ export default function Globe({ still }: { still: boolean }) {
       const dt = Math.min(64, now - last)
       last = now
       const paused = dragging || now < holdUntil
+      // the leader fades over the same 420ms the stylesheet gives the card
+      lead = clamp(lead + ((shown || still ? 1 : -1) * dt) / 420, 0, 1)
 
       // Inertia runs whether or not the cycle does: letting go should coast.
       if (!dragging && (Math.abs(vx) > 1e-5 || Math.abs(vy) > 1e-5)) {
@@ -694,6 +779,8 @@ export default function Globe({ still }: { still: boolean }) {
       canvas.width = Math.round(w * dpr)
       canvas.height = Math.round(h * dpr)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      floats = getComputedStyle(card).position === 'absolute'
+      if (!floats) card.style.transform = ''
       /* A new box is a new aim. The running loop picks it up at the next turn;
          a still frame, and the frame before the loop has started, have no next
          turn, so they are re-seated here. */
@@ -807,8 +894,15 @@ export default function Globe({ still }: { still: boolean }) {
         role="img"
         aria-label="A globe of dots. It turns to each pair of countries this player has confused and draws a line from the guess to the true location."
       />
-      <p className={'lpCap' + (lit || still ? ' on' : '')} aria-live="off">
-        {PAIRS[beat].say}
+      <p className={'lpCap' + (lit || still ? ' on' : '')} aria-live="off" ref={cap}>
+        <b className="lpCapPair">
+          <span className="lpCapGuess">{PAIRS[beat].guess}</span>
+          <i className="mono" aria-hidden>
+            →
+          </i>
+          <span className="lpCapTruth">{PAIRS[beat].truth}</span>
+        </b>
+        <span className="lpCapClue">{PAIRS[beat].clue}</span>
       </p>
     </div>
   )

@@ -1525,24 +1525,60 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   font-weight: 850;
   font-variation-settings: 'wdth' 94, 'wght' 850;
   line-height: 1.02;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.025em;
   color: var(--ink);
   max-width: 16ch;
 }
 
+/* The problem is set back and the answer is set forward: same column, two
+   sizes and two inks, so the eye lands on the second paragraph. */
 .lpProb {
   margin-top: clamp(14px, 2.2vh, 22px);
-  max-width: 52ch;
+  max-width: 50ch;
   font-size: var(--fs-4);
-  line-height: 1.55;
-  color: var(--ink-2);
+  line-height: 1.5;
+  color: var(--ink-3);
 }
 .lpSol {
   margin-top: var(--s3);
-  max-width: 52ch;
-  font-size: var(--fs-4);
-  line-height: 1.55;
+  max-width: 50ch;
+  font-size: var(--fs-5);
+  line-height: 1.5;
   color: var(--ink);
+}
+
+/* --------------------------------------------------------------- the proof */
+/* The one number on the page, set in the headline's own weight. */
+.lpStat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s2) var(--s4);
+  margin-top: clamp(16px, 2.8vh, 30px);
+}
+.lpStatN {
+  font-family: var(--sans);
+  font-size: clamp(30px, 3vw, 40px);
+  font-weight: 850;
+  font-variation-settings: 'wdth' 94, 'wght' 850;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.lpStatN i {
+  font-style: normal;
+  font-weight: 500;
+  font-size: 0.72em;
+  color: var(--lime);
+  margin: 0 2px;
+}
+.lpStatP {
+  max-width: 26ch;
+  font-size: var(--fs-3);
+  line-height: 1.4;
+  color: var(--ink-3);
 }
 
 /* ----------------------------------------------------------- the actions -- */
@@ -1560,13 +1596,14 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   padding: clamp(12px, 1.8vh, 18px) 0;
   border-bottom: 1px solid var(--rule-soft);
 }
+/* a plain figure: the steps are a real sequence, and that is all it says */
 .lpN {
   grid-area: 1 / 1;
-  font: 500 var(--fs-2)/1 var(--mono);
-  letter-spacing: 0.08em;
-  color: var(--lime);
+  min-width: 1.4ch;
+  font: 600 var(--fs-3)/1 var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-4);
 }
-.lpN i { font-style: normal; color: var(--ink-4); }
 .lpStepH {
   grid-area: 1 / 2;
   font: 600 var(--fs-5)/1.25 var(--sans);
@@ -1599,16 +1636,20 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   color: var(--ink-4);
 }
 .lpFine b { color: var(--ink-2); font-weight: 500; }
-.lpProof {
-  margin-top: var(--s2);
-  max-width: 58ch;
-  font-size: var(--fs-2);
-  line-height: 1.5;
-  color: var(--ink-3);
-}
 
 /* ------------------------------------------------------------ the object -- */
-.lpArt { position: relative; min-width: 0; }
+.lpArt { position: relative; min-width: 0; isolation: isolate; }
+/* The air the sphere sits in: a violet bloom behind the canvas, the colour
+   the card's shadow is cast in, so the right half is not a flat wash with a
+   ball on it. */
+.lpArt::before {
+  content: '';
+  position: absolute;
+  inset: -12% -24% -12% -12%;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(52% 50% at 60% 50%, rgba(112, 74, 214, 0.3), transparent 72%);
+}
 .lpStage { position: relative; width: 100%; }
 /* Stacked, the canvas carries its own height and the caption sits under it, so
    the section ends just below the sphere instead of trailing a dark band. */
@@ -1625,34 +1666,41 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
 /* The caption is the other half of the arc — it says what the line means, and
    it comes and goes with it. It sits on a small raised card, the same panel
    the app deals its review cards on, so the words read as a card the deck
-   turned over rather than a string floating on the void. */
+   turned over rather than a string floating on the void. On the fixed screen
+   Globe.tsx parks it beside the truth pin and moves it with the drift, so the
+   words hang off the end of the line they explain. */
 .lpCap {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 9px;
+  display: inline-grid;
+  gap: 3px;
   margin-top: var(--s3);
-  max-width: 42ch;
-  padding: 10px 14px;
-  font: 400 var(--fs-3)/1.45 var(--sans);
-  color: var(--ink-2);
+  max-width: 32ch;
+  padding: 11px 15px 12px;
   background: var(--panel);
-  border: 1px solid var(--edge-soft);
+  border: 1px solid var(--edge);
   border-radius: var(--r-md);
-  box-shadow: var(--lift-sm);
+  box-shadow: var(--lift);
   pointer-events: none;
   opacity: 0;
-  transform: translateY(5px);
-  transition: opacity 0.42s var(--ease), transform 0.42s var(--ease);
+  transition: opacity 0.42s var(--ease);
 }
-.lpCap.on { opacity: 1; transform: none; }
-.lpCap::before {
-  content: '';
-  flex: none;
-  align-self: center;
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--lime);
+.lpCap.on { opacity: 1; }
+/* the scoreline: where the pin went, set back; where the round was, set
+   forward; the arrow between them is the arc in miniature */
+.lpCapPair {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 600 var(--fs-4)/1.2 var(--sans);
+  font-variation-settings: 'wdth' 96, 'wght' 640;
+  letter-spacing: -0.008em;
+  white-space: nowrap;
+}
+.lpCapGuess { color: var(--ink-3); }
+.lpCapPair i { font-style: normal; font-size: var(--fs-3); color: var(--lime); }
+.lpCapTruth { color: var(--ink); font-variation-settings: 'wdth' 96, 'wght' 720; }
+.lpCapClue {
+  font: 400 var(--fs-2)/1.4 var(--sans);
+  color: var(--ink-3);
 }
 
 /* --------------------------------------------------- one screen, no scroll */
@@ -1670,13 +1718,29 @@ a.wk:focus-visible { outline-offset: -2px; border-radius: var(--r-sm); }
   .lpArt { align-self: stretch; }
   .lpStage { height: 100%; }
   .lpGlobe { position: absolute; inset: 0; height: 100%; }
-  /* on the fixed screen the caption lies over the sphere, not under it */
+  /* on the fixed screen the caption lies over the sphere, where the pin is */
   .lpCap {
     position: absolute;
     left: 0;
-    bottom: clamp(28px, 6vh, 64px);
+    top: 0;
     margin-top: 0;
+    will-change: transform;
   }
+}
+
+/* A laptop with a toolbar: still one screen, but the column is drawn tighter
+   rather than sent to the stacked layout — every vertical spend above comes
+   down a step, and the headline takes its size from the height it has. */
+@media (min-width: 960px) and (min-height: 680px) and (max-height: 790px) {
+  .lpSay { padding: var(--s3) 0; }
+  .lpHead { font-size: clamp(34px, 6.6vh, 52px); }
+  .lpProb { margin-top: 12px; line-height: 1.42; }
+  .lpSol { line-height: 1.42; }
+  .lpStat { margin-top: 14px; }
+  .lpStatN { font-size: 30px; }
+  .lpDo { margin-top: 14px; }
+  .lpStep { padding: 10px 0; }
+  .lpFine { margin-top: 12px; }
 }
 
 @media (max-width: 620px) {

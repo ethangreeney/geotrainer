@@ -21,14 +21,15 @@ import Globe from './Globe'
 
 const ACTIONS = [
   {
-    n: '01',
+    n: '1',
     h: 'Install the userscript',
     cta: 'Get the script',
     to: '/start',
     p: 'Captures every round you play and rebuilds your map, weakest metas first.',
+    key: true,
   },
   {
-    n: '02',
+    n: '2',
     h: 'Connect the coach',
     cta: 'Set up the MCP',
     /* The setup for both lives on /start, but the four steps there are the
@@ -36,6 +37,9 @@ const ACTIONS = [
        browser extension, so it carries the anchor and /start scrolls to it. */
     to: '/start#mcp',
     p: 'A local MCP server that hands Claude the round you just missed.',
+    /* Optional and second, so it does not get the lit key: one lime button on
+       the screen, and it is the one that starts everything. */
+    key: false,
   },
 ]
 
@@ -54,7 +58,7 @@ export default function Landing() {
             Dashboard →
           </Link>
         )}
-        <Link to="/start" className="btn">
+        <Link to="/start" className="quiet">
           Get started <span className="arr">→</span>
         </Link>
       </Mast>
@@ -66,23 +70,29 @@ export default function Landing() {
             <p className="lpKick">Like Anki, but for Learnable Meta maps</p>
             <h1 className="lpHead">Stop practising what you already know.</h1>
             <p className="lpProb">
-              You start one of the Learnable Meta maps and learn a lot of it fast. Somewhere around two thirds in, it
-              stalls. The map keeps dealing metas you already know. The ones you actually get wrong barely come up, and
-              a few never have.
+              You start a Learnable Meta map and learn most of it fast. Then it stalls: the map keeps dealing metas
+              you already know, and the ones you get wrong barely come up.
             </p>
             <p className="lpSol">
               GeoCoach rebuilds your map after every game, so most rounds are metas you've been getting wrong, plus a
-              few new ones a day. When you do miss, a coach who watched the round tells you what you should have seen.
+              few new ones a day. When you miss, a coach who watched the round tells you what you should have seen.
+            </p>
+
+            <p className="lpStat">
+              <b className="lpStatN">
+                16% <i className="mono">→</i> 60%
+              </b>
+              <span className="lpStatP">first-sight recall by the third look, across 605 logged rounds</span>
             </p>
 
             <ol className="lpDo">
               {ACTIONS.map((a) => (
                 <li className="lpStep" key={a.n}>
-                  <span className="lpN mono" aria-hidden>
-                    {a.n} <i>/</i>
+                  <span className="lpN" aria-hidden>
+                    {a.n}
                   </span>
                   <h2 className="lpStepH">{a.h}</h2>
-                  <Link to={a.to} className="btn">
+                  <Link to={a.to} className={a.key ? 'btn' : 'btn ghost'}>
                     {a.cta} <span className="arr">→</span>
                   </Link>
                   <p className="lpStepP">{a.p}</p>
@@ -93,9 +103,6 @@ export default function Landing() {
             <p className="lpFine">
               <b>Free. Two minutes. No email.</b>
               <span>Not affiliated with GeoGuessr</span>
-            </p>
-            <p className="lpProof">
-              Across 605 logged rounds, first-sight recall climbed from 16% to 60% by the third look.
             </p>
           </div>
 
